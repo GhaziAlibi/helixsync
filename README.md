@@ -2,6 +2,7 @@
 
 [![Release](https://github.com/GhaziAlibi/helixsync/actions/workflows/release.yml/badge.svg)](https://github.com/GhaziAlibi/helixsync/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Chrome Web Store](https://img.shields.io/badge/Chrome_Web_Store-HelixSync-blue)](https://chromewebstore.google.com/detail/helixsync/pkklkldoippchkhpokglpolepbcbjdfk)
 
 **HelixSync** is a self-hosted, end-to-end encrypted sync server for your
 browser. It keeps bookmarks, history, and (optionally) open tabs/windows/tab
@@ -118,7 +119,9 @@ for details.
 Then:
 
 1. Open the web dashboard and register an account.
-2. Build and load the extension:
+2. Install the extension — either from the
+   [Chrome Web Store](https://chromewebstore.google.com/detail/helixsync/pkklkldoippchkhpokglpolepbcbjdfk),
+   or build it yourself:
 
    ```bash
    cd extension
