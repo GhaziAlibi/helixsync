@@ -24,6 +24,7 @@ fn test_config() -> Config {
         api_version: "v1".to_string(),
         tombstone_retention_secs: 60 * 60 * 24 * 30,
         compaction_interval_secs: 60 * 60,
+        inactive_device_compaction_grace_period_secs: 60 * 60 * 24 * 30,
     }
 }
 
@@ -33,6 +34,7 @@ fn server_for(pool: PgPool) -> TestServer {
         config: Arc::new(test_config()),
         rate_limiter: Arc::new(RateLimiter::new()),
         ws_registry: Arc::new(ConnectionRegistry::new()),
+        last_seen_cache: Arc::new(dashmap::DashMap::new()),
     };
     let config = TestServerConfig {
         transport: Some(Transport::HttpRandomPort),
@@ -110,4 +112,72 @@ async fn change_password_requires_correct_current_password(pool: PgPool) {
         .json(&json!({ "email": "harry@example.com", "password": "a brand new long password" }))
         .await;
     new_login.assert_status_ok();
+}
+
+async fn register_device(server: &TestServer, email: &str, name: &str) -> (String, String) {
+    let res = server
+        .post("/api/v1/devices/register")
+        .json(&json!({
+            "email": email,
+            "password": "correct horse battery staple",
+            "name": name
+        }))
+        .await;
+    res.assert_status_ok();
+    let body: serde_json::Value = res.json();
+    (
+        body["deviceId"].as_str().unwrap().to_string(),
+        body["refreshToken"].as_str().unwrap().to_string(),
+    )
+}
+
+/// SRV-PERF-6 regression: `/api/v1/devices/credentials/refresh` rotates the
+/// presented refresh token on every successful call (docs/security.md
+/// §1.2), so the original hash-only rate limit keyed on the presented
+/// token's hash was rebucketed fresh every call for a strictly-rotating
+/// sequence of tokens — a legitimate client faithfully following rotation
+/// (or an attacker replaying a leaked credential and always advancing to
+/// the newest token) could call this endpoint indefinitely without ever
+/// tripping the limit. Before the device-id-keyed second check was added,
+/// this exact loop would have gotten 200 OK on every single iteration, no
+/// matter how many, since a hash-keyed bucket alone can never fire against
+/// distinct, never-repeated tokens. With the fix, the device-id-keyed
+/// bucket (rotation-invariant) still accumulates across calls and must
+/// trip once `TOKEN_REFRESH_LIMIT`'s 30/60s limit is exceeded.
+#[sqlx::test(migrations = "./migrations")]
+async fn rapid_token_rotation_is_rate_limited_by_device_not_by_hash(pool: PgPool) {
+    let server = server_for(pool);
+
+    let register_res = server
+        .post("/api/v1/auth/register")
+        .json(&json!({ "email": "ivy@example.com", "password": "correct horse battery staple" }))
+        .await;
+    register_res.assert_status_ok();
+
+    let (_device_id, mut refresh_token) =
+        register_device(&server, "ivy@example.com", "Laptop").await;
+
+    let mut hit_rate_limit = false;
+    for _ in 0..40 {
+        let res = server
+            .post("/api/v1/devices/credentials/refresh")
+            .json(&json!({ "refreshToken": refresh_token }))
+            .await;
+
+        if res.status_code() == axum::http::StatusCode::TOO_MANY_REQUESTS {
+            hit_rate_limit = true;
+            break;
+        }
+
+        res.assert_status_ok();
+        let body: serde_json::Value = res.json();
+        refresh_token = body["refreshToken"].as_str().unwrap().to_string();
+    }
+
+    assert!(
+        hit_rate_limit,
+        "expected a 429 before exhausting the loop: a strictly-rotating \
+         sequence of refresh calls against one device must eventually hit \
+         the device-id-keyed rate limit"
+    );
 }

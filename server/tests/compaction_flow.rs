@@ -5,6 +5,7 @@ use helixsync_server::config::Config;
 use helixsync_server::middleware::rate_limit::RateLimiter;
 use helixsync_server::state::AppState;
 use helixsync_server::sync::compaction;
+use helixsync_server::sync::model::SnapshotObject;
 use helixsync_server::websocket::ConnectionRegistry;
 use serde_json::json;
 use sqlx::PgPool;
@@ -29,6 +30,10 @@ fn test_config() -> Config {
         // need a real wall-clock wait to become compactable.
         tombstone_retention_secs: 0,
         compaction_interval_secs: 60 * 60,
+        // Every device across these tests is registered and used within the
+        // same test run, so the real 30-day default never age anything out
+        // by accident.
+        inactive_device_compaction_grace_period_secs: 60 * 60 * 24 * 30,
     }
 }
 
@@ -38,6 +43,7 @@ fn state_for(pool: PgPool) -> AppState {
         config: Arc::new(test_config()),
         rate_limiter: Arc::new(RateLimiter::new()),
         ws_registry: Arc::new(ConnectionRegistry::new()),
+        last_seen_cache: Arc::new(dashmap::DashMap::new()),
     }
 }
 
@@ -49,6 +55,19 @@ fn state_with_tombstone_retention(pool: PgPool, retention_secs: i64) -> AppState
         config: Arc::new(config),
         rate_limiter: Arc::new(RateLimiter::new()),
         ws_registry: Arc::new(ConnectionRegistry::new()),
+        last_seen_cache: Arc::new(dashmap::DashMap::new()),
+    }
+}
+
+fn state_with_inactive_device_grace_period(pool: PgPool, grace_period_secs: i64) -> AppState {
+    let mut config = test_config();
+    config.inactive_device_compaction_grace_period_secs = grace_period_secs;
+    AppState {
+        db: pool,
+        config: Arc::new(config),
+        rate_limiter: Arc::new(RateLimiter::new()),
+        ws_registry: Arc::new(ConnectionRegistry::new()),
+        last_seen_cache: Arc::new(dashmap::DashMap::new()),
     }
 }
 
@@ -545,4 +564,129 @@ async fn edit_after_compaction_is_accepted_not_rejected(pool: PgPool) {
         "the rename must not be rejected: {body}"
     );
     assert_eq!(body["accepted"].as_array().unwrap().len(), 1);
+}
+
+/// Regression coverage for SRV-PERF-1: an abandoned device (old phone,
+/// uninstalled extension, a work browser never explicitly revoked) that
+/// never acknowledges anything used to pin `ack_boundary` at 0 forever,
+/// since `compact_user`'s boundary query only excluded *revoked* devices,
+/// not merely stale ones. `compaction_waits_for_every_active_device_to_acknowledge`
+/// (above) proves a never-synced device correctly blocks compaction *within*
+/// its grace period; this proves it stops blocking once it's aged past that
+/// grace period, exactly as docs/protocol.md §11 anticipates via the
+/// `cursor_too_old` snapshot-resync fallback for any device that reconnects
+/// after falling behind.
+#[sqlx::test(migrations = "./migrations")]
+async fn stale_never_revoked_device_ages_out_of_compaction_boundary(pool: PgPool) {
+    // A short grace period so the test doesn't need to wait a real 30 days
+    // — just push the stale device's timestamps further into the past than
+    // this.
+    let state = state_with_inactive_device_grace_period(pool.clone(), 60);
+    let server = server_for_state(state.clone());
+
+    register_and_login(&server, "gale@example.com").await;
+    let (_device_a, token_a) = register_device(&server, "gale@example.com", "Laptop").await;
+    // Device B is registered and never syncs, mirroring an abandoned old
+    // phone/uninstalled extension that the user never bothered to revoke
+    // from the dashboard.
+    let (device_b, _token_b) = register_device(&server, "gale@example.com", "Phone").await;
+
+    let object_id = Uuid::now_v7();
+    upload(&server, &token_a, bookmark_op(Uuid::now_v7(), object_id, 1, 1, "Example")).await;
+
+    // Device A acknowledges past the only operation; device B never does.
+    sync_device(&server, &token_a).await;
+
+    let user_id = user_id_for_email(&pool, "gale@example.com").await;
+    assert_eq!(count_operations(&pool, user_id).await, 1);
+
+    // Age device B's `created_at` (and `last_seen_at`, covering the "synced
+    // once then went dark" variant too) well past the grace period, exactly
+    // like `revoked_device_never_blocks_compaction` directly UPDATEs
+    // `devices.revoked_at` via raw SQL rather than through any API route
+    // (there isn't one for backdating timestamps).
+    sqlx::query(
+        "UPDATE devices SET created_at = now() - INTERVAL '1 hour', last_seen_at = now() - INTERVAL '1 hour' \
+         WHERE id = $1::uuid",
+    )
+    .bind(&device_b)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    compaction::run_once(&state).await.unwrap();
+
+    // Now that device B is stale beyond the grace period, it no longer
+    // blocks compaction — the boundary is based on device A alone, so
+    // everything up to A's ack cursor is compacted into a snapshot, same
+    // outcome as a revoked device.
+    assert_eq!(count_operations(&pool, user_id).await, 0);
+    assert_eq!(count_snapshots(&pool, user_id).await, 1);
+
+    let snapshot_cursor: i64 = sqlx::query_scalar!(
+        "SELECT snapshot_cursor FROM sync_snapshots WHERE user_id = $1",
+        user_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(snapshot_cursor, 1);
+}
+
+/// Regression coverage for SRV-PERF-8's backward-compatibility fallback:
+/// migration `0008_compress_sync_snapshots.sql` converted every
+/// *pre-existing* `sync_snapshots.data` row from JSONB to plain
+/// UTF8-encoded JSON text bytes (BYTEA) — it could not gzip them, since a
+/// raw SQL migration can't invoke the application's compressor. Only rows
+/// written by `sync::compaction` *after* this deploys are actually
+/// gzip-compressed via `compress_snapshot_data`. So
+/// `sync::routes::decompress_snapshot_data` must transparently fall back
+/// to plain UTF8 JSON parsing whenever gzip-decoding fails. This directly
+/// exercises that fallback path: a `sync_snapshots` row is inserted by raw
+/// SQL with uncompressed JSON bytes (mirroring a row left over from before
+/// this migration), and the `/snapshot` route must still return its
+/// contents correctly.
+#[sqlx::test(migrations = "./migrations")]
+async fn snapshot_route_falls_back_to_uncompressed_legacy_data(pool: PgPool) {
+    let state = state_for(pool.clone());
+    let server = server_for_state(state.clone());
+
+    register_and_login(&server, "iris@example.com").await;
+    let (_device_a, token_a) = register_device(&server, "iris@example.com", "Laptop").await;
+
+    let user_id = user_id_for_email(&pool, "iris@example.com").await;
+
+    let object_id = Uuid::now_v7();
+    let legacy_objects = vec![SnapshotObject {
+        object_type: "bookmark".to_string(),
+        object_id,
+        operation_type: "create".to_string(),
+        encryption_version: 0,
+        payload: json!({ "title": "Legacy bookmark", "url": "https://example.com", "parent": null, "position": "a0" }),
+    }];
+    // Deliberately NOT gzip-compressed — this is exactly the format
+    // migration 0008 leaves pre-existing rows in.
+    let legacy_bytes = serde_json::to_vec(&legacy_objects).unwrap();
+
+    sqlx::query(
+        "INSERT INTO sync_snapshots (user_id, snapshot_cursor, encryption_version, data) VALUES ($1, $2, 0, $3)",
+    )
+    .bind(user_id)
+    .bind(1i64)
+    .bind(&legacy_bytes)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let snapshot_res = server
+        .get("/api/v1/sync/snapshot")
+        .authorization_bearer(&token_a)
+        .await;
+    snapshot_res.assert_status_ok();
+    let snapshot: serde_json::Value = snapshot_res.json();
+    let objects = snapshot["objects"].as_array().unwrap();
+    assert_eq!(objects.len(), 1, "legacy uncompressed row must still be readable: {snapshot}");
+    assert_eq!(objects[0]["objectId"], json!(object_id));
+    assert_eq!(objects[0]["payload"]["title"], json!("Legacy bookmark"));
+    assert_eq!(snapshot["snapshotCursor"].as_i64().unwrap(), 1);
 }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum_test::{TestServer, TestServerConfig, Transport};
+use chrono::{DateTime, Utc};
 use helixsync_server::config::Config;
 use helixsync_server::middleware::rate_limit::RateLimiter;
 use helixsync_server::state::AppState;
@@ -26,6 +27,7 @@ fn test_config() -> Config {
         api_version: "v1".to_string(),
         tombstone_retention_secs: 60 * 60 * 24 * 30,
         compaction_interval_secs: 60 * 60,
+        inactive_device_compaction_grace_period_secs: 60 * 60 * 24 * 30,
     }
 }
 
@@ -35,6 +37,7 @@ fn state_for_config(pool: PgPool, config: Config) -> AppState {
         config: Arc::new(config),
         rate_limiter: Arc::new(RateLimiter::new()),
         ws_registry: Arc::new(ConnectionRegistry::new()),
+        last_seen_cache: Arc::new(dashmap::DashMap::new()),
     }
 }
 
@@ -909,4 +912,131 @@ async fn compaction_reconciles_stats_after_snapshot(pool: PgPool) {
     assert_eq!(stats["bookmarks"], json!(1));
     assert_eq!(stats["historyVisits"], json!(1));
     assert_eq!(stats["tabs"], json!(1));
+}
+
+// --- SRV-PERF-7 regression: `download`'s per-device cursor upsert must not
+// write (or 500) on an idle poll whose cursor hasn't advanced ---
+
+/// Direct read of `sync_cursors.updated_at` for a given device's ack-cursor
+/// row, bypassing the HTTP layer entirely (mirrors `user_id_for_email`/
+/// `sync_stats_row` above) — needed to prove the write was actually skipped,
+/// not just that the route returned 200.
+async fn cursor_updated_at(pool: &PgPool, user_id: Uuid, device_id: Uuid) -> DateTime<Utc> {
+    sqlx::query_scalar!(
+        "SELECT updated_at FROM sync_cursors WHERE user_id = $1 AND device_id = $2",
+        user_id,
+        device_id
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// SRV-PERF-7: `download`'s cursor upsert used to run unconditionally on
+/// every `/changes` call, meaning an idle device polling with an
+/// already-caught-up cursor still produced a real row UPDATE (dead tuple,
+/// WAL entry, `updated_at` bumped) forever. The fix guards the `DO UPDATE`
+/// with `WHERE sync_cursors.cursor_value < EXCLUDED.cursor_value`, which has
+/// its own trap: when that guard is false, `RETURNING` from the `upsert` CTE
+/// produces zero rows, and the original `FROM bounds, upsert` (an implicit
+/// inner join) would then make the whole query return zero rows, failing
+/// `.fetch_one` with `RowNotFound` on every idle poll. This test exercises
+/// both: repeating the same cursor must still return 200 (not 500) *and*
+/// must leave `updated_at` unchanged, while a subsequent poll that actually
+/// advances the cursor must update it.
+#[sqlx::test(migrations = "./migrations")]
+async fn idle_poll_with_unchanged_cursor_skips_cursor_write(pool: PgPool) {
+    let server = server_for(pool.clone());
+    register_and_login(&server, "tara@example.com").await;
+    let (device_id, access_token) = register_device(&server, "tara@example.com", "Laptop").await;
+    let device_id = Uuid::parse_str(&device_id).unwrap();
+
+    let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
+    server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&access_token)
+        .json(&json!({ "operations": [op] }))
+        .await
+        .assert_status_ok();
+
+    // Initial download establishes the device's first ack-cursor row.
+    let download_res = server
+        .get("/api/v1/sync/changes?cursor=0")
+        .authorization_bearer(&access_token)
+        .await;
+    download_res.assert_status_ok();
+    let body: serde_json::Value = download_res.json();
+    let cursor = body["nextCursor"].as_i64().unwrap();
+
+    let user_id = user_id_for_email(&pool, "tara@example.com").await;
+
+    // A second poll with the exact same (already-caught-up) cursor must
+    // still return 200 — this is the critical regression check, since a
+    // naive fix without the `LEFT JOIN` restructuring would 500 here.
+    let idle_res = server
+        .get(&format!("/api/v1/sync/changes?cursor={cursor}"))
+        .authorization_bearer(&access_token)
+        .await;
+    idle_res.assert_status_ok();
+
+    let updated_at_after_first_idle_poll = cursor_updated_at(&pool, user_id, device_id).await;
+
+    // A short real wait so two `now()` reads can't coincidentally match
+    // (sub-millisecond resolution) even if the guard failed to skip the write.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    // A third poll, still with the same unchanged cursor, must leave
+    // `updated_at` untouched — proving the write was actually skipped, not
+    // merely that the route didn't crash.
+    let idle_res2 = server
+        .get(&format!("/api/v1/sync/changes?cursor={cursor}"))
+        .authorization_bearer(&access_token)
+        .await;
+    idle_res2.assert_status_ok();
+    let updated_at_after_second_idle_poll = cursor_updated_at(&pool, user_id, device_id).await;
+    assert_eq!(
+        updated_at_after_first_idle_poll, updated_at_after_second_idle_poll,
+        "an idle poll with an unchanged cursor must not touch sync_cursors.updated_at"
+    );
+
+    // Now advance the cursor for real (upload another op) and poll again —
+    // this time `updated_at` must change, proving the guard only blocks
+    // no-op writes, not real cursor advancement.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let op2 = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 2, 2);
+    server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&access_token)
+        .json(&json!({ "operations": [op2] }))
+        .await
+        .assert_status_ok();
+
+    // The device's stored ack-cursor is the *incoming* `cursor` query param
+    // of a request, not a `nextCursor` a response merely reports — so
+    // fetching the new op with the still-stale `cursor` doesn't by itself
+    // write anything new (same as the idle polls above). Only once the
+    // device turns around and reports the fresh `nextCursor` on a
+    // subsequent request does the stored cursor actually advance — this
+    // mirrors real client behavior (and `sync_device` elsewhere in this
+    // suite): learn the new cursor from one poll, then ack it on the next.
+    let advancing_res = server
+        .get(&format!("/api/v1/sync/changes?cursor={cursor}"))
+        .authorization_bearer(&access_token)
+        .await;
+    advancing_res.assert_status_ok();
+    let advancing_body: serde_json::Value = advancing_res.json();
+    let new_cursor = advancing_body["nextCursor"].as_i64().unwrap();
+    assert!(new_cursor > cursor, "the second upload must advance the cursor");
+
+    let ack_res = server
+        .get(&format!("/api/v1/sync/changes?cursor={new_cursor}"))
+        .authorization_bearer(&access_token)
+        .await;
+    ack_res.assert_status_ok();
+
+    let updated_at_after_real_advance = cursor_updated_at(&pool, user_id, device_id).await;
+    assert!(
+        updated_at_after_real_advance > updated_at_after_second_idle_poll,
+        "a poll that actually acks a higher cursor must update sync_cursors.updated_at"
+    );
 }

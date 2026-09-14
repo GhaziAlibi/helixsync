@@ -51,29 +51,58 @@ async function buildApiError(res: Response, fallbackMessage: string): Promise<Ap
  * "needs re-authentication" state per docs/protocol.md §15.6. */
 export class ReauthRequiredError extends Error {}
 
+// The server rotates refresh tokens on every use (docs/security.md §1.2):
+// presenting one immediately revokes it and issues a new one. `authedFetch`
+// is called independently from many places (upload, download, snapshot,
+// listDevices, fetchSettings, updateSettings), so it's common for several
+// calls to hit a 401 around the same time and each reach for
+// `refreshAccessToken` with what they think is the current refresh token.
+// Without coordination, the first request to land rotates the token server
+// side; every other concurrent request is still holding the now-stale token
+// it read earlier and gets rejected, incorrectly bouncing the whole
+// extension into `needs_reauth`. Memoizing the in-flight promise here
+// ensures only one refresh request is ever in the air at a time and that
+// `device.refreshToken` is read exactly once per rotation, with every
+// concurrent caller sharing that single outcome instead of racing the
+// server with duplicate, mutually-invalidating tokens.
+let activeRefreshPromise: Promise<string> | null = null;
+
 async function refreshAccessToken(serverUrl: string): Promise<string> {
-  const device = await getDevice();
-  if (!device) throw new ReauthRequiredError("no device registered");
+  if (activeRefreshPromise) return activeRefreshPromise;
 
-  const res = await fetch(`${serverUrl}/api/v1/devices/credentials/refresh`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refreshToken: device.refreshToken }),
-  });
+  activeRefreshPromise = (async () => {
+    try {
+      const device = await getDevice();
+      if (!device) throw new ReauthRequiredError("no device registered");
 
-  if (!res.ok) {
-    throw new ReauthRequiredError(`refresh failed with status ${res.status}`);
-  }
+      const res = await fetch(`${serverUrl}/api/v1/devices/credentials/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refreshToken: device.refreshToken }),
+      });
 
-  const body = await res.json();
-  const updated = {
-    ...device,
-    accessToken: body.accessToken as string,
-    refreshToken: body.refreshToken as string,
-    accessTokenExpiresAt: body.accessTokenExpiresAt as string,
-  };
-  await putDevice(updated);
-  return updated.accessToken;
+      if (!res.ok) {
+        throw new ReauthRequiredError(`refresh failed with status ${res.status}`);
+      }
+
+      const body = await res.json();
+      const updated = {
+        ...device,
+        accessToken: body.accessToken as string,
+        refreshToken: body.refreshToken as string,
+        accessTokenExpiresAt: body.accessTokenExpiresAt as string,
+      };
+      await putDevice(updated);
+      return updated.accessToken;
+    } finally {
+      // Cleared whether the refresh succeeded or threw, so a genuinely
+      // failed refresh (e.g. an actually-revoked device) doesn't wedge
+      // every subsequent call behind one rejected promise forever.
+      activeRefreshPromise = null;
+    }
+  })();
+
+  return activeRefreshPromise;
 }
 
 /** docs/protocol.md §13/§40: advertised on every device-authenticated
@@ -254,18 +283,42 @@ export async function invalidateSettingsCache(): Promise<void> {
   await writeSettingsCache(undefined);
 }
 
+// Once the cache above expires, every independent caller (restorePolicy per
+// tab/window/group op, updateBadge, the popup) reads the same stale entry
+// and, without coordination, would each kick off its own GET to
+// `/api/v1/sync/settings` before any of them has written the refreshed
+// cache back — a burst that can blow through this route's own
+// `SYNC_SETTINGS_LIMIT` rate limit on a single download batch and turn into
+// spurious 429s (which restorePolicy fails closed on). Memoizing the
+// in-flight promise here ensures only one refresh is ever in the air past
+// TTL expiry, with every concurrent caller sharing that single outcome
+// instead of racing the server with duplicate requests.
+let inFlightSettingsPromise: Promise<UserSettingsDto> | null = null;
+
 export async function fetchSettings(): Promise<UserSettingsDto> {
   const cached = await readSettingsCache();
   if (cached && Date.now() < cached.expiresAt) {
     return cached.value;
   }
-  const res = await authedFetch("/api/v1/sync/settings");
-  if (!res.ok) {
-    throw await buildApiError(res, `failed to fetch settings (${res.status})`);
-  }
-  const settings: UserSettingsDto = await res.json();
-  await writeSettingsCache({ value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS });
-  return settings;
+  if (inFlightSettingsPromise) return inFlightSettingsPromise;
+
+  inFlightSettingsPromise = (async () => {
+    try {
+      const res = await authedFetch("/api/v1/sync/settings");
+      if (!res.ok) {
+        throw await buildApiError(res, `failed to fetch settings (${res.status})`);
+      }
+      const settings: UserSettingsDto = await res.json();
+      await writeSettingsCache({ value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS });
+      return settings;
+    } finally {
+      // Cleared whether the fetch succeeded or threw, so a genuinely failed
+      // fetch doesn't wedge every subsequent call behind one rejected
+      // promise forever.
+      inFlightSettingsPromise = null;
+    }
+  })();
+  return inFlightSettingsPromise;
 }
 
 export type UpdateSettingsRequest = Partial<

@@ -22,8 +22,10 @@ import {
   pruneAppliedOperations,
   pruneConflicts,
   pruneRemoteObjectsByType,
+  resetInFlightOperations,
 } from "../storage/db";
 import { getPendingCount, onStatusChange, runSyncCycle, type SyncStatus } from "../sync/engine";
+import { flushAllMicroBatchQueues } from "../sync/micro-batch";
 import type { ObjectType } from "../sync/types";
 import { backfillExisting as backfillBookmarks, registerCapture as registerBookmarkCapture } from "../bookmarks";
 import { backfillExisting as backfillHistory, registerCapture as registerHistoryCapture } from "../history";
@@ -182,6 +184,15 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
+// Best-effort last-chance flush of buffered bookmark/history/tab capture
+// events right before Chrome tears down this service worker — see
+// flushAllMicroBatchQueues's doc comment (sync/micro-batch.ts) for why this
+// is a real improvement but not a guarantee (onSuspend's own processing-time
+// limits).
+chrome.runtime.onSuspend.addListener(() => {
+  flushAllMicroBatchQueues();
+});
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   (async () => {
     switch (message?.type) {
@@ -236,6 +247,19 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   });
   return true; // keep the message channel open for the async response
 });
+
+// A service-worker restart means any `fetch` that was genuinely in flight
+// when it died is now dead — there is no way for a pending_operations
+// record to still legitimately be UPLOAD_IN_FLIGHT across a restart
+// boundary, so resetting them all to LOCAL_QUEUED here is always safe
+// unconditionally, on every startup. Kicked off immediately and
+// independently of ensureCryptoReady's chain (it's pure IndexedDB, no
+// crypto dependency) so it runs as early as possible — before
+// uploadPending's first cycle could otherwise see stale in-flight rows
+// left behind by a crash mid-upload.
+resetInFlightOperations().catch((e) =>
+  console.error("HelixSync: failed to reset in-flight operations", e),
+);
 
 ensureCryptoReady()
   .then(initializeCaptureForSettings)

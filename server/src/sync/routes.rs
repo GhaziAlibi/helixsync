@@ -633,14 +633,36 @@ async fn download(
 
     // Combines what used to be 3 separate round trips (MIN(server_cursor),
     // MAX(snapshot_cursor), and the cursor upsert) into 1, via a
-    // data-modifying CTE. The upsert runs unconditionally, even on a
-    // request that turns out to be `cursor_too_old` below — recording the
-    // device's self-reported cursor is always an accurate, monotonically
-    // safe fact about its own claimed progress (via the `GREATEST` in the
-    // `DO UPDATE`) regardless of whether *this* request also happens to
-    // reject it, and a device told to resync via snapshot anchors its next
-    // read at the fresh snapshot cursor anyway, never depending on this
-    // value again.
+    // data-modifying CTE. Recording the device's self-reported cursor is
+    // always an accurate, monotonically safe fact about its own claimed
+    // progress regardless of whether *this* request also happens to reject
+    // it as `cursor_too_old` below, and a device told to resync via
+    // snapshot anchors its next read at the fresh snapshot cursor anyway,
+    // never depending on this value again. Monotonic safety was never about
+    // *needing* to write on every call though — only about never writing
+    // something smaller — so the `WHERE sync_cursors.cursor_value <
+    // EXCLUDED.cursor_value` guard skips the write entirely when the
+    // device's cursor hasn't advanced since its last poll (the common idle
+    // case for periodic pollers), avoiding a dead-tuple UPDATE and a
+    // pointless `updated_at` bump on every poll forever.
+    //
+    // That guard has a consequence for how the surrounding query must be
+    // shaped: per Postgres semantics, when the `WHERE` condition is false
+    // for a conflicting row, `DO UPDATE` behaves like `DO NOTHING` for that
+    // row and `RETURNING` produces zero rows for it — i.e. the `upsert` CTE
+    // itself yields zero rows on exactly the common "cursor unchanged"
+    // case this guard targets. `FROM bounds, upsert` would be an implicit
+    // inner/cross join, so a zero-row `upsert` would make the whole
+    // `SELECT` return zero rows and `.fetch_one` would fail with
+    // `RowNotFound` on every idle poll. `FROM bounds LEFT JOIN upsert ON
+    // true` avoids this: `bounds` is a plain aggregate CTE that always
+    // produces exactly one row, so the left join always yields exactly one
+    // output row regardless of whether `upsert`'s conflict-resolution
+    // fired. We only ever select `bounds.min_cursor, bounds.max_snapshot`
+    // (never anything from `upsert`), so the left join's NULL-on-no-match
+    // behavior for `upsert`'s side is irrelevant to the result. Do not
+    // "simplify" this back to `FROM bounds, upsert` — that reintroduces the
+    // `RowNotFound` bug on the idle-poll path.
     let bounds = sqlx::query!(
         r#"
         WITH bounds AS (
@@ -652,11 +674,13 @@ async fn download(
             INSERT INTO sync_cursors (user_id, device_id, cursor_value)
             VALUES ($1, $2, $3)
             ON CONFLICT (user_id, device_id)
-            DO UPDATE SET cursor_value = GREATEST(sync_cursors.cursor_value, EXCLUDED.cursor_value), updated_at = now()
+            DO UPDATE SET cursor_value = EXCLUDED.cursor_value, updated_at = now()
+            WHERE sync_cursors.cursor_value < EXCLUDED.cursor_value
             RETURNING 1 AS ok
         )
         SELECT bounds.min_cursor, bounds.max_snapshot
-        FROM bounds, upsert
+        FROM bounds
+        LEFT JOIN upsert ON true
         "#,
         device.user_id,
         device.device_id,
@@ -848,6 +872,63 @@ pub(super) async fn history_retention_cutoff(
     Ok(Some(Utc::now() - chrono::Duration::days(days)))
 }
 
+/// Serializes an object list the same way it's always been serialized
+/// (`serde_json::to_vec`) and then gzip-compresses the result before it's
+/// persisted into a `sync_snapshots` row (SRV-PERF-8) — for a large
+/// account this is what keeps both the on-disk/TOAST size and the bytes
+/// actually shipped over the wire on a `/snapshot` read a fraction of the
+/// raw JSON size, instead of Postgres de-TOASTing (and this process
+/// holding in memory) the full 30-50MB document on every compaction pass.
+/// `Compression::default()` is a reasonable, well-documented middle
+/// ground between compression ratio and CPU cost; there's no
+/// account-observed reason yet to hand-tune it further.
+pub(super) fn compress_snapshot_data(objects: &[SnapshotObject]) -> AppResult<Vec<u8>> {
+    use std::io::Write;
+
+    let json = serde_json::to_vec(objects).map_err(anyhow::Error::from)?;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&json).map_err(anyhow::Error::from)?;
+    Ok(encoder.finish().map_err(anyhow::Error::from)?)
+}
+
+/// Inverse of [`compress_snapshot_data`]. Must handle two on-disk formats
+/// (SRV-PERF-8): migration `0008_compress_sync_snapshots.sql` converted
+/// every *existing* `sync_snapshots.data` row from JSONB to BYTEA by
+/// taking its plain UTF8 JSON text bytes — it could not gzip them, since a
+/// raw SQL migration has no way to invoke the application's compressor.
+/// Every row `sync::compaction` writes *after* this deploys, on the other
+/// hand, is gzip-compressed via `compress_snapshot_data` above. So a row
+/// read here could legitimately be either format, and there is no schema
+/// flag distinguishing them.
+///
+/// The two are told apart by simply trying gzip first: a gzip stream
+/// always starts with the 2-byte magic header `0x1f 0x8b`, while a plain
+/// JSON-text row always starts with `{` or `[` (`0x7b`/`0x5b`) — nothing
+/// else `serde_json::to_vec` ever emits as the first byte of an object
+/// list. Those byte ranges never overlap, so a plain-JSON row reliably
+/// fails gzip decoding immediately (bad header) rather than silently
+/// decoding as garbage, and falling back to UTF8 JSON parsing on that
+/// failure is always correct. A future cleanup could force a recompaction
+/// pass for every account (which naturally rewrites every row through
+/// `compress_snapshot_data`) and then delete this fallback entirely, but
+/// that's out of scope here.
+pub(super) fn decompress_snapshot_data(bytes: &[u8]) -> AppResult<Vec<SnapshotObject>> {
+    use std::io::Read;
+
+    let mut decoder = flate2::read::GzDecoder::new(bytes);
+    let mut json = Vec::new();
+    let parsed: Vec<SnapshotObject> = match decoder.read_to_end(&mut json) {
+        Ok(_) => serde_json::from_slice(&json).map_err(anyhow::Error::from)?,
+        Err(_) => {
+            // Not a gzip stream (or a truncated/corrupt one) — fall back to
+            // treating the bytes as plain UTF8 JSON, the pre-migration
+            // format. See the doc comment above for why this is safe.
+            serde_json::from_slice(bytes).map_err(anyhow::Error::from)?
+        }
+    };
+    Ok(parsed)
+}
+
 /// Computes the merged current state of every object as of `ceiling` (or
 /// "now" when `None`), reusing the latest persisted `sync_snapshots` row
 /// at or below the ceiling as a base and layering newer operations on top
@@ -872,7 +953,7 @@ pub(super) async fn compute_objects(
     ceiling: Option<i64>,
     history_cutoff: Option<DateTime<Utc>>,
 ) -> AppResult<(i64, HashMap<(String, Uuid), SnapshotObject>)> {
-    let base_row: Option<(i64, serde_json::Value)> = match ceiling {
+    let base_row: Option<(i64, Vec<u8>)> = match ceiling {
         Some(c) => sqlx::query!(
             "SELECT snapshot_cursor, data FROM sync_snapshots \
              WHERE user_id = $1 AND snapshot_cursor <= $2 ORDER BY snapshot_cursor DESC LIMIT 1",
@@ -894,7 +975,7 @@ pub(super) async fn compute_objects(
 
     let (base_cursor, mut objects): (i64, HashMap<(String, Uuid), SnapshotObject>) = match base_row {
         Some((cursor, data)) => {
-            let parsed: Vec<SnapshotObject> = serde_json::from_value(data).map_err(anyhow::Error::from)?;
+            let parsed: Vec<SnapshotObject> = decompress_snapshot_data(&data)?;
             let map = parsed
                 .into_iter()
                 .map(|o| ((o.object_type.clone(), o.object_id), o))

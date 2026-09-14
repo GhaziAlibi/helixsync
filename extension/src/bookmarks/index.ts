@@ -679,6 +679,26 @@ async function applyMove(
   // per sibling, so a folder with N items cost up to 2N transactions on
   // every single move within it. Both lookups are now one batch each,
   // regardless of N.
+  //
+  // The chrome.bookmarks.getChildren call itself is NOT similarly
+  // cacheable/batchable across a run of consecutive moves into the same
+  // folder (e.g. a whole folder reordered on another device, arriving here
+  // as one "move" op per item) — evaluated and rejected, not an oversight.
+  // chrome.bookmarks.move(chromiumId, { index }) below mutates Chrome's own
+  // live child ordering as a side effect, so the very next move's correct
+  // target index depends on that mutated state; caching the sibling list
+  // instead of re-fetching would mean simulating Chrome's reordering in
+  // memory rather than asking Chrome directly. That's only safe if the
+  // simulated cache is invalidated on every actual mutation to the folder —
+  // not just this function's own moves, but also `materialize`'s creates,
+  // `applyDelete`'s removals, and genuine concurrent local edits (drag-and-
+  // drop etc., captured by `registerCapture`'s listeners below), which can
+  // land in the multiple event-loop turns this function and its callers
+  // (`applyOneRemote`/`applySnapshot` in sync/engine.ts) await through
+  // between processing one op and the next. A stale simulated cache would
+  // silently reorder bookmarks wrong — a correctness bug worse than the
+  // performance cost being weighed here — so this stays a live per-move
+  // getChildren call.
   const siblings = await chrome.bookmarks.getChildren(parentChromiumId);
   const siblingChromiumIds = siblings.filter((s) => s.id !== chromiumId).map((s) => s.id);
   const mappingBySiblingId = await getMappingsByLocalIds(MAP_TYPE, siblingChromiumIds);

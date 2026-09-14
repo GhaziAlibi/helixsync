@@ -18,7 +18,9 @@ use uuid::Uuid;
 use crate::error::AppResult;
 use crate::state::AppState;
 
-use super::routes::{compute_objects, filter_tombstoned, history_retention_cutoff};
+use super::routes::{
+    compress_snapshot_data, compute_objects, filter_tombstoned, history_retention_cutoff,
+};
 use super::vocabulary;
 
 /// Spawns the periodic compaction task for the lifetime of the process.
@@ -110,14 +112,37 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
     // `sync_cursors(user_id, device_id)` (from its `uq_sync_cursors_user_device`
     // unique constraint) for this join, instead of falling back to a full
     // sequential scan of `sync_cursors` on every user, every compaction pass.
+    //
+    // `AND COALESCE(d.last_seen_at, d.created_at) > $2` additionally drops a
+    // device from the boundary computation once it's been inactive longer
+    // than `inactive_device_compaction_grace_period_secs` (SRV-PERF-1):
+    // without this, a device the user simply abandoned (old phone,
+    // uninstalled extension, a work browser never explicitly revoked from
+    // the dashboard) permanently pins the boundary at whatever it last
+    // acknowledged — or at 0, if it never synced at all — and
+    // `sync_operations` grows unboundedly forever. `last_seen_at` is only
+    // ever set by `touch_last_seen`/`touch_last_seen_background`
+    // (`devices::routes`), which run exclusively from authenticated sync
+    // requests, so it's NULL both for a device that's never made a single
+    // request since registration *and* for one that just registered a
+    // moment ago — `COALESCE(last_seen_at, created_at)` is required (rather
+    // than `last_seen_at` alone) so the freshly-registered case ages from
+    // its `created_at` instead of being immediately treated as infinitely
+    // stale; a device that synced once and then went dark still ages
+    // correctly off its real `last_seen_at`.
+    let inactive_device_cutoff =
+        Utc::now() - chrono::Duration::seconds(state.config.inactive_device_compaction_grace_period_secs);
+
     let ack_boundary: Option<i64> = sqlx::query_scalar!(
         r#"
         SELECT MIN(COALESCE(sc.cursor_value, 0))
         FROM devices d
         LEFT JOIN sync_cursors sc ON sc.user_id = d.user_id AND sc.device_id = d.id
         WHERE d.user_id = $1 AND d.revoked_at IS NULL
+          AND COALESCE(d.last_seen_at, d.created_at) > $2
         "#,
-        user_id
+        user_id,
+        inactive_device_cutoff
     )
     .fetch_one(&mut *tx)
     .await?;
@@ -129,8 +154,12 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
     .fetch_one(&mut *tx)
     .await?;
 
-    // No active devices at all: nothing needs the raw log anymore, so it's
-    // safe to compact everything that exists so far.
+    // No rows matched the query above: either this user has no active
+    // devices at all, or every active device is now past the staleness
+    // cutoff. Either way, nothing left that could still incrementally sync
+    // needs the raw log, so it's safe to compact everything that exists so
+    // far — same fallback as before this device-staleness exclusion was
+    // added, just covering one more reason the device set can come up empty.
     let ack_boundary = ack_boundary.unwrap_or(max_op_cursor);
 
     if ack_boundary <= 0 {
@@ -208,7 +237,7 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
         .collect();
 
         let objects = filter_tombstoned(objects_map, &tombstone_ids);
-        let data = serde_json::to_value(&objects).map_err(anyhow::Error::from)?;
+        let data = compress_snapshot_data(&objects)?;
 
         sqlx::query!(
             "INSERT INTO sync_snapshots (user_id, snapshot_cursor, encryption_version, data) VALUES ($1, $2, 0, $3)",

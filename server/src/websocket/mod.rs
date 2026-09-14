@@ -1,7 +1,10 @@
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use dashmap::DashMap;
 use serde::Serialize;
@@ -9,19 +12,26 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::middleware::rate_limit::{enforce_with_retry_after, WEBSOCKET_CONNECT_LIMIT};
+use crate::middleware::client_ip::client_ip;
+use crate::middleware::rate_limit::{
+    enforce, enforce_with_retry_after, WEBSOCKET_CONNECT_LIMIT, WEBSOCKET_HANDSHAKE_LIMIT,
+};
 use crate::state::AppState;
 
 struct Connection {
     id: u64,
     device_id: Uuid,
-    sender: mpsc::UnboundedSender<String>,
+    sender: mpsc::Sender<String>,
 }
 
 /// Per-user registry of connected WebSocket senders, used to fan out
 /// "changes_available" notifications. WebSocket is a notification-only
 /// optimization per docs/protocol.md §12 — losing a connection never loses
-/// sync correctness, it only delays the client's poll.
+/// sync correctness, it only delays the client's poll. Because of that, each
+/// connection's channel is bounded (see `handle_socket`) and a full channel
+/// just drops the notification rather than blocking or growing without
+/// limit — a stalled/backpressured socket costs at most a few queued
+/// messages, never unbounded memory.
 pub struct ConnectionRegistry {
     connections: DashMap<Uuid, Vec<Connection>>,
     next_id: AtomicU64,
@@ -49,7 +59,7 @@ impl ConnectionRegistry {
         &self,
         user_id: Uuid,
         device_id: Uuid,
-        sender: mpsc::UnboundedSender<String>,
+        sender: mpsc::Sender<String>,
     ) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.connections.entry(user_id).or_default().push(Connection {
@@ -62,7 +72,11 @@ impl ConnectionRegistry {
 
     /// Removes exactly the one connection `id` identifies, and drops the
     /// user's whole entry once it's empty rather than leaving a
-    /// permanently-empty `Vec` behind in the map.
+    /// permanently-empty `Vec` behind in the map. `handle_socket` calls this
+    /// on every loop exit, including the ping/pong-timeout path — so a
+    /// client that vanishes without a clean TCP close (lid closed, NAT
+    /// mapping silently dropped, Wi-Fi switch) is still pruned within one
+    /// heartbeat timeout instead of leaking for the life of the process.
     pub fn unregister(&self, user_id: Uuid, id: u64) {
         if let Some(mut entry) = self.connections.get_mut(&user_id) {
             entry.retain(|c| c.id != id);
@@ -91,13 +105,20 @@ impl ConnectionRegistry {
                 if Some(conn.device_id) == exclude_device_id {
                     continue;
                 }
-                // A send failure here means the connection died without
-                // its own cleanup task having run `unregister` yet (e.g.
-                // the task hasn't been scheduled since the socket closed)
-                // — harmless to ignore: that task's own `unregister` call
-                // removes this entry for real shortly, and until then a
-                // failed send costs nothing further.
-                let _ = conn.sender.send(msg.clone());
+                // A failed send here means one of two harmless things: either
+                // the connection died without its own cleanup task having run
+                // `unregister` yet (e.g. the task hasn't been scheduled since
+                // the socket closed), in which case that task's own
+                // `unregister` call removes this entry for real shortly; or
+                // the channel is bounded and legitimately full because the
+                // client's socket write is backpressured/stalled, in which
+                // case dropping this notification is an intentional trade —
+                // it's a coalescable "there are changes, go poll" signal (see
+                // the module doc comment), not data, so losing one costs the
+                // client nothing beyond a slightly delayed poll. Either way,
+                // `try_send` never blocks this synchronous, non-async
+                // function.
+                let _ = conn.sender.try_send(msg.clone());
             }
         }
     }
@@ -120,10 +141,35 @@ struct ChangesAvailable {
 /// client after connect (a device access token), not via URL query string,
 /// to avoid long-lived secrets landing in proxy/access logs. Unauthenticated
 /// connections are closed immediately.
+///
+/// Rate limiting happens in two layers, at two different points, keyed on
+/// two different things, because they guard against two different costs:
+///
+/// - Here, before `ws.on_upgrade` ever runs, `WEBSOCKET_HANDSHAKE_LIMIT` is
+///   enforced by client IP. This is the only check that runs before the
+///   HTTP 101 upgrade completes, so it's the only one that can reject a
+///   connection attempt with a plain HTTP 429 instead of first opening a
+///   socket. It has to be IP-keyed because no device claim exists yet at
+///   this point — the request hasn't sent (or been asked for) an auth frame
+///   — so this is also what bounds raw connection-attempt volume (and the
+///   fd/socket exhaustion that comes with it) from a source that may never
+///   authenticate at all, e.g. a scanner or a flood of never-authed sockets
+///   left open until `handle_socket`'s 10s auth timeout fires.
+/// - Inside `handle_socket`, `WEBSOCKET_CONNECT_LIMIT` is enforced by
+///   device id, *after* the client's JWT has been verified. This bounds a
+///   specific authenticated device's connection churn (reconnect storms,
+///   flapping networks, restart loops) rather than raw attempt volume, and
+///   it can only run post-auth since the device id it's keyed on comes from
+///   the verified claims.
 pub async fn ws_handler(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, AppError> {
+    let ip = client_ip(&headers, addr, state.config.behind_proxy);
+    enforce(&state.rate_limiter, WEBSOCKET_HANDSHAKE_LIMIT, &ip.to_string())?;
+
     Ok(ws.on_upgrade(move |socket| handle_socket(socket, state)))
 }
 
@@ -198,7 +244,12 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         return;
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    // Bounded, not unbounded: `changes_available` is a purely coalescable
+    // "go poll" signal (see the module doc comment on `ConnectionRegistry`),
+    // so a backpressured/stalled client should drop notifications rather
+    // than let them queue without limit. 32 matches `notify_changes`'s
+    // `try_send` drop policy on the sending side.
+    let (tx, mut rx) = mpsc::channel::<String>(32);
     let conn_id = state.ws_registry.register(claims.user_id, claims.sub, tx);
 
     let _ = socket
@@ -206,6 +257,23 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
             serde_json::json!({"type": "connected"}).to_string(),
         ))
         .await;
+
+    // Heartbeat: without this, a client that disappears without a clean TCP
+    // close (laptop lid closed, NAT/firewall silently drops the mapping,
+    // Wi-Fi switch) would never trip any of the other branches below —
+    // `socket.recv()` simply never returns — and the connection (plus its
+    // registry entry) would leak for the life of the process. 30s strikes a
+    // balance between detecting a dead peer reasonably quickly and not
+    // spamming the connection with pings.
+    let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Not zero at connect time — the client hasn't had a chance to respond
+    // to a first ping yet, so treating "no pong received so far" as already
+    // stale would kill every connection on its first tick.
+    let mut last_pong = Instant::now();
+    // A couple of missed pings before giving up, per common heartbeat
+    // convention, rather than closing on the very first unanswered ping.
+    let pong_timeout = Duration::from_secs(90);
 
     loop {
         tokio::select! {
@@ -223,15 +291,25 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 match incoming {
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Err(_)) => break,
-                    _ => {} // ignore other client frames; this channel is server->client notification only
+                    Some(Ok(Message::Pong(_))) => { last_pong = Instant::now(); }
+                    _ => {} // ignore other client frames (e.g. Text/Binary) — per protocol this connection never sends any
+                }
+            }
+            _ = ping_interval.tick() => {
+                if last_pong.elapsed() > pong_timeout {
+                    break;
+                }
+                if socket.send(Message::Ping(Vec::new())).await.is_err() {
+                    break;
                 }
             }
         }
     }
 
-    // Every break above (clean close, send failure, recv error/EOF) ends up
-    // here — this is the one place the connection's entry is ever removed
-    // from the registry (see `ConnectionRegistry::register`'s docs for why
-    // that matters).
+    // Every break above (clean close, send failure, recv error/EOF, or a
+    // ping-timeout with no pong within `pong_timeout`) ends up here — this
+    // is the one place the connection's entry is ever removed from the
+    // registry (see `ConnectionRegistry::register`'s and `unregister`'s docs
+    // for why that matters).
     state.ws_registry.unregister(claims.user_id, conn_id);
 }

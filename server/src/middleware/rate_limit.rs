@@ -184,6 +184,23 @@ pub const WEBSOCKET_CONNECT_LIMIT: RateLimitConfig = RateLimitConfig {
     limit: 30,
     window: Duration::from_secs(60),
 };
+// Applied at the HTTP-upgrade handshake, before any auth frame has been
+// read — keyed by IP rather than device id, since there's no device claim
+// yet at that point (that's the whole reason this layer exists: see
+// websocket::ws_handler's doc comment). Deliberately much more generous
+// than WEBSOCKET_CONNECT_LIMIT's 30/min: one IP can legitimately be an
+// entire office, university, or carrier-grade-NAT's worth of independent
+// users/devices, so this must not clamp shared-IP traffic down to
+// single-device levels. It's also cheap to check per-request relative to
+// an authenticated route — no DB round trip, no JWT verification, just the
+// token-bucket lookup — so it can afford to sit well above the per-device
+// limit while still bounding raw connection-attempt (and thus fd/socket)
+// volume from a single source.
+pub const WEBSOCKET_HANDSHAKE_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "websocket_handshake",
+    limit: 300,
+    window: Duration::from_secs(60),
+};
 // Previously the only sync route with no limit at all — cheap per request
 // (a single primary-key lookup), but the extension used to call it once
 // per applied remote tab/window/group operation with no client-side cache,

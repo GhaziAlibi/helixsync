@@ -13,18 +13,32 @@ use axum::http::HeaderMap;
 /// on it directly collapses every user/device on the server into a single
 /// shared bucket (e.g. one global 10-logins/min limit for everyone).
 ///
-/// When `behind_proxy` is true, trust the proxy-set headers instead:
-/// `X-Forwarded-For`'s *first* entry is the original client (nginx's
-/// `$proxy_add_x_forwarded_for` appends to any inbound value, so the first
-/// entry is left-most/oldest), falling back to `X-Real-IP`, falling back
+/// When `behind_proxy` is true, trust the proxy-set headers instead —
+/// `X-Real-IP` *first*, falling back to `X-Forwarded-For`, falling back
 /// further to the raw connection address if neither header is present or
-/// parses as a valid IP. When `behind_proxy` is false (the default — local
-/// dev, tests, or any deployment not sitting behind a trusted proxy),
-/// these headers are attacker-controlled on a direct connection, so they
-/// are never trusted and `ConnectInfo` is used unconditionally.
+/// parses as a valid IP. `X-Real-IP` is checked first because nginx sets it
+/// directly from `$remote_addr` — its own TCP-level view of the connection,
+/// which a client can never influence no matter what header it sends —
+/// whereas `X-Forwarded-For` is only as trustworthy as the proxy's
+/// configuration: a client can prepend an arbitrary value to that header,
+/// and unless every hop strictly replaces (rather than appends to) it, the
+/// attacker-supplied entry ends up first. `X-Forwarded-For` is kept as a
+/// fallback for compatibility with other reverse-proxy setups that might
+/// front this server instead of the bundled nginx, where `X-Real-IP` may
+/// not be set but `X-Forwarded-For` still carries a single trustworthy hop.
+/// When `behind_proxy` is false (the default — local dev, tests, or any
+/// deployment not sitting behind a trusted proxy), these headers are
+/// attacker-controlled on a direct connection, so they are never trusted
+/// and `ConnectInfo` is used unconditionally.
 pub fn client_ip(headers: &HeaderMap, addr: SocketAddr, behind_proxy: bool) -> IpAddr {
     if !behind_proxy {
         return addr.ip();
+    }
+
+    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        if let Ok(ip) = real_ip.trim().parse::<IpAddr>() {
+            return ip;
+        }
     }
 
     if let Some(forwarded_for) = headers
@@ -40,12 +54,6 @@ pub fn client_ip(headers: &HeaderMap, addr: SocketAddr, behind_proxy: bool) -> I
             if let Ok(ip) = first.parse::<IpAddr>() {
                 return ip;
             }
-        }
-    }
-
-    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        if let Ok(ip) = real_ip.trim().parse::<IpAddr>() {
-            return ip;
         }
     }
 
@@ -68,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    fn behind_proxy_uses_first_forwarded_for_entry() {
+    fn behind_proxy_falls_back_to_forwarded_for_when_real_ip_missing() {
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-forwarded-for",
@@ -81,12 +89,28 @@ mod tests {
     }
 
     #[test]
-    fn behind_proxy_falls_back_to_real_ip_when_forwarded_for_missing() {
+    fn behind_proxy_uses_real_ip_when_forwarded_for_missing() {
         let mut headers = HeaderMap::new();
         headers.insert("x-real-ip", "203.0.113.7".parse().unwrap());
         assert_eq!(
             client_ip(&headers, addr(), true),
             "203.0.113.7".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn behind_proxy_prefers_real_ip_over_spoofed_forwarded_for() {
+        // Regression test for the IP-spoofing / rate-limit-bypass bug: an
+        // attacker can freely set X-Forwarded-For on their raw request, but
+        // X-Real-IP is always set by nginx from $remote_addr and can never
+        // be influenced by the client. When both are present, the trusted
+        // X-Real-IP value must win, not the attacker-controlled one.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "203.0.113.199".parse().unwrap());
+        headers.insert("x-real-ip", "198.51.100.1".parse().unwrap());
+        assert_eq!(
+            client_ip(&headers, addr(), true),
+            "198.51.100.1".parse::<IpAddr>().unwrap()
         );
     }
 

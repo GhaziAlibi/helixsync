@@ -32,6 +32,18 @@ pub struct Config {
     /// How often the background compaction task (server/src/sync/compaction.rs)
     /// runs, per docs/protocol.md §11.
     pub compaction_interval_secs: u64,
+    /// docs/protocol.md §11: compaction's `ack_boundary` is normally the
+    /// minimum acknowledged cursor across a user's active (non-revoked)
+    /// devices, so a device that's simply gone dark (old phone, uninstalled
+    /// extension, a work browser never explicitly revoked) permanently pins
+    /// the boundary and blocks compaction forever. A device is excluded from
+    /// that computation once it's been inactive longer than this grace
+    /// period; §11 already anticipates this by having a device that
+    /// reconnects with a too-old cursor fall back to full snapshot resync
+    /// (`cursor_too_old`, handled in `sync::routes::download`), so there's no
+    /// correctness reason a truly stale device needs to keep blocking
+    /// compaction for everyone else.
+    pub inactive_device_compaction_grace_period_secs: i64,
 }
 
 impl Config {
@@ -88,6 +100,12 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(60 * 60); // hourly
 
+        let inactive_device_compaction_grace_period_secs =
+            env::var("INACTIVE_DEVICE_COMPACTION_GRACE_PERIOD_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60 * 60 * 24 * 30); // 30 days
+
         Ok(Self {
             database_url,
             bind_addr,
@@ -103,6 +121,7 @@ impl Config {
             api_version: "v1".to_string(),
             tombstone_retention_secs,
             compaction_interval_secs,
+            inactive_device_compaction_grace_period_secs,
         })
     }
 }

@@ -3,9 +3,10 @@
 // Retention/compaction of *sync* history is a server concern
 // (docs/protocol.md §11); this module does not prune the browser's native
 // history, which has its own independent retention already.
-import { createLocalOperationsBatch, registerApplier } from "../sync/engine";
+import { createLocalOperationsBatch, registerApplier, registerBatchApplier } from "../sync/engine";
 import type { PendingLocalOperation } from "../sync/engine";
-import { getDevice, putRemoteObject } from "../storage/db";
+import { getDevice, putRemoteObject, putRemoteObjectsBatch } from "../storage/db";
+import type { RemoteObjectRecord } from "../storage/db";
 import { createSuppressionGuard } from "../sync/suppress";
 import { createMicroBatchQueue } from "../sync/micro-batch";
 import { deterministicUuid } from "../util/uuid";
@@ -185,4 +186,60 @@ async function applyRemote(op: OperationOut, payload: unknown): Promise<void> {
   });
 }
 
+// `chrome.history.getVisits`'s IPC-latency rationale (BACKFILL_URL_CONCURRENCY,
+// above) applies identically here: `chrome.history.addUrl` has no batch/bulk
+// variant (see applyRemote's comment — AI rule #4/#5, never invent browser
+// APIs), so during snapshot resync (sync/engine.ts's applySnapshot, the only
+// caller of a registered batch applier) a large synced history would
+// otherwise pay one fully-sequential addUrl IPC round trip per visit. This
+// bounds how many run concurrently instead, same value/rationale as
+// BACKFILL_URL_CONCURRENCY.
+const APPLY_BATCH_URL_CONCURRENCY = 25;
+
+/** Batch counterpart to `applyRemote`, used only by sync/engine.ts's
+ * `applySnapshot` (via `registerBatchApplier`) for the bulk snapshot-resync
+ * path — `downloadAndApply`'s incremental per-op path keeps using
+ * `applyRemote` above unchanged. Mirrors `applyRemote`'s per-item semantics
+ * exactly: `chrome.history.addUrl` still runs for every item (including
+ * this device's own — matching `applyRemote`'s existing ordering where
+ * addUrl runs unconditionally before the own-device check), just with
+ * bounded concurrency instead of one at a time since there is no bulk
+ * addUrl API to call instead. Only the `remote_objects` write is
+ * conditional on not being this device's own visit, and is collected into
+ * one `putRemoteObjectsBatch` call for the whole batch instead of one
+ * `putRemoteObject` call per item. */
+async function applyRemoteBatch(items: Array<{ op: OperationOut; payload: unknown }>): Promise<void> {
+  const device = await getDevice(); // once for the whole batch, mirroring flushVisitEvents above
+
+  for (let i = 0; i < items.length; i += APPLY_BATCH_URL_CONCURRENCY) {
+    const slice = items.slice(i, i + APPLY_BATCH_URL_CONCURRENCY);
+    await Promise.all(
+      slice.map(async ({ payload }) => {
+        const p = payload as HistoryVisitPayload;
+        try {
+          await guard.run(() => chrome.history.addUrl({ url: p.url }));
+        } catch (e) {
+          console.warn("HelixSync: failed to apply remote history visit", e);
+        }
+      }),
+    );
+  }
+
+  const records: RemoteObjectRecord[] = [];
+  for (const { op, payload } of items) {
+    if (!device || op.deviceId === device.deviceId) continue; // own visit, already native
+    const p = payload as HistoryVisitPayload;
+    records.push({
+      objectId: op.objectId,
+      objectType: "historyVisit",
+      originDeviceId: op.deviceId,
+      payload: p,
+      deleted: false,
+      updatedAt: op.createdAt,
+    });
+  }
+  await putRemoteObjectsBatch(records);
+}
+
 registerApplier("historyVisit", applyRemote);
+registerBatchApplier("historyVisit", applyRemoteBatch);

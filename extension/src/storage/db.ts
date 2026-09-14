@@ -388,16 +388,44 @@ export async function enqueueOperationsBatch(operations: LocalOperation[]): Prom
  * order, via the `by-sequence` index cursor — cost proportional to `limit`,
  * not to the total size of the queue (unlike a `getAll()` + in-memory
  * sort, which `uploadPending` would otherwise re-pay on every batch of
- * every sync cycle). */
+ * every sync cycle).
+ *
+ * Only returns `LOCAL_QUEUED` records — `UPLOAD_IN_FLIGHT` ones are skipped
+ * (without counting toward `limit`) so a batch already being uploaded is
+ * never handed out a second time concurrently. This is only a safe filter
+ * because `resetInFlightOperations` (below) guarantees `UPLOAD_IN_FLIGHT`
+ * never survives across a service-worker restart — otherwise a
+ * crash-orphaned in-flight record would become permanently invisible here
+ * and simply never sync again. */
 export async function getPendingOperations(limit = 200): Promise<PendingOperationRecord[]> {
   const db = await getDb();
   const results: PendingOperationRecord[] = [];
   let cursor = await db.transaction("pending_operations").store.index("by-sequence").openCursor();
   while (cursor && results.length < limit) {
-    results.push(cursor.value);
+    if (cursor.value.state === "LOCAL_QUEUED") {
+      results.push(cursor.value);
+    }
     cursor = await cursor.continue();
   }
   return results;
+}
+
+/** Resets every `UPLOAD_IN_FLIGHT` operation back to `LOCAL_QUEUED`, via the
+ * `by-state` index. Called once at service-worker startup
+ * (background/index.ts) — see its call site for why this is always safe to
+ * do unconditionally there: a restart proves any `fetch` that was genuinely
+ * in flight is now dead, so nothing still legitimately holds that state. */
+export async function resetInFlightOperations(): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction("pending_operations", "readwrite");
+  let cursor = await tx.store
+    .index("by-state")
+    .openCursor(IDBKeyRange.only("UPLOAD_IN_FLIGHT" satisfies PendingState));
+  while (cursor) {
+    await cursor.update({ ...cursor.value, state: "LOCAL_QUEUED" });
+    cursor = await cursor.continue();
+  }
+  await tx.done;
 }
 
 export async function countPendingOperations(): Promise<number> {
@@ -656,6 +684,21 @@ export async function deleteDeferredMaterialization(objectId: string): Promise<v
 
 export async function putRemoteObject(record: RemoteObjectRecord): Promise<void> {
   await (await getDb()).put("remote_objects", record);
+}
+
+/** Batch counterpart to `putRemoteObject` — one transaction for the whole
+ * array instead of one per record. Used during snapshot resync
+ * (sync/engine.ts) for object types with a registered batch applier, where
+ * a large account can otherwise open thousands of individual transactions
+ * purely for this bookkeeping write. */
+export async function putRemoteObjectsBatch(records: RemoteObjectRecord[]): Promise<void> {
+  if (records.length === 0) return;
+  const db = await getDb();
+  const tx = db.transaction("remote_objects", "readwrite");
+  for (const record of records) {
+    await tx.store.put(record);
+  }
+  await tx.done;
 }
 
 export async function getRemoteObjectsByType(objectType: ObjectType): Promise<RemoteObjectRecord[]> {

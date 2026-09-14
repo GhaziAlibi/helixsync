@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT MIN(COALESCE(sc.cursor_value, 0))\n        FROM devices d\n        LEFT JOIN sync_cursors sc ON sc.user_id = d.user_id AND sc.device_id = d.id\n        WHERE d.user_id = $1 AND d.revoked_at IS NULL\n          AND COALESCE(d.last_seen_at, d.created_at) > $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "min",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9c42930d4b7d1cc0aaf921593212798c378357ab0b5ac40599cdc9ae366ab287"
+}

@@ -1,0 +1,34 @@
+-- Versioned migration: 0008_compress_sync_snapshots
+--
+-- Fixes a performance bug (SRV-PERF-8) in `sync_snapshots.data`: an
+-- account's entire merged object set (potentially 50,000+
+-- bookmarks/history/tabs) is stored as one JSONB document, which for a
+-- large account can be 30-50MB. Every hourly compaction pass
+-- (`sync::compaction::compact_user`) and every `/api/v1/sync/snapshot`
+-- request (`sync::routes::compute_objects`) has to de-TOAST this whole
+-- blob from Postgres, hold the raw bytes in memory, and
+-- `serde_json::from_value`/`to_value` it against thousands of
+-- heap-allocated `SnapshotObject`s — periodic multi-hundred-MB memory
+-- churn and real CPU cost.
+--
+-- The fix (see `sync::routes::compress_snapshot_data` /
+-- `decompress_snapshot_data`) is to gzip-compress the serialized object
+-- list before it's written, which shrinks both the on-disk/TOAST size and
+-- the amount of data actually read off the wire on every snapshot fetch.
+-- That requires the column to hold arbitrary compressed bytes rather than
+-- a JSON document, hence `BYTEA` instead of `JSONB`.
+--
+-- This migration itself cannot gzip existing rows — that would require
+-- running application code (the `flate2` compressor) from inside raw SQL,
+-- which Postgres has no built-in support for. So existing rows are only
+-- losslessly converted to their equivalent plain UTF8-encoded JSON text
+-- bytes here, uncompressed. Going forward, every row `sync::compaction`
+-- writes will be gzip-compressed, so the application's read path
+-- (`decompress_snapshot_data`) must transparently handle both formats:
+-- gzip bytes for anything written after this deploys, and plain UTF8 JSON
+-- bytes for any row still sitting here from before it. See that
+-- function's doc comment for exactly how the two are told apart. A future
+-- cleanup could force a recompaction pass for every account to fully
+-- migrate old rows onto the compressed format and drop the fallback, but
+-- that's out of scope here.
+ALTER TABLE sync_snapshots ALTER COLUMN data TYPE BYTEA USING convert_to(data::text, 'UTF8');

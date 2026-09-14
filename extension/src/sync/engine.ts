@@ -34,6 +34,23 @@ export function registerApplier(objectType: ObjectType, applier: ObjectApplier):
   appliers.set(objectType, applier);
 }
 
+export type BatchObjectApplier = (items: Array<{ op: OperationOut; payload: unknown }>) => Promise<void>;
+
+const batchAppliers = new Map<ObjectType, BatchObjectApplier>();
+
+/** Optional fast path alongside `registerApplier`, used only by
+ * `applySnapshot`'s bulk resync loop for object types whose per-object IO
+ * cost is high enough that applying a large snapshot one object at a time
+ * risks stalling/killing the service worker (see the review this fixes:
+ * historyVisit's `chrome.history.addUrl` + `putRemoteObject` round trips,
+ * multiplied by tens of thousands of visits). Most object types never
+ * register one and keep going through `ObjectApplier` via the existing
+ * per-object path — this map is consulted only for the bulk snapshot path,
+ * never for `downloadAndApply`'s incremental per-op path. */
+export function registerBatchApplier(objectType: ObjectType, applier: BatchObjectApplier): void {
+  batchAppliers.set(objectType, applier);
+}
+
 export type SyncStatus = "idle" | "syncing" | "error" | "needs_reauth";
 
 let listeners: Array<(status: SyncStatus, detail?: string) => void> = [];
@@ -343,22 +360,14 @@ export async function downloadAndApply(): Promise<void> {
   }
 }
 
-/** Applies one remote operation and returns its operationId for the caller
- * to feed into the chunked `markAppliedBatch` bookkeeping (this function no
- * longer marks applied itself — see `MARK_APPLIED_CHUNK` for why that's now
- * the caller's responsibility). Every path through this function — success,
- * undecryptable payload, unknown object type — ends the same way: the op is
- * considered done and must eventually be recorded as applied, so it always
- * returns `op.operationId` rather than signaling "skip". Ordering is
- * preserved: by the time this function returns, the applier (if any) has
- * already run and its own writes (if it makes any) are committed — only
- * *when the bookkeeping transaction commits* is deferred, not the
- * sequencing of "apply then eventually mark". */
-async function applyOneRemote(op: OperationOut, rek: string): Promise<string> {
-  let payload: unknown;
+/** Decrypts one operation's payload, or returns `undefined` if it can't be
+ * (see applyOneRemote's original comment for why that's still "applied").
+ * Shared by the per-object path (applyOneRemote) and applySnapshot's
+ * batch-dispatch path so both skip undecryptable payloads identically. */
+async function decryptOrSkip(op: OperationOut, rek: string): Promise<{ payload: unknown } | undefined> {
   if (op.encryptionVersion >= 1) {
     try {
-      payload = await decryptPayload(op.payload as never, rek);
+      return { payload: await decryptPayload(op.payload as never, rek) };
     } catch (err) {
       // Undecryptable data: this operation was encrypted under a REK this
       // device doesn't hold — almost always old data from before an
@@ -374,11 +383,27 @@ async function applyOneRemote(op: OperationOut, rek: string): Promise<string> {
       // the lesser failure, so it's marked applied (by the caller) and
       // skipped.
       console.warn("HelixSync: could not decrypt operation, skipping", op.operationId, err);
-      return op.operationId;
+      return undefined;
     }
-  } else {
-    payload = op.payload;
   }
+  return { payload: op.payload };
+}
+
+/** Applies one remote operation and returns its operationId for the caller
+ * to feed into the chunked `markAppliedBatch` bookkeeping (this function no
+ * longer marks applied itself — see `MARK_APPLIED_CHUNK` for why that's now
+ * the caller's responsibility). Every path through this function — success,
+ * undecryptable payload, unknown object type — ends the same way: the op is
+ * considered done and must eventually be recorded as applied, so it always
+ * returns `op.operationId` rather than signaling "skip". Ordering is
+ * preserved: by the time this function returns, the applier (if any) has
+ * already run and its own writes (if it makes any) are committed — only
+ * *when the bookkeeping transaction commits* is deferred, not the
+ * sequencing of "apply then eventually mark". */
+async function applyOneRemote(op: OperationOut, rek: string): Promise<string> {
+  const decrypted = await decryptOrSkip(op, rek);
+  if (!decrypted) return op.operationId;
+  const { payload } = decrypted;
 
   const applier = appliers.get(op.objectType);
   if (!applier) {
@@ -421,6 +446,15 @@ const TERMINAL_OPERATION_TYPE: Partial<Record<ObjectType, OperationType>> = {
 // point is importing history that mostly did NOT originate here.
 const SNAPSHOT_DEVICE_ID = "00000000-0000-0000-0000-000000000000";
 
+// Bounds how many decrypted `{ op, payload }` items are held in memory at
+// once while processing a snapshot's object list — the same memory-bounding
+// concern history/index.ts's BACKFILL_FLUSH_CHUNK addresses for a similarly
+// large bulk operation. Also caps how many items a single registered batch
+// applier (see `registerBatchApplier`) is ever handed in one call, so a
+// batch applier's own internal batching and this file's memory use are
+// bounded identically regardless of how large the snapshot itself is.
+const SNAPSHOT_DISPATCH_CHUNK = 500;
+
 /** docs/protocol.md §11: reconciles local state against a full snapshot
  * after `downloadChanges` reports `cursor_too_old` — the only way back for
  * a device whose cursor has fallen behind the server's retained history.
@@ -455,23 +489,76 @@ async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): 
     }
   };
 
-  for (const obj of snapshot.objects) {
-    const op: OperationOut = {
-      operationId: uuidv7(),
-      deviceId: SNAPSHOT_DEVICE_ID,
-      deviceSequence: 0,
-      lamportTimestamp,
-      objectType: obj.objectType,
-      objectId: obj.objectId,
-      operationType: obj.operationType,
-      encryptionVersion: obj.encryptionVersion,
-      payload: obj.payload,
-      serverCursor: snapshot.snapshotCursor,
-      createdAt: new Date().toISOString(),
-    };
-    appliedBuffer.push(await applyOneRemote(op, device.encryptionRootKey));
-    if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
-    await maybeYield();
+  // Outer chunking (SNAPSHOT_DISPATCH_CHUNK) bounds memory; within each
+  // chunk, objects are first all decrypted (same yield cadence as before —
+  // see maybeYield/CRYPTO_YIELD_CHUNK), then grouped by objectType so any
+  // type with a registered batch applier (currently only "historyVisit",
+  // see history/index.ts) is dispatched in one call per chunk instead of
+  // one call per object. Every other type falls through to the same
+  // one-at-a-time dispatch `applyOneRemote` used to do, just with the
+  // decrypt step already done above.
+  for (let start = 0; start < snapshot.objects.length; start += SNAPSHOT_DISPATCH_CHUNK) {
+    const chunk = snapshot.objects.slice(start, start + SNAPSHOT_DISPATCH_CHUNK);
+    const decryptedByType = new Map<ObjectType, Array<{ op: OperationOut; payload: unknown }>>();
+
+    for (const obj of chunk) {
+      const op: OperationOut = {
+        operationId: uuidv7(),
+        deviceId: SNAPSHOT_DEVICE_ID,
+        deviceSequence: 0,
+        lamportTimestamp,
+        objectType: obj.objectType,
+        objectId: obj.objectId,
+        operationType: obj.operationType,
+        encryptionVersion: obj.encryptionVersion,
+        payload: obj.payload,
+        serverCursor: snapshot.snapshotCursor,
+        createdAt: new Date().toISOString(),
+      };
+      const decrypted = await decryptOrSkip(op, device.encryptionRootKey);
+      await maybeYield();
+      if (!decrypted) {
+        // Undecryptable: "applied" the same way applyOneRemote already
+        // treats it, just without ever reaching a type dispatch.
+        appliedBuffer.push(op.operationId);
+        if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
+        continue;
+      }
+      let group = decryptedByType.get(op.objectType);
+      if (!group) {
+        group = [];
+        decryptedByType.set(op.objectType, group);
+      }
+      group.push({ op, payload: decrypted.payload });
+    }
+
+    for (const [objectType, items] of decryptedByType) {
+      const batchApplier = batchAppliers.get(objectType);
+      if (batchApplier) {
+        // Never more than SNAPSHOT_DISPATCH_CHUNK items in one call — see
+        // that constant's comment.
+        await batchApplier(items);
+        for (const { op } of items) {
+          appliedBuffer.push(op.operationId);
+          if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
+        }
+        continue;
+      }
+
+      const applier = appliers.get(objectType);
+      for (const { op, payload } of items) {
+        if (applier) {
+          await applier(op, payload);
+        } else {
+          // Same "unknown/unsupported object type" handling as
+          // applyOneRemote: never silently apply, but don't crash the
+          // batch, and mark applied so it isn't retried forever.
+          console.warn("HelixSync: no applier registered for object type", op.objectType);
+        }
+        appliedBuffer.push(op.operationId);
+        if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
+      }
+    }
   }
 
   for (const tombstone of snapshot.tombstones) {
@@ -549,6 +636,51 @@ function setSyncBlockedUntil(value: number): Promise<void> {
     .catch(() => {});
 }
 
+// A cooldown started by a 429 (syncBlockedUntil, above) blocks runSyncCycle
+// from actually hitting the server again — but by itself that just makes
+// every trigger that arrives during the cooldown return immediately with
+// nothing scheduled to try again once it lifts. The alarm eventually covers
+// that (see background/index.ts's periodic alarm), but for a WS
+// `changes_available` push specifically that defeats the entire point of
+// the push: it exists to shortcut the wait for the 1-minute alarm, and a
+// push that arrives mid-cooldown would otherwise be silently dropped,
+// leaving the change to sit unsynced for up to a minute even though the
+// cooldown itself is typically much shorter (30s by default). This timer is
+// the fix: schedule a single retry for the moment the cooldown actually
+// lifts.
+//
+// Deliberately NOT persisted, unlike syncBlockedUntil itself. There is no
+// chrome-extension-API equivalent of "resume this exact setTimeout after a
+// service worker restart" short of chrome.alarms, which only supports
+// minute-granularity alarms — overkill here, and redundant with the
+// existing 1-minute periodic alarm already in background/index.ts. If the
+// service worker is torn down before this timer fires, it simply never
+// fires; that's fine, because that same periodic alarm (documented there as
+// "the one wake path guaranteed to survive a service worker restart") will
+// eventually call runSyncCycle() again regardless, which re-hydrates
+// syncBlockedUntil from chrome.storage.session and behaves correctly either
+// way. This timer is purely a latency optimization layered on top of that
+// already-guaranteed backstop, not a replacement for it.
+let cooldownRetryTimer: ReturnType<typeof setTimeout> | undefined;
+
+// Guards against piling up redundant timers: several triggers (e.g.
+// multiple WS pushes) can each call runSyncCycle while the same cooldown is
+// active. The first call already scheduled a retry for the correct (and
+// only) wake-up instant, so later calls during that same window just no-op
+// here and fall through to the same early return as always.
+function scheduleCooldownRetry(): void {
+  if (cooldownRetryTimer !== undefined) return;
+  const remaining = syncBlockedUntil - Date.now();
+  // `remaining` could in theory be <= 0 here (a race between the
+  // Date.now() check in runSyncCycle and this one, microseconds later) —
+  // setTimeout with a non-positive delay just fires on the next tick, which
+  // is harmless: runSyncCycle re-checks the deadline and proceeds normally.
+  cooldownRetryTimer = setTimeout(() => {
+    cooldownRetryTimer = undefined;
+    void runSyncCycle();
+  }, remaining);
+}
+
 let syncInFlight = false;
 // Set when a trigger (WS push, alarm, manual "Sync Now") arrives while a
 // cycle is already running. Without this, that trigger was simply dropped
@@ -577,6 +709,7 @@ export async function runSyncCycle(): Promise<void> {
   // cycle, not one that arrives afterward while the cooldown is still in
   // effect.
   if (Date.now() < syncBlockedUntil) {
+    scheduleCooldownRetry();
     return;
   }
   syncInFlight = true;
