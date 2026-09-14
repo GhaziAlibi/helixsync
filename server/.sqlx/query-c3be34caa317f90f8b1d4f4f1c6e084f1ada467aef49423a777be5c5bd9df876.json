@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT object_type, object_id, operation_type, encryption_version, payload\n            FROM sync_operations\n            WHERE user_id = $1 AND server_cursor > $2\n              AND (object_type <> 'historyVisit' OR $3::timestamptz IS NULL OR created_at >= $3::timestamptz)\n            ORDER BY object_type, object_id, lamport_timestamp ASC, device_id ASC, operation_id ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "object_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "operation_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "encryption_version",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "payload",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c3be34caa317f90f8b1d4f4f1c6e084f1ada467aef49423a777be5c5bd9df876"
+}

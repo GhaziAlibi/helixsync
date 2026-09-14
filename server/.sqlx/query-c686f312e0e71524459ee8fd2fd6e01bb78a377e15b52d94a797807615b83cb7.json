@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT DISTINCT so.object_type, so.object_id\n            FROM sync_operations so\n            JOIN UNNEST($1::text[], $2::uuid[]) AS lookup(object_type, object_id)\n              ON so.object_type = lookup.object_type AND so.object_id = lookup.object_id\n            WHERE so.user_id = $3\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "object_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "c686f312e0e71524459ee8fd2fd6e01bb78a377e15b52d94a797807615b83cb7"
+}

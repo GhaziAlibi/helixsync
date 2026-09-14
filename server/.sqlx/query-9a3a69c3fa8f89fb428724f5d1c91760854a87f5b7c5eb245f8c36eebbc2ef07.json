@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT dc.id as cred_id, dc.device_id, d.user_id, d.revoked_at as device_revoked_at\n        FROM device_credentials dc\n        JOIN devices d ON d.id = dc.device_id\n        WHERE dc.credential_hash = $1\n          AND dc.revoked_at IS NULL\n          AND dc.expires_at > now()\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cred_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "device_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
+        "name": "device_revoked_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "9a3a69c3fa8f89fb428724f5d1c91760854a87f5b7c5eb245f8c36eebbc2ef07"
+}

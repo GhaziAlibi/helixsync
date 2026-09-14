@@ -1,0 +1,239 @@
+import type {
+  DownloadResponse,
+  LocalOperation,
+  SnapshotResponse,
+  UploadResponse,
+} from "../sync/types";
+import { getDevice, putDevice } from "../storage/db";
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+    public code?: string,
+  ) {
+    super(message);
+  }
+}
+
+/** Thrown by authenticated calls when the access token is rejected and a
+ * refresh attempt also fails — the caller should transition to a
+ * "needs re-authentication" state per docs/protocol.md §15.6. */
+export class ReauthRequiredError extends Error {}
+
+async function refreshAccessToken(serverUrl: string): Promise<string> {
+  const device = await getDevice();
+  if (!device) throw new ReauthRequiredError("no device registered");
+
+  const res = await fetch(`${serverUrl}/api/v1/devices/credentials/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refreshToken: device.refreshToken }),
+  });
+
+  if (!res.ok) {
+    throw new ReauthRequiredError(`refresh failed with status ${res.status}`);
+  }
+
+  const body = await res.json();
+  const updated = {
+    ...device,
+    accessToken: body.accessToken as string,
+    refreshToken: body.refreshToken as string,
+    accessTokenExpiresAt: body.accessTokenExpiresAt as string,
+  };
+  await putDevice(updated);
+  return updated.accessToken;
+}
+
+/** docs/protocol.md §13/§40: advertised on every device-authenticated
+ * request so the server can block writes from a client too old to safely
+ * synchronize (426 Upgrade Required) rather than silently corrupting state. */
+const PROTOCOL_VERSION = 1;
+
+/** Performs an authenticated request, transparently refreshing the device
+ * access token once on a 401 before giving up. */
+async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const device = await getDevice();
+  if (!device) throw new ReauthRequiredError("no device registered");
+
+  const doFetch = (token: string) =>
+    fetch(`${device.serverUrl}${path}`, {
+      ...init,
+      headers: {
+        ...(init.headers ?? {}),
+        Authorization: `Bearer ${token}`,
+        "X-Protocol-Version": String(PROTOCOL_VERSION),
+      },
+    });
+
+  let res = await doFetch(device.accessToken);
+  if (res.status === 401) {
+    const newToken = await refreshAccessToken(device.serverUrl);
+    res = await doFetch(newToken);
+  }
+  return res;
+}
+
+export interface RegisterDeviceParams {
+  serverUrl: string;
+  email: string;
+  password: string;
+  name: string;
+  browser?: string;
+  browserVersion?: string;
+  platform?: string;
+  extensionVersion?: string;
+}
+
+export interface RegisterDeviceResult {
+  deviceId: string;
+  accessToken: string;
+  refreshToken: string;
+  accessTokenExpiresAt: string;
+  protocolVersion: number;
+  minimumSupportedProtocolVersion: number;
+  // docs/encryption.md §2: per-account salt for deriving the REK from the
+  // password (crypto/index.ts::deriveRekFromPassword) — same for every
+  // device on the account, so this never needs a device-to-device relay.
+  encryptionSalt: string;
+}
+
+export async function registerDevice(params: RegisterDeviceParams): Promise<RegisterDeviceResult> {
+  const res = await fetch(`${params.serverUrl}/api/v1/devices/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: params.email,
+      password: params.password,
+      name: params.name,
+      browser: params.browser,
+      browserVersion: params.browserVersion,
+      platform: params.platform,
+      extensionVersion: params.extensionVersion,
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(body.message ?? `registration failed (${res.status})`, res.status, body.error);
+  }
+
+  return res.json();
+}
+
+export interface DevicePublicDto {
+  id: string;
+  name: string;
+  revokedAt: string | null;
+}
+
+export async function listDevices(): Promise<DevicePublicDto[]> {
+  const res = await authedFetch("/api/v1/devices");
+  if (!res.ok) {
+    throw new ApiError(`failed to list devices (${res.status})`, res.status);
+  }
+  return res.json();
+}
+
+export async function uploadOperations(operations: LocalOperation[]): Promise<UploadResponse> {
+  const res = await authedFetch("/api/v1/sync/operations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ operations }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(body.message ?? `upload failed (${res.status})`, res.status, body.error);
+  }
+  return res.json();
+}
+
+export async function downloadChanges(cursor: number, limit = 500): Promise<DownloadResponse> {
+  const res = await authedFetch(`/api/v1/sync/changes?cursor=${cursor}&limit=${limit}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(body.message ?? `download failed (${res.status})`, res.status, body.error);
+  }
+  return res.json();
+}
+
+export async function fetchSnapshot(): Promise<SnapshotResponse> {
+  const res = await authedFetch("/api/v1/sync/snapshot");
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(body.message ?? `snapshot failed (${res.status})`, res.status, body.error);
+  }
+  return res.json();
+}
+
+export interface UserSettingsDto {
+  syncBookmarks: boolean;
+  syncHistory: boolean;
+  syncTabs: boolean;
+  syncTabGroups: boolean;
+  syncExtensions: boolean;
+  tabRestorePolicy: "disabled" | "ask" | "automatic";
+  historyRetention: "7d" | "30d" | "90d" | "1y" | "unlimited";
+  requireEncryption: boolean;
+}
+
+// `fetchSettings` is called on essentially every remote tab/window/group
+// operation applied during sync (tabs/index.ts::restorePolicy) as well as
+// once per periodic badge update (background/index.ts::updateBadge) — with
+// no cache, a single download page of a few hundred tab operations turned
+// into a few hundred sequential HTTPS round trips (each itself two DB
+// queries server-side: device auth + settings lookup) on an endpoint that,
+// unlike the sync routes, has no rate limit. Settings rarely change and
+// are never required to be instantaneously fresh (tabRestorePolicy already
+// fails closed to "disabled" on any fetch error), so a short TTL cache is
+// enough to collapse that into one request per cache window while still
+// picking up changes made from another device/the web dashboard within a
+// minute.
+const SETTINGS_CACHE_TTL_MS = 60_000;
+let settingsCache: { value: UserSettingsDto; expiresAt: number } | undefined;
+
+/** Called on device disconnect so a subsequent reconnect (possibly to a
+ * different account or server) never serves another account's cached
+ * settings for up to `SETTINGS_CACHE_TTL_MS`. */
+export function invalidateSettingsCache(): void {
+  settingsCache = undefined;
+}
+
+export async function fetchSettings(): Promise<UserSettingsDto> {
+  if (settingsCache && Date.now() < settingsCache.expiresAt) {
+    return settingsCache.value;
+  }
+  const res = await authedFetch("/api/v1/sync/settings");
+  if (!res.ok) {
+    throw new ApiError(`failed to fetch settings (${res.status})`, res.status);
+  }
+  const settings: UserSettingsDto = await res.json();
+  settingsCache = { value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS };
+  return settings;
+}
+
+export type UpdateSettingsRequest = Partial<
+  Pick<
+    UserSettingsDto,
+    "syncBookmarks" | "syncHistory" | "syncTabs" | "syncTabGroups" | "syncExtensions" | "tabRestorePolicy" | "historyRetention"
+  >
+>;
+
+/** Device bearer tokens don't need CSRF protection (docs/security.md §2),
+ * so the extension can call this directly — see
+ * server/src/auth/extractors.rs `AnyAuthorizedMutator`. */
+export async function updateSettings(patch: UpdateSettingsRequest): Promise<UserSettingsDto> {
+  const res = await authedFetch("/api/v1/sync/settings", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) {
+    throw new ApiError(`failed to update settings (${res.status})`, res.status);
+  }
+  const settings: UserSettingsDto = await res.json();
+  settingsCache = { value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS };
+  return settings;
+}
+

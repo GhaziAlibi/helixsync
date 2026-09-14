@@ -1,0 +1,71 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE devices SET revoked_at = now()\n        WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL\n        RETURNING id, name, browser, browser_version, platform, extension_version, last_seen_at, created_at, revoked_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "browser",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "browser_version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "platform",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "extension_version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_seen_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "revoked_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "681a0db82f6cd3e10583df9c3eeec7152dabc9637b673ae1f4ec7ec6b565d452"
+}

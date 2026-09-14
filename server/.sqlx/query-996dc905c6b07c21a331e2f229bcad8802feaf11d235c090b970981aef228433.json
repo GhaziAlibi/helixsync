@@ -1,0 +1,72 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE devices SET name = $1\n        WHERE id = $2 AND user_id = $3\n        RETURNING id, name, browser, browser_version, platform, extension_version, last_seen_at, created_at, revoked_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "browser",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "browser_version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "platform",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "extension_version",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_seen_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "revoked_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "996dc905c6b07c21a331e2f229bcad8802feaf11d235c090b970981aef228433"
+}

@@ -1,0 +1,1001 @@
+use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
+
+use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::http::HeaderMap;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use chrono::{DateTime, Utc};
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use crate::auth::extractors::AnyAuthenticatedUser;
+use crate::auth::model::AuthenticatedDevice;
+use crate::error::{AppError, AppResult};
+use crate::middleware::rate_limit::{
+    enforce, SYNC_DOWNLOAD_LIMIT, SYNC_SNAPSHOT_LIMIT, SYNC_STATS_LIMIT, SYNC_UPLOAD_LIMIT,
+};
+use crate::state::AppState;
+
+use super::model::{
+    DownloadResponse, OperationIn, OperationOut, SnapshotObject, SnapshotResponse,
+    SnapshotTombstone, UploadRejection, UploadRequest, UploadResponse,
+};
+use super::vocabulary;
+
+const MAX_OPERATIONS_PER_BATCH: usize = 500;
+const MAX_PAYLOAD_BYTES: usize = 256 * 1024;
+const DEFAULT_DOWNLOAD_LIMIT: i64 = 500;
+const MAX_DOWNLOAD_LIMIT: i64 = 1000;
+const PROTOCOL_VERSION_HEADER: &str = "x-protocol-version";
+
+/// axum's own default body limit (2MB) sits far below what
+/// `MAX_OPERATIONS_PER_BATCH * MAX_PAYLOAD_BYTES` already promises to
+/// accept (500 * 256KB = 125MB) — a batch of even a handful of
+/// near-max-size payloads was silently rejected by the framework before
+/// ever reaching the per-op validation in `process_batch`, and because
+/// that happens at the extractor level (no per-operation rejection
+/// reason), the client's only signal is a bare failed request — which it
+/// retries with the exact same byte-identical batch (extension's
+/// `uploadPending` requeues the whole batch on any transport-level
+/// failure). Sized to what the app-level checks already nominally allow,
+/// plus headroom for per-op JSON structural overhead (field names,
+/// operationId strings, etc. — at most a few hundred bytes per op).
+const MAX_UPLOAD_BODY_BYTES: usize = MAX_OPERATIONS_PER_BATCH * MAX_PAYLOAD_BYTES + 1024 * 1024;
+
+/// docs/protocol.md §13: a client whose advertised protocol version is
+/// below the server's minimum is blocked from *writing* new operations
+/// (but not from reading — see the same section). The header is optional
+/// for now since v1 is the only version that has ever existed; once a v2
+/// ships, older clients omitting it are the ones this check exists for.
+fn reject_if_protocol_too_old(headers: &HeaderMap, state: &AppState) -> AppResult<()> {
+    let Some(value) = headers.get(PROTOCOL_VERSION_HEADER) else {
+        return Ok(());
+    };
+    let Ok(version) = value.to_str().unwrap_or("").parse::<u32>() else {
+        return Ok(());
+    };
+    if version < state.config.minimum_supported_protocol_version {
+        return Err(AppError::ProtocolTooOld);
+    }
+    Ok(())
+}
+
+pub fn router() -> Router<AppState> {
+    // Scoped to just this route via its own sub-router (rather than
+    // `Router::layer` on the whole thing) so every other route here keeps
+    // axum's normal 2MB default — there's no reason `/changes`, `/snapshot`,
+    // or `/settings` should ever accept a body anywhere near upload's size.
+    let upload_route = Router::new()
+        .route("/operations", post(upload))
+        .layer(DefaultBodyLimit::max(MAX_UPLOAD_BODY_BYTES));
+
+    Router::new()
+        .merge(upload_route)
+        .route("/changes", get(download))
+        .route("/snapshot", get(snapshot))
+        .route("/stats", get(stats))
+        .nest("/settings", super::settings::router())
+}
+
+async fn upload(
+    device: AuthenticatedDevice,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<UploadRequest>,
+) -> AppResult<Json<UploadResponse>> {
+    reject_if_protocol_too_old(&headers, &state)?;
+
+    if req.operations.len() > MAX_OPERATIONS_PER_BATCH {
+        return Err(AppError::Validation(format!(
+            "too many operations in one batch (max {MAX_OPERATIONS_PER_BATCH})"
+        )));
+    }
+
+    enforce(
+        &state.rate_limiter,
+        SYNC_UPLOAD_LIMIT,
+        &device.device_id.to_string(),
+    )?;
+
+    crate::devices::touch_last_seen_background(&state, device.device_id);
+
+    let outcome = process_batch(&state, &device, &req.operations).await?;
+
+    if !outcome.accepted.is_empty() {
+        state.ws_registry.notify_changes(
+            device.user_id,
+            outcome.server_cursor,
+            Some(device.device_id),
+        );
+    }
+
+    Ok(Json(UploadResponse {
+        accepted: outcome.accepted,
+        duplicate: outcome.duplicate,
+        rejected: outcome.rejected,
+        server_cursor: outcome.server_cursor,
+    }))
+}
+
+struct BatchOutcome {
+    accepted: Vec<Uuid>,
+    duplicate: Vec<Uuid>,
+    rejected: Vec<UploadRejection>,
+    server_cursor: i64,
+}
+
+/// Per-op decision reached during the in-memory validation pass below,
+/// before any of the batch's writes are issued.
+enum Decision<'a> {
+    Duplicate(i64),
+    Rejected(&'static str),
+    Accept(&'a OperationIn),
+}
+
+/// Validates and persists an entire upload batch in one transaction instead
+/// of one transaction per operation. The old code (see git history) ran
+/// every check — dedup, the advisory lock, the device-sequence check, the
+/// ownership check, cursor allocation, the insert, the tombstone write —
+/// as its own round trip *per operation*, which is what made a 500-op
+/// batch cost on the order of thousands of sequential DB round trips (and,
+/// worse, thousands of separate transaction commits/fsyncs). All of that
+/// batches cleanly here because every operation in one request always
+/// belongs to the same device: the per-device advisory lock, the "last
+/// device sequence seen" counter, and the per-user cursor allocator are
+/// each acquired/read exactly once for the whole batch rather than once
+/// per op.
+async fn process_batch(
+    state: &AppState,
+    device: &AuthenticatedDevice,
+    ops: &[OperationIn],
+) -> AppResult<BatchOutcome> {
+    if ops.is_empty() {
+        let cursor = current_cursor_tx(&mut state.db.begin().await?, device.user_id).await?;
+        return Ok(BatchOutcome {
+            accepted: vec![],
+            duplicate: vec![],
+            rejected: vec![],
+            server_cursor: cursor,
+        });
+    }
+
+    let mut tx = state.db.begin().await?;
+
+    // Serializes per-device sequence validation + cursor allocation against
+    // any other concurrent upload from this same device — held for the
+    // whole batch (not re-acquired per op) since it's the same device
+    // throughout one request.
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        device.device_id.to_string()
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Bulk dedup: one query for every operation_id in the batch instead of
+    // one per op.
+    let op_ids: Vec<Uuid> = ops.iter().map(|o| o.operation_id).collect();
+    let existing: HashMap<Uuid, i64> = sqlx::query!(
+        "SELECT operation_id, server_cursor FROM sync_operations WHERE operation_id = ANY($1)",
+        &op_ids
+    )
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .map(|r| (r.operation_id, r.server_cursor))
+    .collect();
+
+    let mut last_seq: i64 = sqlx::query_scalar!(
+        "SELECT MAX(device_sequence) FROM sync_operations WHERE device_id = $1",
+        device.device_id
+    )
+    .fetch_one(&mut *tx)
+    .await?
+    .unwrap_or(0);
+
+    // Bulk ownership pre-check: every (object_type, object_id) a
+    // non-origination, non-duplicate op in this batch refers to, resolved
+    // in one query instead of one `EXISTS` per op. An object *originated
+    // earlier in this same batch* won't show up here (its insert hasn't
+    // happened yet) — that case is handled separately via
+    // `originated_in_batch` below.
+    let mut lookup_types: Vec<String> = Vec::new();
+    let mut lookup_ids: Vec<Uuid> = Vec::new();
+    for op in ops {
+        if existing.contains_key(&op.operation_id) {
+            continue;
+        }
+        if !vocabulary::is_origination_operation(&op.object_type, &op.operation_type) {
+            lookup_types.push(op.object_type.clone());
+            lookup_ids.push(op.object_id);
+        }
+    }
+    let owned: HashSet<(String, Uuid)> = if lookup_ids.is_empty() {
+        HashSet::new()
+    } else {
+        sqlx::query!(
+            r#"
+            SELECT DISTINCT so.object_type, so.object_id
+            FROM sync_operations so
+            JOIN UNNEST($1::text[], $2::uuid[]) AS lookup(object_type, object_id)
+              ON so.object_type = lookup.object_type AND so.object_id = lookup.object_id
+            WHERE so.user_id = $3
+            "#,
+            &lookup_types,
+            &lookup_ids,
+            device.user_id
+        )
+        .fetch_all(&mut *tx)
+        .await?
+        .into_iter()
+        .map(|r| (r.object_type, r.object_id))
+        .collect()
+    };
+
+    // Pure in-memory validation pass — no queries in this loop. Mirrors the
+    // old per-op checks exactly, but `last_seq` and `originated_in_batch`
+    // are updated as we go so later ops in the batch see earlier ops in
+    // the *same* batch, the same way they would have as separate
+    // sequential requests.
+    let mut decisions: Vec<Decision> = Vec::with_capacity(ops.len());
+    let mut originated_in_batch: HashSet<(String, Uuid)> = HashSet::new();
+
+    for op in ops {
+        if let Some(&cursor) = existing.get(&op.operation_id) {
+            decisions.push(Decision::Duplicate(cursor));
+            continue;
+        }
+        if !vocabulary::is_known_object_type(&op.object_type) {
+            decisions.push(Decision::Rejected("unknown_object_type"));
+            continue;
+        }
+        if !vocabulary::allowed_operation_types(&op.object_type).contains(&op.operation_type.as_str())
+        {
+            decisions.push(Decision::Rejected("unknown_operation_type"));
+            continue;
+        }
+        if op.encryption_version < 0 {
+            decisions.push(Decision::Rejected("invalid_encryption_version"));
+            continue;
+        }
+        if op.encryption_version == 0 && state.config.require_encryption {
+            decisions.push(Decision::Rejected("encryption_required"));
+            continue;
+        }
+        let payload_size = serde_json::to_vec(&op.payload).map(|v| v.len()).unwrap_or(0);
+        if payload_size > MAX_PAYLOAD_BYTES {
+            decisions.push(Decision::Rejected("payload_too_large"));
+            continue;
+        }
+        if op.device_sequence < 1 {
+            decisions.push(Decision::Rejected("invalid_device_sequence"));
+            continue;
+        }
+        if op.device_sequence <= last_seq {
+            decisions.push(Decision::Rejected("sequence_conflict"));
+            continue;
+        }
+
+        let is_origination = vocabulary::is_origination_operation(&op.object_type, &op.operation_type);
+        if !is_origination {
+            let key = (op.object_type.clone(), op.object_id);
+            if !owned.contains(&key) && !originated_in_batch.contains(&key) {
+                decisions.push(Decision::Rejected("object_not_found"));
+                continue;
+            }
+        }
+
+        last_seq = op.device_sequence;
+        if is_origination {
+            originated_in_batch.insert((op.object_type.clone(), op.object_id));
+        }
+        decisions.push(Decision::Accept(op));
+    }
+
+    let accepted_ops: Vec<&OperationIn> = decisions
+        .iter()
+        .filter_map(|d| match d {
+            Decision::Accept(op) => Some(*op),
+            _ => None,
+        })
+        .collect();
+
+    let mut server_cursor = 0i64;
+
+    if !accepted_ops.is_empty() {
+        // Atomically reserve a contiguous cursor range sized to exactly the
+        // accepted count — one round trip regardless of batch size. Still
+        // race-safe against a concurrent upload from a *different* device
+        // of the same user: the UPDATE's row lock on the `sync_cursors` row
+        // serializes them exactly as the old one-increment-per-op version
+        // did, just in one larger increment instead of many increments of 1.
+        let count = accepted_ops.len() as i64;
+        let end_cursor: i64 = sqlx::query_scalar!(
+            r#"
+            INSERT INTO sync_cursors (user_id, device_id, cursor_value)
+            VALUES ($1, NULL, $2)
+            ON CONFLICT (user_id, device_id)
+            DO UPDATE SET cursor_value = sync_cursors.cursor_value + $2, updated_at = now()
+            RETURNING cursor_value
+            "#,
+            device.user_id,
+            count
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        let start_cursor = end_cursor - count + 1;
+        server_cursor = end_cursor;
+
+        let mut operation_ids = Vec::with_capacity(accepted_ops.len());
+        let mut device_sequences = Vec::with_capacity(accepted_ops.len());
+        let mut lamport_timestamps = Vec::with_capacity(accepted_ops.len());
+        let mut cursors = Vec::with_capacity(accepted_ops.len());
+        let mut object_types = Vec::with_capacity(accepted_ops.len());
+        let mut object_ids = Vec::with_capacity(accepted_ops.len());
+        let mut operation_types = Vec::with_capacity(accepted_ops.len());
+        let mut encryption_versions = Vec::with_capacity(accepted_ops.len());
+        let mut payloads = Vec::with_capacity(accepted_ops.len());
+
+        // Deduped by object: a batch could (rarely) contain more than one
+        // terminal/restore op for the same object (e.g. a delete resent
+        // after a dropped response, or two logically-redundant deletes).
+        // `sync_operations` rows preserve every one of them regardless, but
+        // one INSERT statement's ON CONFLICT DO UPDATE cannot target the
+        // same tombstone row twice, so only the highest-cursor (i.e. last
+        // processed, same as the old sequential loop's end state) entry
+        // per object survives into the bulk tombstone write.
+        let mut tombstones: HashMap<(String, Uuid), i64> = HashMap::new();
+        let mut restores: HashSet<(String, Uuid)> = HashSet::new();
+
+        for (i, op) in accepted_ops.iter().enumerate() {
+            let cursor = start_cursor + i as i64;
+            operation_ids.push(op.operation_id);
+            device_sequences.push(op.device_sequence);
+            lamport_timestamps.push(op.lamport_timestamp);
+            cursors.push(cursor);
+            object_types.push(op.object_type.clone());
+            object_ids.push(op.object_id);
+            operation_types.push(op.operation_type.clone());
+            encryption_versions.push(op.encryption_version);
+            payloads.push(op.payload.clone());
+
+            if vocabulary::is_terminal_operation(&op.object_type, &op.operation_type) {
+                tombstones.insert((op.object_type.clone(), op.object_id), cursor);
+            } else if vocabulary::is_restore_operation(&op.object_type, &op.operation_type) {
+                restores.insert((op.object_type.clone(), op.object_id));
+            }
+        }
+
+        sqlx::query!(
+            r#"
+            INSERT INTO sync_operations
+                (operation_id, user_id, device_id, device_sequence, lamport_timestamp,
+                 server_cursor, object_type, object_id, operation_type, encryption_version, payload)
+            SELECT u.operation_id, $1, $2, u.device_sequence, u.lamport_timestamp,
+                   u.server_cursor, u.object_type, u.object_id, u.operation_type,
+                   u.encryption_version, u.payload
+            FROM UNNEST(
+                $3::uuid[], $4::bigint[], $5::bigint[], $6::bigint[],
+                $7::text[], $8::uuid[], $9::text[], $10::int[], $11::jsonb[]
+            ) AS u(operation_id, device_sequence, lamport_timestamp, server_cursor,
+                   object_type, object_id, operation_type, encryption_version, payload)
+            "#,
+            device.user_id,
+            device.device_id,
+            &operation_ids,
+            &device_sequences,
+            &lamport_timestamps,
+            &cursors,
+            &object_types,
+            &object_ids,
+            &operation_types,
+            &encryption_versions,
+            &payloads
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        if !tombstones.is_empty() {
+            let (types, (ids, tomb_cursors)): (Vec<String>, (Vec<Uuid>, Vec<i64>)) = tombstones
+                .into_iter()
+                .map(|((t, id), c)| (t, (id, c)))
+                .unzip();
+            sqlx::query!(
+                r#"
+                INSERT INTO tombstones (user_id, object_type, object_id, deleted_at_cursor, active)
+                SELECT $1, u.object_type, u.object_id, u.cursor, true
+                FROM UNNEST($2::text[], $3::uuid[], $4::bigint[]) AS u(object_type, object_id, cursor)
+                ON CONFLICT (user_id, object_type, object_id)
+                DO UPDATE SET deleted_at_cursor = EXCLUDED.deleted_at_cursor, active = true
+                "#,
+                device.user_id,
+                &types,
+                &ids,
+                &tomb_cursors
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        if !restores.is_empty() {
+            let (types, ids): (Vec<String>, Vec<Uuid>) = restores.into_iter().unzip();
+            sqlx::query!(
+                r#"
+                UPDATE tombstones SET active = false
+                WHERE user_id = $1
+                AND (object_type, object_id) IN (SELECT * FROM UNNEST($2::text[], $3::uuid[]))
+                "#,
+                device.user_id,
+                &types,
+                &ids
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    let max_duplicate_cursor = decisions
+        .iter()
+        .filter_map(|d| match d {
+            Decision::Duplicate(c) => Some(*c),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+    server_cursor = server_cursor.max(max_duplicate_cursor);
+    if server_cursor == 0 {
+        server_cursor = current_cursor_tx(&mut tx, device.user_id).await?;
+    }
+
+    tx.commit().await?;
+
+    let mut accepted = Vec::new();
+    let mut duplicate = Vec::new();
+    let mut rejected = Vec::new();
+    for (op, decision) in ops.iter().zip(decisions.iter()) {
+        match decision {
+            Decision::Accept(_) => accepted.push(op.operation_id),
+            Decision::Duplicate(_) => duplicate.push(op.operation_id),
+            Decision::Rejected(reason) => rejected.push(UploadRejection {
+                operation_id: op.operation_id,
+                reason: reason.to_string(),
+            }),
+        }
+    }
+
+    Ok(BatchOutcome {
+        accepted,
+        duplicate,
+        rejected,
+        server_cursor,
+    })
+}
+
+async fn current_cursor_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+) -> AppResult<i64> {
+    let cursor: Option<i64> = sqlx::query_scalar!(
+        "SELECT cursor_value FROM sync_cursors WHERE user_id = $1 AND device_id IS NULL",
+        user_id
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(cursor.unwrap_or(0))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DownloadQuery {
+    cursor: Option<i64>,
+    limit: Option<i64>,
+}
+
+async fn download(
+    device: AuthenticatedDevice,
+    State(state): State<AppState>,
+    Query(q): Query<DownloadQuery>,
+) -> AppResult<Json<DownloadResponse>> {
+    enforce(
+        &state.rate_limiter,
+        SYNC_DOWNLOAD_LIMIT,
+        &device.device_id.to_string(),
+    )?;
+
+    crate::devices::touch_last_seen_background(&state, device.device_id);
+
+    let cursor = q.cursor.unwrap_or(0).max(0);
+    let limit = q.limit.unwrap_or(DEFAULT_DOWNLOAD_LIMIT).clamp(1, MAX_DOWNLOAD_LIMIT);
+
+    // Combines what used to be 3 separate round trips (MIN(server_cursor),
+    // MAX(snapshot_cursor), and the cursor upsert) into 1, via a
+    // data-modifying CTE. The upsert runs unconditionally, even on a
+    // request that turns out to be `cursor_too_old` below — recording the
+    // device's self-reported cursor is always an accurate, monotonically
+    // safe fact about its own claimed progress (via the `GREATEST` in the
+    // `DO UPDATE`) regardless of whether *this* request also happens to
+    // reject it, and a device told to resync via snapshot anchors its next
+    // read at the fresh snapshot cursor anyway, never depending on this
+    // value again.
+    let bounds = sqlx::query!(
+        r#"
+        WITH bounds AS (
+            SELECT
+                (SELECT MIN(server_cursor) FROM sync_operations WHERE user_id = $1) AS min_cursor,
+                (SELECT MAX(snapshot_cursor) FROM sync_snapshots WHERE user_id = $1) AS max_snapshot
+        ),
+        upsert AS (
+            INSERT INTO sync_cursors (user_id, device_id, cursor_value)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id, device_id)
+            DO UPDATE SET cursor_value = GREATEST(sync_cursors.cursor_value, EXCLUDED.cursor_value), updated_at = now()
+            RETURNING 1 AS ok
+        )
+        SELECT bounds.min_cursor, bounds.max_snapshot
+        FROM bounds, upsert
+        "#,
+        device.user_id,
+        device.device_id,
+        cursor
+    )
+    .fetch_one(&state.db)
+    .await?;
+
+    // docs/protocol.md §11: once `sync::compaction` has deleted operations
+    // below a persisted snapshot's cursor, a device can only resume
+    // incrementally from that cursor or later — anything older needs
+    // snapshot resync (§10.3) first, since the raw rows it would need no
+    // longer exist. `min_cursor - 1` alone (the pre-compaction check) isn't
+    // sufficient once compaction exists: a lingering tombstone row held
+    // past the boundary for its retention window (see `compaction.rs`)
+    // would otherwise make `min_cursor` look older than it should, so the
+    // floor is the *higher* of the two constraints. Unlike before,
+    // `cursor == 0` is no longer unconditionally exempt — a brand-new
+    // device that has never synced must also be forced through snapshot
+    // resync if compaction has already run ahead of it, or it would
+    // silently end up with an incomplete history and no error at all.
+    let raw_floor = bounds.min_cursor.map(|m| m - 1).unwrap_or(0);
+    let snapshot_floor = bounds.max_snapshot.unwrap_or(0);
+    let floor_cursor = raw_floor.max(snapshot_floor);
+
+    if cursor < floor_cursor {
+        return Err(AppError::Conflict("cursor_too_old".into()));
+    }
+
+    let fetch_limit = limit + 1;
+    let mut rows = sqlx::query_as!(
+        OperationOut,
+        r#"
+        SELECT operation_id, device_id, device_sequence, lamport_timestamp, object_type,
+               object_id, operation_type, encryption_version, payload, server_cursor, created_at
+        FROM sync_operations
+        WHERE user_id = $1 AND server_cursor > $2
+        ORDER BY server_cursor ASC
+        LIMIT $3
+        "#,
+        device.user_id,
+        cursor,
+        fetch_limit
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let has_more = rows.len() as i64 > limit;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+    let next_cursor = rows.last().map(|r| r.server_cursor).unwrap_or(cursor);
+
+    Ok(Json(DownloadResponse {
+        operations: rows,
+        next_cursor,
+        has_more,
+    }))
+}
+
+#[derive(sqlx::FromRow)]
+struct SnapshotSourceRow {
+    object_type: String,
+    object_id: Uuid,
+    operation_type: String,
+    encryption_version: i32,
+    payload: serde_json::Value,
+}
+
+#[derive(sqlx::FromRow)]
+struct SnapshotTombstoneRow {
+    object_type: String,
+    object_id: Uuid,
+}
+
+pub(super) const FIELD_MERGE_OBJECT_TYPES: &[&str] = &["bookmark", "bookmarkFolder"];
+
+/// Combines a `bookmark`/`bookmarkFolder`'s prior merged state (`base`,
+/// from a persisted `sync_snapshots` row — `None` if the object wasn't in
+/// it) with a batch of newer operations (`new_ops_ascending`, already
+/// sorted by [`super::conflict::OrderingKey`]) into its updated merged
+/// state. This extends [`super::conflict::merge_bookmark_fields`] across a
+/// snapshot boundary: `base` is itself the output of a prior merge, so
+/// treating it as a synthetic first "operation" and merging the newer ops
+/// on top produces the same result merging the *entire* unbounded history
+/// would (docs/protocol.md §8.2) — which is what makes it safe for
+/// `sync::compaction` to delete the underlying rows afterward.
+///
+/// Falls back to whole-object LWW (the newest operation's payload,
+/// discarding `base` entirely) whenever any contributing payload is
+/// encrypted, or the object type doesn't need field-level merge — same
+/// rule as the original single-pass reduction this replaces.
+fn combine_object(
+    object_type: String,
+    object_id: Uuid,
+    base: Option<SnapshotObject>,
+    new_ops_ascending: Vec<SnapshotSourceRow>,
+) -> Option<SnapshotObject> {
+    if new_ops_ascending.is_empty() {
+        return base;
+    }
+
+    let new_all_plaintext = new_ops_ascending.iter().all(|op| op.encryption_version == 0);
+    let base_plaintext = base.as_ref().map_or(true, |b| b.encryption_version == 0);
+
+    if new_all_plaintext && base_plaintext && FIELD_MERGE_OBJECT_TYPES.contains(&object_type.as_str()) {
+        let mut payloads: Vec<serde_json::Value> = Vec::with_capacity(new_ops_ascending.len() + 1);
+        if let Some(b) = &base {
+            payloads.push(b.payload.clone());
+        }
+        payloads.extend(new_ops_ascending.iter().map(|op| op.payload.clone()));
+        if let Some(merged) = super::conflict::merge_bookmark_fields(&payloads) {
+            return Some(SnapshotObject {
+                object_type,
+                object_id,
+                // Synthesized full current-state payload, equivalent in
+                // shape to a `create` operation's payload — there is no
+                // single originating operation for a merged record.
+                operation_type: "create".to_string(),
+                encryption_version: 0,
+                payload: merged,
+            });
+        }
+    }
+
+    // Whole-object LWW fallback: `new_ops_ascending` is sorted ascending,
+    // so the last element carries the highest §8.1 ordering key overall —
+    // `base` is superseded wholly, same as it would be by any newer
+    // whole-object-winning operation.
+    let winner = new_ops_ascending
+        .into_iter()
+        .last()
+        .expect("checked non-empty above");
+    Some(SnapshotObject {
+        object_type,
+        object_id,
+        operation_type: winner.operation_type,
+        encryption_version: winner.encryption_version,
+        payload: winner.payload,
+    })
+}
+
+/// Resolves the account's `history_retention` setting (docs stored/
+/// validated in `sync::settings`, previously never enforced anywhere) into
+/// a concrete cutoff instant for filtering out old `historyVisit`
+/// operations, or `None` for "unlimited" / an unrecognized value / no
+/// settings row at all — fail open toward keeping data rather than
+/// deleting it under a guessed-at policy.
+///
+/// historyVisit payloads are end-to-end encrypted (docs/encryption.md), so
+/// the server can never read a visit's own timestamp — retention is
+/// necessarily measured from `sync_operations.created_at` (when the
+/// operation was uploaded), not from when the visit actually happened. For
+/// a device replaying a large history backfill, this means the retention
+/// clock effectively starts at upload time rather than each visit's real
+/// historical date.
+///
+/// Known limitation: this only ever filters raw `sync_operations` rows
+/// (via [`compute_objects`]'s `new_rows` query) before they're folded into
+/// a `sync_snapshots` row — it does not retroactively strip already-expired
+/// `historyVisit` objects out of a snapshot that was persisted before this
+/// filtering existed. Such an account converges to the configured
+/// retention window only for visits compacted going forward.
+pub(super) async fn history_retention_cutoff(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+) -> AppResult<Option<DateTime<Utc>>> {
+    let retention: Option<String> = sqlx::query_scalar!(
+        "SELECT history_retention FROM user_settings WHERE user_id = $1",
+        user_id
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let days: i64 = match retention.as_deref() {
+        Some("7d") => 7,
+        Some("30d") => 30,
+        Some("90d") => 90,
+        Some("1y") => 365,
+        _ => return Ok(None),
+    };
+    Ok(Some(Utc::now() - chrono::Duration::days(days)))
+}
+
+/// Computes the merged current state of every object as of `ceiling` (or
+/// "now" when `None`), reusing the latest persisted `sync_snapshots` row
+/// at or below the ceiling as a base and layering newer operations on top
+/// via [`combine_object`] — rather than re-reducing each object's *entire*
+/// history from raw operations every time. This is what lets
+/// `sync::compaction` safely delete old operation rows: any later call
+/// with a ceiling at or above the compacted boundary gets the same answer
+/// from the persisted base alone, with no dependency on the deleted rows.
+///
+/// `history_cutoff` (see [`history_retention_cutoff`]) additionally
+/// excludes `historyVisit` operations uploaded before that instant from
+/// the `new_rows` this fold layers on top of the base — pass `None` to
+/// disable that filtering entirely.
+///
+/// Returns `(resolved_cursor, objects_by_key)`. Tombstone filtering is the
+/// caller's responsibility — both callers (the `/snapshot` route and
+/// `sync::compaction`) pair this with a fresh read of the `tombstones`
+/// table, which compaction never deletes from, so it's never stale.
+pub(super) async fn compute_objects(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    ceiling: Option<i64>,
+    history_cutoff: Option<DateTime<Utc>>,
+) -> AppResult<(i64, HashMap<(String, Uuid), SnapshotObject>)> {
+    let base_row: Option<(i64, serde_json::Value)> = match ceiling {
+        Some(c) => sqlx::query!(
+            "SELECT snapshot_cursor, data FROM sync_snapshots \
+             WHERE user_id = $1 AND snapshot_cursor <= $2 ORDER BY snapshot_cursor DESC LIMIT 1",
+            user_id,
+            c
+        )
+        .fetch_optional(&mut **tx)
+        .await?
+        .map(|r| (r.snapshot_cursor, r.data)),
+        None => sqlx::query!(
+            "SELECT snapshot_cursor, data FROM sync_snapshots \
+             WHERE user_id = $1 ORDER BY snapshot_cursor DESC LIMIT 1",
+            user_id
+        )
+        .fetch_optional(&mut **tx)
+        .await?
+        .map(|r| (r.snapshot_cursor, r.data)),
+    };
+
+    let (base_cursor, mut objects): (i64, HashMap<(String, Uuid), SnapshotObject>) = match base_row {
+        Some((cursor, data)) => {
+            let parsed: Vec<SnapshotObject> = serde_json::from_value(data).map_err(anyhow::Error::from)?;
+            let map = parsed
+                .into_iter()
+                .map(|o| ((o.object_type.clone(), o.object_id), o))
+                .collect();
+            (cursor, map)
+        }
+        None => (0, HashMap::new()),
+    };
+
+    let max_op_cursor: i64 = match ceiling {
+        Some(c) => sqlx::query_scalar!(
+            r#"SELECT COALESCE(MAX(server_cursor), 0) as "c!" FROM sync_operations WHERE user_id = $1 AND server_cursor <= $2"#,
+            user_id,
+            c
+        )
+        .fetch_one(&mut **tx)
+        .await?,
+        None => sqlx::query_scalar!(
+            r#"SELECT COALESCE(MAX(server_cursor), 0) as "c!" FROM sync_operations WHERE user_id = $1"#,
+            user_id
+        )
+        .fetch_one(&mut **tx)
+        .await?,
+    };
+    let resolved_cursor = base_cursor.max(max_op_cursor);
+
+    // The `object_type <> 'historyVisit' OR ...` clause only ever filters
+    // historyVisit rows (docs/protocol.md §6: every other object type goes
+    // through the field-merge/whole-object-LWW path above regardless of
+    // age) and is a no-op when `history_cutoff` is None ("unlimited"
+    // retention or no settings row — see `history_retention_cutoff`).
+    let new_rows: Vec<SnapshotSourceRow> = match ceiling {
+        Some(c) => sqlx::query_as!(
+            SnapshotSourceRow,
+            r#"
+            SELECT object_type, object_id, operation_type, encryption_version, payload
+            FROM sync_operations
+            WHERE user_id = $1 AND server_cursor > $2 AND server_cursor <= $3
+              AND (object_type <> 'historyVisit' OR $4::timestamptz IS NULL OR created_at >= $4::timestamptz)
+            ORDER BY object_type, object_id, lamport_timestamp ASC, device_id ASC, operation_id ASC
+            "#,
+            user_id,
+            base_cursor,
+            c,
+            history_cutoff
+        )
+        .fetch_all(&mut **tx)
+        .await?,
+        None => sqlx::query_as!(
+            SnapshotSourceRow,
+            r#"
+            SELECT object_type, object_id, operation_type, encryption_version, payload
+            FROM sync_operations
+            WHERE user_id = $1 AND server_cursor > $2
+              AND (object_type <> 'historyVisit' OR $3::timestamptz IS NULL OR created_at >= $3::timestamptz)
+            ORDER BY object_type, object_id, lamport_timestamp ASC, device_id ASC, operation_id ASC
+            "#,
+            user_id,
+            base_cursor,
+            history_cutoff
+        )
+        .fetch_all(&mut **tx)
+        .await?,
+    };
+
+    let mut new_groups: HashMap<(String, Uuid), Vec<SnapshotSourceRow>> = HashMap::new();
+    for row in new_rows {
+        new_groups
+            .entry((row.object_type.clone(), row.object_id))
+            .or_default()
+            .push(row);
+    }
+
+    for ((object_type, object_id), ops) in new_groups {
+        let base_entry = objects.remove(&(object_type.clone(), object_id));
+        if let Some(combined) = combine_object(object_type.clone(), object_id, base_entry, ops) {
+            objects.insert((object_type, object_id), combined);
+        }
+    }
+
+    Ok((resolved_cursor, objects))
+}
+
+/// Computes an on-demand, point-in-time-consistent snapshot per
+/// docs/protocol.md §10.3, via [`compute_objects`].
+async fn snapshot(
+    device: AuthenticatedDevice,
+    State(state): State<AppState>,
+) -> AppResult<Json<SnapshotResponse>> {
+    enforce(
+        &state.rate_limiter,
+        SYNC_SNAPSHOT_LIMIT,
+        &device.device_id.to_string(),
+    )?;
+
+    crate::devices::touch_last_seen_background(&state, device.device_id);
+
+    let mut tx = state.db.begin().await?;
+
+    let history_cutoff = history_retention_cutoff(&mut tx, device.user_id).await?;
+    let (snapshot_cursor, objects_map) =
+        compute_objects(&mut tx, device.user_id, None, history_cutoff).await?;
+
+    let tombstone_rows = sqlx::query_as!(
+        SnapshotTombstoneRow,
+        "SELECT object_type, object_id FROM tombstones WHERE user_id = $1 AND active = true",
+        device.user_id
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    let tombstone_ids: HashSet<(String, Uuid)> = tombstone_rows
+        .iter()
+        .map(|t| (t.object_type.clone(), t.object_id))
+        .collect();
+
+    let objects = filter_tombstoned(objects_map, &tombstone_ids);
+
+    let tombstones = tombstone_rows
+        .into_iter()
+        .map(|t| SnapshotTombstone {
+            object_type: t.object_type,
+            object_id: t.object_id,
+        })
+        .collect();
+
+    Ok(Json(SnapshotResponse {
+        snapshot_cursor,
+        objects,
+        tombstones,
+    }))
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SyncStats {
+    bookmarks: i64,
+    history_visits: i64,
+    tabs: i64,
+}
+
+// `stats` recomputes an account's entire merged object state via
+// `compute_objects` — the same full-snapshot-blob parse `sync::compaction`
+// pays hourly — to return three integers, on a dashboard endpoint the web
+// UI can poll/refresh repeatedly. A short TTL cache collapses repeated
+// calls within the window into one actual computation, the same tradeoff
+// the extension's own settings cache (extension/src/api/client.ts) already
+// makes for a similarly "rarely changes, never needs sub-minute freshness"
+// endpoint. Keyed by user_id and never swept: bounded by the number of
+// distinct users who have ever called this, not by how much sync data
+// they have, so it carries none of the unbounded-growth risk a per-request
+// or per-operation cache would.
+static STATS_CACHE: LazyLock<DashMap<Uuid, (Instant, SyncStats)>> = LazyLock::new(DashMap::new);
+const STATS_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Item counts for the web dashboard's "what's synced" summary. Reuses
+/// `compute_objects` — the same compaction-aware object reconstruction the
+/// `/snapshot` route and `sync::compaction` rely on — rather than counting
+/// `sync_operations` rows directly: compaction deletes old rows once
+/// they're folded into a snapshot, so a raw-row count would silently drop
+/// the moment compaction first runs (default hourly). `historyVisit`
+/// objects are never tombstoned (each visit is its own permanent object,
+/// docs/protocol.md §6) — the history count only shrinks via
+/// `history_retention_cutoff` (if the account has retention configured),
+/// never via ordinary deletion.
+async fn stats(
+    user: AnyAuthenticatedUser,
+    State(state): State<AppState>,
+) -> AppResult<Json<SyncStats>> {
+    enforce(&state.rate_limiter, SYNC_STATS_LIMIT, &user.user_id.to_string())?;
+
+    if let Some(cached) = STATS_CACHE.get(&user.user_id) {
+        if cached.0.elapsed() < STATS_CACHE_TTL {
+            return Ok(Json(cached.1.clone()));
+        }
+    }
+
+    let mut tx = state.db.begin().await?;
+
+    let history_cutoff = history_retention_cutoff(&mut tx, user.user_id).await?;
+    let (_, objects_map) = compute_objects(&mut tx, user.user_id, None, history_cutoff).await?;
+
+    let tombstone_ids: HashSet<(String, Uuid)> = sqlx::query!(
+        "SELECT object_type, object_id FROM tombstones WHERE user_id = $1 AND active = true",
+        user.user_id
+    )
+    .fetch_all(&mut *tx)
+    .await?
+    .into_iter()
+    .map(|t| (t.object_type, t.object_id))
+    .collect();
+
+    tx.commit().await?;
+
+    let mut stats = SyncStats {
+        bookmarks: 0,
+        history_visits: 0,
+        tabs: 0,
+    };
+    for (object_type, object_id) in objects_map.keys() {
+        if tombstone_ids.contains(&(object_type.clone(), *object_id)) {
+            continue;
+        }
+        match object_type.as_str() {
+            "bookmark" | "bookmarkFolder" => stats.bookmarks += 1,
+            "historyVisit" => stats.history_visits += 1,
+            "tab" => stats.tabs += 1,
+            _ => {}
+        }
+    }
+
+    STATS_CACHE.insert(user.user_id, (Instant::now(), stats.clone()));
+
+    Ok(Json(stats))
+}
+
+/// Given a fully-computed object map (from [`compute_objects`]) and the
+/// user's currently-active tombstone ids, returns the live (non-tombstoned)
+/// objects only — this is exactly the shape persisted into a new
+/// `sync_snapshots` row by `sync::compaction`, and is also reused by the
+/// `/snapshot` route above.
+pub(super) fn filter_tombstoned(
+    objects_map: HashMap<(String, Uuid), SnapshotObject>,
+    tombstone_ids: &HashSet<(String, Uuid)>,
+) -> Vec<SnapshotObject> {
+    objects_map
+        .into_iter()
+        .filter(|(key, _)| !tombstone_ids.contains(key))
+        .map(|(_, o)| o)
+        .collect()
+}

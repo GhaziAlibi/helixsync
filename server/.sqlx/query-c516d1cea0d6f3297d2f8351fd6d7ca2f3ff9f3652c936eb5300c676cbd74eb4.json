@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE device_credentials SET revoked_at = now(), last_used_at = now() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c516d1cea0d6f3297d2f8351fd6d7ca2f3ff9f3652c936eb5300c676cbd74eb4"
+}
