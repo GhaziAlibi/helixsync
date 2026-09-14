@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "HelixSync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Self-hosted, privacy-first browser synchronization for Helium and other Chromium browsers.",
   "minimum_chrome_version": "116",
   "icons": {
