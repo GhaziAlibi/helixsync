@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::middleware::rate_limit::{enforce, WEBSOCKET_CONNECT_LIMIT};
+use crate::middleware::rate_limit::{enforce_with_retry_after, WEBSOCKET_CONNECT_LIMIT};
 use crate::state::AppState;
 
 struct Connection {
@@ -169,13 +169,26 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         return;
     }
 
-    if enforce(
+    if let Err(retry_after) = enforce_with_retry_after(
         &state.rate_limiter,
         WEBSOCKET_CONNECT_LIMIT,
         &claims.sub.to_string(),
-    )
-    .is_err()
-    {
+    ) {
+        // Tell the client when the window resets instead of just closing on
+        // it — without this, a device that hits the limit (rapid MV3
+        // service-worker restarts, network flapping) reconnects straight
+        // back into the same still-active window and gets closed again in a
+        // tight loop, since it has no way to tell this apart from an
+        // ordinary transient close.
+        let _ = socket
+            .send(Message::Text(
+                serde_json::json!({
+                    "type": "rate_limited",
+                    "retryAfterMs": retry_after.as_millis() as u64,
+                })
+                .to_string(),
+            ))
+            .await;
         let _ = socket.close().await;
         return;
     }

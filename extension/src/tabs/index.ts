@@ -4,8 +4,15 @@
 // tab ONLY when the user has enabled "Restore remote tabs" with an
 // "automatic" policy — otherwise it's tracked for display only. This is
 // what guarantees a remote tab can never destroy an unrelated local tab.
-import { createLocalOperation, registerApplier } from "../sync/engine";
-import { recordLocalFieldState, resolveField, resolveFields } from "../sync/conflict";
+import { createLocalOperation, createLocalOperationsBatch, registerApplier } from "../sync/engine";
+import type { PendingLocalOperation } from "../sync/engine";
+import {
+  recordLocalFieldState,
+  recordLocalFieldStatesBatch,
+  resolveField,
+  resolveFields,
+  type LocalFieldStateEntry,
+} from "../sync/conflict";
 import {
   establishMapping,
   forgetMapping,
@@ -14,6 +21,7 @@ import {
   lookupObjectId,
 } from "../sync/mapping";
 import { getFieldState, putRemoteObject } from "../storage/db";
+import { createMicroBatchQueue } from "../sync/micro-batch";
 import { createSuppressionGuard } from "../sync/suppress";
 import { tabGroupUpdateProps, tabsGroupOptions } from "./groupSync";
 import { fetchSettings } from "../api/client";
@@ -40,7 +48,7 @@ const tabGroupsSupported = typeof chrome.tabGroups !== "undefined";
 // device would apply it right back (materializeTab is only reachable
 // under the "automatic" restore policy, so this loop is otherwise
 // unbounded between two devices that both auto-restore). The value-
-// equality check in `handleTabUpdated`/`handleGroupUpdated` below is a
+// equality check in `stageTabUpdated`/`stageGroupUpdated` below is a
 // second, timing-independent backstop for a tab's own multi-stage async
 // loading events (see that function's comment), which this synchronous
 // guard alone can't cover.
@@ -103,64 +111,129 @@ async function tabPayload(tab: chrome.tabs.Tab): Promise<TabPayload | undefined>
   };
 }
 
-async function handleTabCreated(tab: chrome.tabs.Tab): Promise<void> {
-  if (guard.isSuppressed()) return; // our own materializeTab() chrome.tabs.create() call
-  if (tab.id === undefined) return;
+// EXT-4: as in bookmarks/index.ts, a burst of chrome.tabs/chrome.tabGroups
+// events (bulk tab import, window restore) used to pay createLocalOperation
+// + recordLocalFieldState's full overhead once per event. Listeners below
+// do only the synchronous guard/dedup-relevant checks that must run at
+// event-fire time and push everything else onto a shared micro-batch queue;
+// `flushTabEvents` turns the whole queue into one createLocalOperationsBatch
+// + one recordLocalFieldStatesBatch call. See bookmarks/index.ts's matching
+// section for the fuller rationale (same shared helper, same shape).
+
+type QueuedTabEvent =
+  | { kind: "tabCreated"; tab: chrome.tabs.Tab }
+  | { kind: "tabUpdated"; tabId: number; tab: chrome.tabs.Tab }
+  | { kind: "tabActivated"; activeInfo: chrome.tabs.TabActiveInfo }
+  | { kind: "tabRemoved"; tabId: number }
+  | { kind: "groupUpdated"; group: chrome.tabGroups.TabGroup }
+  | { kind: "groupRemoved"; group: chrome.tabGroups.TabGroup };
+
+interface StagedTabOp {
+  objectType: ObjectType;
+  objectId: string;
+  operationType: OperationType;
+  payload: unknown;
+  fields: Array<{ field: string; value: unknown }>;
+}
+
+/** Per-flush overlay of field values staged earlier in the same batch but
+ * not yet committed to IndexedDB — see bookmarks/index.ts's matching
+ * overlay for the full rationale. Here it covers "state" (tab/group
+ * payload dedup) and "active", so e.g. a tab update immediately following
+ * that same tab's creation earlier in the same burst is compared against
+ * the just-created payload, not stale pre-batch state. */
+function overlayKey(objectId: string, field: string): string {
+  return `${objectId}:${field}`;
+}
+async function overlayOrFieldState(
+  overlay: Map<string, unknown>,
+  objectId: string,
+  field: string,
+): Promise<unknown> {
+  const key = overlayKey(objectId, field);
+  if (overlay.has(key)) return overlay.get(key);
+  return (await getFieldState(objectId, field))?.value;
+}
+
+async function stageTabCreated(
+  tab: chrome.tabs.Tab,
+  overlay: Map<string, unknown>,
+): Promise<StagedTabOp | null> {
+  if (tab.id === undefined) return null;
   const payload = await tabPayload(tab);
-  if (!payload) return;
+  if (!payload) return null;
   const objectId = await getOrCreateObjectId(TAB_TYPE, String(tab.id));
-  const { operation, deviceId } = await createLocalOperation(TAB_TYPE, objectId, "create", payload);
-  const key = opKey(operation.lamportTimestamp, deviceId, operation.operationId, "create");
-  await recordLocalFieldState(objectId, "state", key, payload);
-  await recordLocalFieldState(objectId, "liveness", key, "live");
+  overlay.set(overlayKey(objectId, "state"), payload);
+  return {
+    objectType: TAB_TYPE,
+    objectId,
+    operationType: "create",
+    payload,
+    fields: [
+      { field: "state", value: payload },
+      { field: "liveness", value: "live" },
+    ],
+  };
 }
 
 /** A real tab navigation/reload fires onUpdated across several async
  * stages (status: "loading" -> title/favIconUrl -> status: "complete"),
  * only the first of which (if any) falls inside `materializeTab`'s
  * synchronous `guard.run` window — the later ones arrive after the guard
- * has already reset. The value-equality check below is what actually
- * stops those from re-triggering: by the time materializeTab ran,
- * `applyTabRemote` had already resolved and stored this exact payload in
- * field_state, so any onUpdated echoing the same state (whenever it
- * arrives) is a no-op here rather than a new "update" operation — which
- * is what would otherwise ping-pong indefinitely between two devices both
+ * has already reset. The value-equality check below (via the overlay) is
+ * what actually stops those from re-triggering: by the time materializeTab
+ * ran, `applyTabRemote` had already resolved and stored this exact payload
+ * in field_state, so any onUpdated echoing the same state (whenever it
+ * arrives) is a no-op here rather than a new "update" operation — which is
+ * what would otherwise ping-pong indefinitely between two devices both
  * running the "automatic" restore policy. */
-async function handleTabUpdated(tabId: number, tab: chrome.tabs.Tab): Promise<void> {
-  if (guard.isSuppressed()) return;
+async function stageTabUpdated(
+  tabId: number,
+  tab: chrome.tabs.Tab,
+  overlay: Map<string, unknown>,
+): Promise<StagedTabOp | null> {
   const objectId = await lookupObjectId(TAB_TYPE, String(tabId));
-  if (!objectId) return;
+  if (!objectId) return null;
   const payload = await tabPayload(tab);
-  if (!payload) return;
-  const current = await getFieldState(objectId, "state");
-  if (current && JSON.stringify(current.value) === JSON.stringify(payload)) return;
-  const { operation, deviceId } = await createLocalOperation(TAB_TYPE, objectId, "update", payload);
-  const key = opKey(operation.lamportTimestamp, deviceId, operation.operationId, "update");
-  await recordLocalFieldState(objectId, "state", key, payload);
+  if (!payload) return null;
+  const current = await overlayOrFieldState(overlay, objectId, "state");
+  if (current !== undefined && JSON.stringify(current) === JSON.stringify(payload)) return null;
+  overlay.set(overlayKey(objectId, "state"), payload);
+  return { objectType: TAB_TYPE, objectId, operationType: "update", payload, fields: [{ field: "state", value: payload }] };
 }
 
-async function handleTabActivated(activeInfo: chrome.tabs.TabActiveInfo): Promise<void> {
+async function stageTabActivated(
+  activeInfo: chrome.tabs.TabActiveInfo,
+  overlay: Map<string, unknown>,
+): Promise<StagedTabOp | null> {
   const objectId = await lookupObjectId(TAB_TYPE, String(activeInfo.tabId));
-  if (!objectId) return;
+  if (!objectId) return null;
   // Chrome can re-fire onActivated for a tab that's already the active one
   // (e.g. a window focus change) — skip the redundant operation rather
   // than uploading an identical "activate" every time.
-  const current = await getFieldState(objectId, "active");
-  if (current?.value === true) return;
-  const { operation, deviceId } = await createLocalOperation(TAB_TYPE, objectId, "activate", {
-    active: true,
-  });
-  const key = opKey(operation.lamportTimestamp, deviceId, operation.operationId, "activate");
-  await recordLocalFieldState(objectId, "active", key, true);
+  const current = await overlayOrFieldState(overlay, objectId, "active");
+  if (current === true) return null;
+  overlay.set(overlayKey(objectId, "active"), true);
+  return {
+    objectType: TAB_TYPE,
+    objectId,
+    operationType: "activate",
+    payload: { active: true },
+    fields: [{ field: "active", value: true }],
+  };
 }
 
-async function handleTabRemoved(tabId: number): Promise<void> {
+async function stageTabRemoved(tabId: number): Promise<StagedTabOp | null> {
   const objectId = await lookupObjectId(TAB_TYPE, String(tabId));
-  if (!objectId) return;
-  const { operation, deviceId } = await createLocalOperation(TAB_TYPE, objectId, "close", {});
-  const key = opKey(operation.lamportTimestamp, deviceId, operation.operationId, "close");
-  await recordLocalFieldState(objectId, "liveness", key, "deleted");
-  await forgetMapping(TAB_TYPE, String(tabId));
+  if (!objectId) return null;
+  await forgetMapping(TAB_TYPE, String(tabId)); // immediate — see stageRemoved's note in bookmarks/index.ts
+  return {
+    objectType: TAB_TYPE,
+    objectId,
+    operationType: "close",
+    payload: {},
+    fields: [{ field: "liveness", value: "deleted" }],
+  };
 }
 
 // --- Tab groups (feature-detected, docs/protocol.md §14) -------------------
@@ -188,30 +261,105 @@ async function syncTabGroup(chromiumTabId: string, groupObjectId: string): Promi
   }
 }
 
-async function handleGroupUpdated(group: chrome.tabGroups.TabGroup): Promise<void> {
-  if (guard.isSuppressed()) return; // our own syncTabGroup()/applyGroupRemote() chrome.tabGroups.update() call
+async function stageGroupUpdated(
+  group: chrome.tabGroups.TabGroup,
+  overlay: Map<string, unknown>,
+): Promise<StagedTabOp | null> {
   const objectId = await getOrCreateObjectId(GROUP_TYPE, String(group.id));
   const payload: TabGroupPayload = {
     title: group.title,
     color: group.color,
     collapsed: group.collapsed,
   };
-  const current = await getFieldState(objectId, "state");
-  if (current && JSON.stringify(current.value) === JSON.stringify(payload)) return;
-  const { operation, deviceId } = await createLocalOperation(GROUP_TYPE, objectId, "update", payload);
-  const key = opKey(operation.lamportTimestamp, deviceId, operation.operationId, "update");
-  await recordLocalFieldState(objectId, "state", key, payload);
-  await recordLocalFieldState(objectId, "liveness", key, "live");
+  const current = await overlayOrFieldState(overlay, objectId, "state");
+  if (current !== undefined && JSON.stringify(current) === JSON.stringify(payload)) return null;
+  overlay.set(overlayKey(objectId, "state"), payload);
+  overlay.set(overlayKey(objectId, "liveness"), "live");
+  return {
+    objectType: GROUP_TYPE,
+    objectId,
+    operationType: "update",
+    payload,
+    fields: [
+      { field: "state", value: payload },
+      { field: "liveness", value: "live" },
+    ],
+  };
 }
 
-async function handleGroupRemoved(group: chrome.tabGroups.TabGroup): Promise<void> {
+async function stageGroupRemoved(group: chrome.tabGroups.TabGroup): Promise<StagedTabOp | null> {
   const objectId = await lookupObjectId(GROUP_TYPE, String(group.id));
-  if (!objectId) return;
-  const { operation, deviceId } = await createLocalOperation(GROUP_TYPE, objectId, "delete", {});
-  const key = opKey(operation.lamportTimestamp, deviceId, operation.operationId, "delete");
-  await recordLocalFieldState(objectId, "liveness", key, "deleted");
-  await forgetMapping(GROUP_TYPE, String(group.id));
+  if (!objectId) return null;
+  await forgetMapping(GROUP_TYPE, String(group.id)); // immediate — see stageRemoved's note in bookmarks/index.ts
+  return {
+    objectType: GROUP_TYPE,
+    objectId,
+    operationType: "delete",
+    payload: {},
+    fields: [{ field: "liveness", value: "deleted" }],
+  };
 }
+
+async function flushTabEvents(events: QueuedTabEvent[]): Promise<void> {
+  const overlay = new Map<string, unknown>();
+  const staged: StagedTabOp[] = [];
+
+  for (const event of events) {
+    try {
+      let op: StagedTabOp | null;
+      switch (event.kind) {
+        case "tabCreated":
+          op = await stageTabCreated(event.tab, overlay);
+          break;
+        case "tabUpdated":
+          op = await stageTabUpdated(event.tabId, event.tab, overlay);
+          break;
+        case "tabActivated":
+          op = await stageTabActivated(event.activeInfo, overlay);
+          break;
+        case "tabRemoved":
+          op = await stageTabRemoved(event.tabId);
+          break;
+        case "groupUpdated":
+          op = await stageGroupUpdated(event.group, overlay);
+          break;
+        case "groupRemoved":
+          op = await stageGroupRemoved(event.group);
+          break;
+      }
+      if (op) staged.push(op);
+    } catch (e) {
+      // Per-event error isolation, matching the old per-listener .catch:
+      // one bad event in a burst must not drop or corrupt the rest of the
+      // batch's operations.
+      console.error(`HelixSync tabs capture (${event.kind})`, e);
+    }
+  }
+  if (staged.length === 0) return;
+
+  const pending: PendingLocalOperation[] = staged.map((op) => ({
+    objectType: op.objectType,
+    objectId: op.objectId,
+    operationType: op.operationType,
+    payload: op.payload,
+  }));
+  // Reserves one contiguous device-sequence/lamport range for the whole
+  // batch — `staged` is in original event-fire order, so the range is
+  // assigned in that same chronological order too.
+  const created = await createLocalOperationsBatch(pending);
+
+  const fieldStateEntries: LocalFieldStateEntry[] = [];
+  created.forEach(({ operation, deviceId }, idx) => {
+    const op = staged[idx];
+    const key = opKey(operation.lamportTimestamp, deviceId, operation.operationId, op.operationType);
+    for (const f of op.fields) {
+      fieldStateEntries.push({ objectId: op.objectId, field: f.field, key, value: f.value });
+    }
+  });
+  await recordLocalFieldStatesBatch(fieldStateEntries);
+}
+
+const enqueueTabEvent = createMicroBatchQueue<QueuedTabEvent>(flushTabEvents);
 
 let captureRegistered = false;
 
@@ -230,8 +378,14 @@ export function registerCapture(): void {
     handleWindowRemoved(id).catch((e) => console.error("HelixSync windows onRemoved", e));
   });
 
+  // EXT-4: guard/dedup checks that must run synchronously at event-fire
+  // time stay inline here (see the local-capture section's top comment and
+  // the matching note in bookmarks/index.ts::registerCapture) — everything
+  // else is pushed onto the shared micro-batch queue and handled by
+  // flushTabEvents.
   chrome.tabs.onCreated.addListener((tab) => {
-    handleTabCreated(tab).catch((e) => console.error("HelixSync tabs onCreated", e));
+    if (guard.isSuppressed()) return; // our own materializeTab() chrome.tabs.create() call
+    enqueueTabEvent({ kind: "tabCreated", tab });
   });
   // Only react to the properties `tabPayload` actually reads (url, title,
   // pinned, groupId — `active`/`index` are tracked via onActivated / not
@@ -253,21 +407,23 @@ export function registerCapture(): void {
     ) {
       return;
     }
-    handleTabUpdated(tabId, tab).catch((e) => console.error("HelixSync tabs onUpdated", e));
+    if (guard.isSuppressed()) return;
+    enqueueTabEvent({ kind: "tabUpdated", tabId, tab });
   });
   chrome.tabs.onActivated.addListener((info) => {
-    handleTabActivated(info).catch((e) => console.error("HelixSync tabs onActivated", e));
+    enqueueTabEvent({ kind: "tabActivated", activeInfo: info });
   });
   chrome.tabs.onRemoved.addListener((tabId) => {
-    handleTabRemoved(tabId).catch((e) => console.error("HelixSync tabs onRemoved", e));
+    enqueueTabEvent({ kind: "tabRemoved", tabId });
   });
 
   if (tabGroupsSupported) {
     chrome.tabGroups.onUpdated.addListener((group) => {
-      handleGroupUpdated(group).catch((e) => console.error("HelixSync tabGroups onUpdated", e));
+      if (guard.isSuppressed()) return; // our own syncTabGroup()/applyGroupRemote() chrome.tabGroups.update() call
+      enqueueTabEvent({ kind: "groupUpdated", group });
     });
     chrome.tabGroups.onRemoved.addListener((group) => {
-      handleGroupRemoved(group).catch((e) => console.error("HelixSync tabGroups onRemoved", e));
+      enqueueTabEvent({ kind: "groupRemoved", group });
     });
   } else {
     console.info("HelixSync: chrome.tabGroups unavailable, tab group sync disabled (feature detection)");

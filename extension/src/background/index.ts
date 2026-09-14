@@ -223,7 +223,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         return;
       }
       case "DEVICE_DISCONNECTED": {
-        disconnectWebSocket();
+        await disconnectWebSocket();
         sendResponse({ ok: true });
         return;
       }

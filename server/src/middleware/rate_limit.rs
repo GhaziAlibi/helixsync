@@ -5,12 +5,31 @@ use dashmap::DashMap;
 
 use crate::error::AppError;
 
-/// A simple fixed-window rate limiter keyed by an arbitrary string (IP,
-/// device id, etc). Configurable per bucket. This is intentionally simple
-/// (no external service dependency) since HelixSync is meant to run
-/// self-hosted with a single server process.
+/// Per (bucket, key) token-bucket state. `tokens` is a fractional count so
+/// refill can happen continuously (see `check_with_retry_after`) rather than
+/// in discrete per-window jumps; `window` is kept per-entry (not just read
+/// from the caller's `RateLimitConfig`) since `sweep` needs it and entries
+/// are looked up without a config in hand.
+struct TokenBucket {
+    last_refill: Instant,
+    tokens: f64,
+    window: Duration,
+}
+
+/// A token-bucket rate limiter keyed by an arbitrary string (IP, device id,
+/// etc). Configurable per bucket. This is intentionally simple (no external
+/// service dependency) since HelixSync is meant to run self-hosted with a
+/// single server process.
+///
+/// Replaces an earlier fixed-window implementation (SRV-4): a fixed window
+/// lets a client spend its full quota at the tail end of one window and
+/// again the instant the next window opens, a burst of up to 2x `limit` in
+/// a short span straddling the boundary. A token bucket refills continuously
+/// at `limit / window` tokens/sec instead of resetting atomically, so that
+/// boundary re-burst can't happen — a client that exhausts its bucket only
+/// gets tokens back gradually, not all at once.
 pub struct RateLimiter {
-    windows: DashMap<(&'static str, String), (Instant, u32, Duration)>,
+    windows: DashMap<(&'static str, String), TokenBucket>,
 }
 
 impl RateLimiter {
@@ -23,29 +42,57 @@ impl RateLimiter {
     /// Returns true if the request is allowed under `limit` requests per
     /// `window` for the given bucket+key.
     pub fn check(&self, bucket: &'static str, key: &str, limit: u32, window: Duration) -> bool {
+        self.check_with_retry_after(bucket, key, limit, window).is_ok()
+    }
+
+    /// Same token-bucket check as `check`, but on rejection also reports how
+    /// long until at least one token refills. `check` is defined in terms of
+    /// this so there's exactly one copy of the bucket logic; existing
+    /// callers of `check`/`enforce` are unaffected since their signature and
+    /// behavior haven't changed. Added for the WebSocket connect path, which
+    /// needs to tell a rejected client when it's safe to retry instead of
+    /// just closing on it.
+    ///
+    /// A fresh (bucket, key) starts at full capacity (`limit` tokens), so
+    /// the first `limit` calls succeed immediately — an intentional initial
+    /// burst allowance, not the SRV-4 bug (which was the *boundary* re-burst,
+    /// not bursting itself). Each call refills tokens for the elapsed time
+    /// since the last call at a rate of `limit / window` tokens/sec, capped
+    /// at `limit`, then consumes one token if available.
+    pub fn check_with_retry_after(
+        &self,
+        bucket: &'static str,
+        key: &str,
+        limit: u32,
+        window: Duration,
+    ) -> Result<(), Duration> {
         let now = Instant::now();
-        let mut entry = self
-            .windows
-            .entry((bucket, key.to_string()))
-            .or_insert((now, 0, window));
+        let mut entry = self.windows.entry((bucket, key.to_string())).or_insert_with(|| TokenBucket {
+            last_refill: now,
+            tokens: limit as f64,
+            window,
+        });
 
-        if now.duration_since(entry.0) > entry.2 {
-            entry.0 = now;
-            entry.1 = 0;
-            entry.2 = window;
-        }
+        let rate = limit as f64 / window.as_secs_f64(); // tokens/sec
+        let elapsed = now.duration_since(entry.last_refill);
+        entry.tokens = (entry.tokens + elapsed.as_secs_f64() * rate).min(limit as f64);
+        entry.last_refill = now;
+        entry.window = window;
 
-        if entry.1 >= limit {
-            false
+        if entry.tokens >= 1.0 {
+            entry.tokens -= 1.0;
+            Ok(())
         } else {
-            entry.1 += 1;
-            true
+            let seconds_until_token = (1.0 - entry.tokens) / rate;
+            Err(Duration::from_secs_f64(seconds_until_token))
         }
     }
 
-    /// Drops entries whose window has already elapsed — i.e. ones that
-    /// would reset on their next `check()` anyway, so they carry no
-    /// remaining rate-limiting effect and are pure dead weight. Without
+    /// Drops entries that are guaranteed to be back at full capacity — i.e.
+    /// ones where a full `window`'s worth of refill time has passed since
+    /// `last_refill`, which always adds at least `limit` tokens (capped at
+    /// `limit`) regardless of how empty the bucket was. Such entries carry
+    /// no remaining rate-limiting effect and are pure dead weight. Without
     /// this the map grows by one entry per distinct (bucket, key) —
     /// notably every client IP that has ever hit an unauthenticated
     /// endpoint (login, register, device register, token refresh) — for
@@ -54,7 +101,7 @@ impl RateLimiter {
     fn sweep(&self) {
         let now = Instant::now();
         self.windows
-            .retain(|_, (window_start, _, window)| now.duration_since(*window_start) <= *window);
+            .retain(|_, bucket| now.duration_since(bucket.last_refill) < bucket.window);
     }
 }
 
@@ -159,5 +206,81 @@ pub fn enforce(limiter: &RateLimiter, config: RateLimitConfig, key: &str) -> Res
         Ok(())
     } else {
         Err(AppError::RateLimited)
+    }
+}
+
+/// Like `enforce`, but for the one call site (the WebSocket connect path)
+/// that needs the remaining-window duration on rejection rather than a bare
+/// `AppError`, so it can tell the client when to retry instead of just
+/// closing on it.
+pub fn enforce_with_retry_after(
+    limiter: &RateLimiter,
+    config: RateLimitConfig,
+    key: &str,
+) -> Result<(), Duration> {
+    limiter.check_with_retry_after(config.bucket, key, config.limit, config.window)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fresh_key_allows_limit_requests_immediately() {
+        let limiter = RateLimiter::new();
+        let window = Duration::from_secs(60);
+        for _ in 0..5 {
+            assert!(limiter.check("test", "key", 5, window));
+        }
+    }
+
+    #[test]
+    fn limit_plus_one_request_is_rejected() {
+        let limiter = RateLimiter::new();
+        let window = Duration::from_secs(60);
+        for _ in 0..5 {
+            assert!(limiter.check("test", "key", 5, window));
+        }
+        assert!(!limiter.check("test", "key", 5, window));
+    }
+
+    // SRV-4 regression: a fixed-window limiter would let the full quota
+    // reappear atomically the instant a window boundary passed. With a
+    // token bucket there's no boundary to straddle, so the very next call
+    // right after exhausting the bucket must still be rejected.
+    #[test]
+    fn no_full_quota_reappears_immediately_after_exhaustion() {
+        let limiter = RateLimiter::new();
+        let window = Duration::from_secs(60);
+        for _ in 0..3 {
+            assert!(limiter.check("test", "key", 3, window));
+        }
+        assert!(!limiter.check("test", "key", 3, window));
+        // Immediately again, no delay at all — must still be rejected.
+        assert!(!limiter.check("test", "key", 3, window));
+    }
+
+    #[test]
+    fn partial_refill_allows_request_after_waiting() {
+        let limiter = RateLimiter::new();
+        // 20 tokens/sec, so one token refills in 50ms.
+        let window = Duration::from_millis(50);
+        let limit = 1;
+        assert!(limiter.check("test", "key", limit, window));
+        assert!(!limiter.check("test", "key", limit, window));
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(limiter.check("test", "key", limit, window));
+    }
+
+    #[test]
+    fn check_with_retry_after_reports_wait_duration_on_rejection() {
+        let limiter = RateLimiter::new();
+        let window = Duration::from_secs(60);
+        assert!(limiter.check_with_retry_after("test", "key", 1, window).is_ok());
+        let err = limiter
+            .check_with_retry_after("test", "key", 1, window)
+            .expect_err("bucket should be empty");
+        assert!(err > Duration::from_secs(0));
+        assert!(err <= window);
     }
 }

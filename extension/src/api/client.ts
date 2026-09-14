@@ -191,25 +191,54 @@ export interface UserSettingsDto {
 // picking up changes made from another device/the web dashboard within a
 // minute.
 const SETTINGS_CACHE_TTL_MS = 60_000;
-let settingsCache: { value: UserSettingsDto; expiresAt: number } | undefined;
+
+// A plain module-level `let` here is wiped by Chrome tearing down this MV3
+// service worker after ~30s idle — which happens well inside the 1-minute
+// sync alarm interval (background/index.ts SYNC_INTERVAL_MINUTES), so the
+// cache would be reset before almost every alarm tick and a "60s TTL" cache
+// would in practice re-fetch on nearly every use, defeating the point.
+// chrome.storage.session is the storage area that specifically survives a
+// service worker restart (for the life of the browser session) while still
+// living in memory only — no disk write, unlike chrome.storage.local, which
+// would needlessly outlive the 60s TTL this cache is supposed to have.
+const SETTINGS_CACHE_STORAGE_KEY = "settingsCache";
+
+interface SettingsCacheEntry {
+  value: UserSettingsDto;
+  expiresAt: number;
+}
+
+async function readSettingsCache(): Promise<SettingsCacheEntry | undefined> {
+  const stored = await chrome.storage.session.get(SETTINGS_CACHE_STORAGE_KEY);
+  return stored[SETTINGS_CACHE_STORAGE_KEY] as SettingsCacheEntry | undefined;
+}
+
+async function writeSettingsCache(entry: SettingsCacheEntry | undefined): Promise<void> {
+  if (entry) {
+    await chrome.storage.session.set({ [SETTINGS_CACHE_STORAGE_KEY]: entry });
+  } else {
+    await chrome.storage.session.remove(SETTINGS_CACHE_STORAGE_KEY);
+  }
+}
 
 /** Called on device disconnect so a subsequent reconnect (possibly to a
  * different account or server) never serves another account's cached
  * settings for up to `SETTINGS_CACHE_TTL_MS`. */
-export function invalidateSettingsCache(): void {
-  settingsCache = undefined;
+export async function invalidateSettingsCache(): Promise<void> {
+  await writeSettingsCache(undefined);
 }
 
 export async function fetchSettings(): Promise<UserSettingsDto> {
-  if (settingsCache && Date.now() < settingsCache.expiresAt) {
-    return settingsCache.value;
+  const cached = await readSettingsCache();
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.value;
   }
   const res = await authedFetch("/api/v1/sync/settings");
   if (!res.ok) {
     throw new ApiError(`failed to fetch settings (${res.status})`, res.status);
   }
   const settings: UserSettingsDto = await res.json();
-  settingsCache = { value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS };
+  await writeSettingsCache({ value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS });
   return settings;
 }
 
@@ -233,7 +262,7 @@ export async function updateSettings(patch: UpdateSettingsRequest): Promise<User
     throw new ApiError(`failed to update settings (${res.status})`, res.status);
   }
   const settings: UserSettingsDto = await res.json();
-  settingsCache = { value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS };
+  await writeSettingsCache({ value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS });
   return settings;
 }
 

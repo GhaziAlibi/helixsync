@@ -9,7 +9,7 @@ import {
   getDevice,
   getPendingOperations,
   getSyncState,
-  markApplied,
+  markAppliedBatch,
   markUploadInFlight,
   nextDeviceSequence,
   putSyncState,
@@ -21,6 +21,7 @@ import {
 import { ApiError, downloadChanges, fetchSnapshot, uploadOperations } from "../api/client";
 import type { LocalOperation, ObjectType, OperationOut, OperationType, SnapshotResponse } from "./types";
 import { uuidv7 } from "../util/uuid";
+import { yieldToEventLoop } from "../util/yield";
 
 export type ObjectApplier = (op: OperationOut, payload: unknown) => Promise<void>;
 
@@ -91,13 +92,37 @@ export interface PendingLocalOperation {
   payload: unknown;
 }
 
+// XChaCha20-Poly1305 is pure-TS (extension/src/crypto/index.ts header) and
+// runs on the single MV3 service-worker thread — there's no worker/WASM
+// thread for it to run on off that thread. A bulk batch (backfill chunks up
+// to MAX_UPLOAD_BATCH, or the bookmark/tab micro-batch flushes) that
+// encrypts/decrypts hundreds of items back to back in one unbroken
+// synchronous-ish stretch can starve everything else queued on that thread
+// — popup runtime messages, other chrome.* callbacks — for the duration.
+// Yielding every CRYPTO_YIELD_CHUNK items (`yieldToEventLoop`, below) bounds
+// the longest uninterrupted stretch to roughly that many items' worth of
+// crypto time instead of the whole batch. This does NOT make a bulk
+// operation finish any sooner overall — total crypto work, and thus total
+// wall-clock time, is unchanged (if anything it adds a little per yield) —
+// it only breaks that work into chunks so other pending work gets a turn
+// between them. 25 is smaller than MARK_APPLIED_CHUNK (50): the IndexedDB
+// writes that constant chunks are comparatively cheap per item, while a
+// pure-JS AEAD call is the actual expensive step here, so a tighter
+// responsiveness bound is worth the extra yields.
+const CRYPTO_YIELD_CHUNK = 25;
+
 /** Batch counterpart to `createLocalOperation`, for high-volume call sites
  * with no ordering dependency between items (e.g. history backfill, where
  * every visit is an independent object). Per-item semantics are identical
  * to calling `createLocalOperation` in a loop — device sequence and lamport
  * values are still assigned strictly increasing, one per item, in array
  * order — but the sequence/lamport reservation and the queue write each
- * happen once for the whole batch instead of once per item. */
+ * happen once for the whole batch instead of once per item. Encryption
+ * happens in chunks of `CRYPTO_YIELD_CHUNK` with a yield between chunks
+ * (see that constant) rather than one `Promise.all` over the whole batch —
+ * a single `Promise.all` still runs every item's synchronous encrypt step
+ * back to back via the microtask queue, without ever reaching a point where
+ * a pending macrotask (e.g. a popup message) can run. */
 export async function createLocalOperationsBatch(
   items: PendingLocalOperation[],
 ): Promise<CreatedOperation[]> {
@@ -108,25 +133,32 @@ export async function createLocalOperationsBatch(
 
   const { startDeviceSequence, startLamport } = await reserveSequenceBatch(items.length);
 
-  const operations = await Promise.all(
-    items.map(async (item, i): Promise<LocalOperation> => {
-      const wirePayload = await encryptPayload(
-        item.payload,
-        device.encryptionRootKey,
-        device.encryptionRootKeyVersion,
-      );
-      return {
-        operationId: uuidv7(),
-        deviceSequence: startDeviceSequence + i + 1,
-        lamportTimestamp: startLamport + i + 1,
-        objectType: item.objectType,
-        objectId: item.objectId,
-        operationType: item.operationType,
-        encryptionVersion: 1,
-        payload: wirePayload,
-      };
-    }),
-  );
+  const operations: LocalOperation[] = [];
+  for (let start = 0; start < items.length; start += CRYPTO_YIELD_CHUNK) {
+    const chunk = items.slice(start, start + CRYPTO_YIELD_CHUNK);
+    const chunkOperations = await Promise.all(
+      chunk.map(async (item, j): Promise<LocalOperation> => {
+        const i = start + j;
+        const wirePayload = await encryptPayload(
+          item.payload,
+          device.encryptionRootKey,
+          device.encryptionRootKeyVersion,
+        );
+        return {
+          operationId: uuidv7(),
+          deviceSequence: startDeviceSequence + i + 1,
+          lamportTimestamp: startLamport + i + 1,
+          objectType: item.objectType,
+          objectId: item.objectId,
+          operationType: item.operationType,
+          encryptionVersion: 1,
+          payload: wirePayload,
+        };
+      }),
+    );
+    operations.push(...chunkOperations);
+    if (start + CRYPTO_YIELD_CHUNK < items.length) await yieldToEventLoop();
+  }
 
   await enqueueOperationsBatch(operations);
   return operations.map((operation) => ({ operation, deviceId: device.deviceId }));
@@ -221,6 +253,22 @@ export async function uploadPending(): Promise<void> {
 // spin this service worker invocation forever pulling page after page.
 const MAX_DOWNLOAD_PAGES_PER_CYCLE = 50;
 
+// Granularity for flushing `applied_operations` bookkeeping writes
+// (docs/protocol.md §15.6 / AI rule #8: an operation must never be
+// double-applied). 1 (a transaction per op, the old behavior) makes the
+// crash-safety window as tight as possible but means a 500-op page commits
+// 500 individual IndexedDB transactions purely for bookkeeping. Batching
+// the whole page into one transaction would cut that to 1, but widens the
+// window to the whole page: if the service worker is killed after applying
+// ops 1-300 but before that single commit, all 300 would be re-applied on
+// restart — fine for most appliers via field-state LWW, but NOT for e.g.
+// historyVisit's `applyRemote` (extension/src/history/index.ts), which adds
+// a real visit and a `remote_objects` row per call and isn't idempotent
+// under replay. Chunking to 50 is the tradeoff: the window widens from "1
+// op" to "up to 50 ops" (bounded, still small) while cutting transaction
+// count by ~50x.
+const MARK_APPLIED_CHUNK = 50;
+
 export async function downloadAndApply(): Promise<void> {
   const device = await getDevice();
   if (!device) return;
@@ -249,18 +297,40 @@ export async function downloadAndApply(): Promise<void> {
     // Bulk pre-filter: one transaction covering every id in this page
     // instead of one `hasAppliedOperation` transaction per op (500 of
     // them, in the worst case, per page). This only skips work that's
-    // already durably recorded as done — the per-op `markApplied` call
-    // inside `applyOneRemote` still happens individually, immediately
-    // after that op's own applier runs, so the crash-safety window for
-    // "must never double-apply" (docs/protocol.md §15.6 / AI rule #8)
-    // stays scoped to one operation rather than widening to a whole page.
+    // already durably recorded as done — the actual bookkeeping writes for
+    // ops applied *this* page still happen in bounded chunks of
+    // `MARK_APPLIED_CHUNK`, not all at once at the end of the page. See
+    // `MARK_APPLIED_CHUNK` above for why: one transaction for the whole
+    // page would widen the "must never double-apply" crash-safety window
+    // (docs/protocol.md §15.6 / AI rule #8) to the whole page instead of a
+    // small bounded chunk of it.
     const alreadyApplied = await getAppliedOperationIds(
       response.operations.map((op) => op.operationId),
     );
 
+    let appliedBuffer: string[] = [];
+    let sinceYield = 0;
     for (const op of response.operations) {
       if (alreadyApplied.has(op.operationId)) continue;
-      await applyOneRemote(op, device.encryptionRootKey);
+      appliedBuffer.push(await applyOneRemote(op, device.encryptionRootKey));
+      if (appliedBuffer.length >= MARK_APPLIED_CHUNK) {
+        await markAppliedBatch(appliedBuffer);
+        appliedBuffer = [];
+      }
+      // See CRYPTO_YIELD_CHUNK: applyOneRemote's decrypt is the expensive
+      // synchronous step in this loop, so it — not just the bookkeeping
+      // flush above — needs its own, tighter yield cadence.
+      if (++sinceYield >= CRYPTO_YIELD_CHUNK) {
+        sinceYield = 0;
+        await yieldToEventLoop();
+      }
+    }
+    // Flush whatever's left below the chunk threshold — otherwise a
+    // partial chunk at the end of a page (or a page smaller than
+    // MARK_APPLIED_CHUNK entirely) would never get durably recorded before
+    // the cursor advances below.
+    if (appliedBuffer.length > 0) {
+      await markAppliedBatch(appliedBuffer);
     }
 
     await putSyncState({
@@ -273,7 +343,18 @@ export async function downloadAndApply(): Promise<void> {
   }
 }
 
-async function applyOneRemote(op: OperationOut, rek: string): Promise<void> {
+/** Applies one remote operation and returns its operationId for the caller
+ * to feed into the chunked `markAppliedBatch` bookkeeping (this function no
+ * longer marks applied itself — see `MARK_APPLIED_CHUNK` for why that's now
+ * the caller's responsibility). Every path through this function — success,
+ * undecryptable payload, unknown object type — ends the same way: the op is
+ * considered done and must eventually be recorded as applied, so it always
+ * returns `op.operationId` rather than signaling "skip". Ordering is
+ * preserved: by the time this function returns, the applier (if any) has
+ * already run and its own writes (if it makes any) are committed — only
+ * *when the bookkeeping transaction commits* is deferred, not the
+ * sequencing of "apply then eventually mark". */
+async function applyOneRemote(op: OperationOut, rek: string): Promise<string> {
   let payload: unknown;
   if (op.encryptionVersion >= 1) {
     try {
@@ -290,10 +371,10 @@ async function applyOneRemote(op: OperationOut, rek: string): Promise<void> {
       // permanently-undecryptable operation would silently block every
       // *other* operation after it — including new data — from ever
       // syncing to this device again. Losing this one object's history is
-      // the lesser failure, so it's marked applied and skipped.
+      // the lesser failure, so it's marked applied (by the caller) and
+      // skipped.
       console.warn("HelixSync: could not decrypt operation, skipping", op.operationId, err);
-      await markApplied(op.operationId);
-      return;
+      return op.operationId;
     }
   } else {
     payload = op.payload;
@@ -302,16 +383,15 @@ async function applyOneRemote(op: OperationOut, rek: string): Promise<void> {
   const applier = appliers.get(op.objectType);
   if (!applier) {
     // Unknown/unsupported object type: protocol compatibility rule — never
-    // silently apply, but don't crash the batch either. Mark as applied so
-    // we don't retry forever; it is recoverable later via full resync if a
-    // future version adds support.
+    // silently apply, but don't crash the batch either. Mark as applied (by
+    // the caller) so we don't retry forever; it is recoverable later via
+    // full resync if a future version adds support.
     console.warn("HelixSync: no applier registered for object type", op.objectType);
-    await markApplied(op.operationId);
-    return;
+    return op.operationId;
   }
 
   await applier(op, payload);
-  await markApplied(op.operationId);
+  return op.operationId;
 }
 
 // A snapshot object's `operationType` is the true originating type for
@@ -354,6 +434,26 @@ async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): 
   await clearFieldState();
 
   const lamportTimestamp = await tickLamportClock();
+  // Same chunked bookkeeping as downloadAndApply's loop, and for the same
+  // reason (see MARK_APPLIED_CHUNK) — a snapshot can carry as many objects
+  // as a large account's entire bookmark/tab/history state.
+  let appliedBuffer: string[] = [];
+  const flushAppliedBuffer = async () => {
+    if (appliedBuffer.length === 0) return;
+    await markAppliedBatch(appliedBuffer);
+    appliedBuffer = [];
+  };
+  // Shared across both loops below (see CRYPTO_YIELD_CHUNK) — a snapshot's
+  // object list and tombstone list are really one long bulk-decrypt stretch
+  // from the thread's perspective, so the yield cadence spans both rather
+  // than resetting at the object/tombstone boundary.
+  let sinceYield = 0;
+  const maybeYield = async () => {
+    if (++sinceYield >= CRYPTO_YIELD_CHUNK) {
+      sinceYield = 0;
+      await yieldToEventLoop();
+    }
+  };
 
   for (const obj of snapshot.objects) {
     const op: OperationOut = {
@@ -369,7 +469,9 @@ async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): 
       serverCursor: snapshot.snapshotCursor,
       createdAt: new Date().toISOString(),
     };
-    await applyOneRemote(op, device.encryptionRootKey);
+    appliedBuffer.push(await applyOneRemote(op, device.encryptionRootKey));
+    if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
+    await maybeYield();
   }
 
   for (const tombstone of snapshot.tombstones) {
@@ -386,8 +488,12 @@ async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): 
       serverCursor: snapshot.snapshotCursor,
       createdAt: new Date().toISOString(),
     };
-    await applyOneRemote(op, device.encryptionRootKey);
+    appliedBuffer.push(await applyOneRemote(op, device.encryptionRootKey));
+    if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
+    await maybeYield();
   }
+
+  await flushAppliedBuffer();
 
   await putSyncState({
     ...(await getSyncState()),

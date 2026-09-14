@@ -24,11 +24,58 @@ type ChangesAvailableHandler = () => void;
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 60_000;
 
+// `socket` and `reconnectTimer` are correctly reset on every service worker
+// restart — a WebSocket object and a setTimeout handle are inherently tied
+// to this specific worker instance and can't be serialized into storage
+// anyway, so there's nothing to persist for either. `reconnectDelayMs` is
+// different: it's a plain number, and losing it on restart throws away
+// whatever exponential backoff was accumulated while the server was
+// unreachable, hammering it at INITIAL_RECONNECT_DELAY_MS again. It's kept
+// here as a synchronous mirror (scheduleReconnect below needs a number
+// synchronously, to hand to setTimeout, so it can't await a storage read at
+// the point it needs the value) backed by chrome.storage.session — the
+// storage area that survives a service worker restart without ever
+// touching disk. `ensureReconnectDelayHydrated` below re-populates this
+// mirror from storage.session lazily, the first time this module is used
+// after a fresh load, so a real restart doesn't just silently keep the
+// reset INITIAL_RECONNECT_DELAY_MS default.
 let socket: WebSocket | undefined;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
 let changesHandler: ChangesAvailableHandler | undefined;
 let disconnectRequested = false;
+
+const RECONNECT_DELAY_STORAGE_KEY = "reconnectDelayMs";
+
+// Shared by every caller so concurrent early callers (e.g. the startup path
+// and the periodic alarm both calling `ensureConnected` right after a
+// restart) await the same read instead of racing separate ones and
+// clobbering each other's hydration.
+let reconnectDelayHydration: Promise<void> | undefined;
+
+function ensureReconnectDelayHydrated(): Promise<void> {
+  if (!reconnectDelayHydration) {
+    reconnectDelayHydration = (async () => {
+      const stored = await chrome.storage.session.get(RECONNECT_DELAY_STORAGE_KEY);
+      const value = stored[RECONNECT_DELAY_STORAGE_KEY];
+      if (typeof value === "number") reconnectDelayMs = value;
+    })();
+  }
+  return reconnectDelayHydration;
+}
+
+/** Updates the sync mirror immediately (so the very next scheduleReconnect
+ * call sees it) and write-throughs to storage.session in the background —
+ * callers that need the write durable before proceeding (`disconnect`) can
+ * await the returned promise; the hot paths (backoff doubling on every
+ * reconnect attempt, reset on every successful open) don't need to block on
+ * it. */
+function setReconnectDelayMs(value: number): Promise<void> {
+  reconnectDelayMs = value;
+  return chrome.storage.session
+    .set({ [RECONNECT_DELAY_STORAGE_KEY]: value })
+    .catch(() => {});
+}
 
 export function onChangesAvailable(handler: ChangesAvailableHandler): void {
   changesHandler = handler;
@@ -55,6 +102,12 @@ export async function ensureConnected(): Promise<void> {
 }
 
 async function connect(): Promise<void> {
+  // Must resolve before anything below can reach `scheduleReconnect` (the
+  // WebSocket constructor failure path a few lines down, or a later "close"
+  // event once `ws` exists), so the backoff mirror reflects whatever was
+  // persisted before this restart rather than the just-reset default.
+  await ensureReconnectDelayHydrated();
+
   const device = await getDevice();
   if (!device) return; // not registered yet — nothing to connect to
 
@@ -71,7 +124,7 @@ async function connect(): Promise<void> {
   socket = ws;
 
   ws.addEventListener("open", () => {
-    reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+    void setReconnectDelayMs(INITIAL_RECONNECT_DELAY_MS);
     // docs/protocol.md §12 / docs/security.md §1.3: the device access
     // token is sent as the first text frame after connect rather than a
     // URL query parameter, so it never lands in a reverse proxy's access
@@ -99,6 +152,19 @@ async function connect(): Promise<void> {
       // finishes.
       fetchSettings().catch(() => {});
       ws.close();
+    } else if (type === "rate_limited") {
+      // Server hit WEBSOCKET_CONNECT_LIMIT for this device and is about to
+      // close us (frame-then-close, same ordering as auth_error above). Bump
+      // the backoff mirror to at least its instructed wait — never shrink an
+      // already-larger accumulated backoff — so the "close" handler below
+      // picks up the right delay for free when it calls scheduleReconnect(),
+      // instead of retrying straight back into the same still-active window.
+      const retryAfterMs = (msg as { retryAfterMs?: unknown }).retryAfterMs;
+      if (typeof retryAfterMs === "number" && retryAfterMs > 0) {
+        void setReconnectDelayMs(
+          Math.min(Math.max(reconnectDelayMs, retryAfterMs), MAX_RECONNECT_DELAY_MS),
+        );
+      }
     }
   });
 
@@ -123,19 +189,22 @@ function scheduleReconnect(): void {
       scheduleReconnect();
     });
   }, reconnectDelayMs);
-  reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
+  void setReconnectDelayMs(Math.min(reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS));
 }
 
 /** Called on device disconnect so a stale connection (and any pending
  * reconnect timer) doesn't linger against an account this device no
- * longer holds credentials for. */
-export function disconnect(): void {
+ * longer holds credentials for. Awaits the backoff reset reaching
+ * storage.session (unlike the hot-path callers of `setReconnectDelayMs`
+ * above) so a reconnect to a *different* account right after can't
+ * possibly still see this account's accumulated backoff. */
+export async function disconnect(): Promise<void> {
   disconnectRequested = true;
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
   }
-  reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+  await setReconnectDelayMs(INITIAL_RECONNECT_DELAY_MS);
   socket?.close();
   socket = undefined;
 }

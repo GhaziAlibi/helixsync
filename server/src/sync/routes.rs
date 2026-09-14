@@ -602,6 +602,13 @@ struct SnapshotSourceRow {
     operation_type: String,
     encryption_version: i32,
     payload: serde_json::Value,
+    // Not projected into `combine_object`'s output — only carried through to
+    // rebuild `OrderingKey` (docs/protocol.md §8.1) per-group in Rust after
+    // fetch, since the query itself is no longer sorted that way (see
+    // `compute_objects`).
+    lamport_timestamp: i64,
+    device_id: Uuid,
+    operation_id: Uuid,
 }
 
 #[derive(sqlx::FromRow)]
@@ -797,15 +804,26 @@ pub(super) async fn compute_objects(
     // through the field-merge/whole-object-LWW path above regardless of
     // age) and is a no-op when `history_cutoff` is None ("unlimited"
     // retention or no settings row — see `history_retention_cutoff`).
+    //
+    // `ORDER BY server_cursor` (not `OrderingKey`) is what `idx_sync_operations_user_cursor
+    // (user_id, server_cursor)` can satisfy as a pure index scan — no
+    // separate sort of the whole (potentially huge, full-JSONB-payload)
+    // result set. `server_cursor` order is server-arrival order across the
+    // *entire account*, not the per-object `OrderingKey` order that
+    // `combine_object` requires, so it is re-established below via a small
+    // in-memory sort per `(object_type, object_id)` group instead — bounded
+    // by one object's operation count since the last snapshot/compaction,
+    // not the whole account's.
     let new_rows: Vec<SnapshotSourceRow> = match ceiling {
         Some(c) => sqlx::query_as!(
             SnapshotSourceRow,
             r#"
-            SELECT object_type, object_id, operation_type, encryption_version, payload
+            SELECT object_type, object_id, operation_type, encryption_version, payload,
+                   lamport_timestamp, device_id, operation_id
             FROM sync_operations
             WHERE user_id = $1 AND server_cursor > $2 AND server_cursor <= $3
               AND (object_type <> 'historyVisit' OR $4::timestamptz IS NULL OR created_at >= $4::timestamptz)
-            ORDER BY object_type, object_id, lamport_timestamp ASC, device_id ASC, operation_id ASC
+            ORDER BY server_cursor ASC
             "#,
             user_id,
             base_cursor,
@@ -817,11 +835,12 @@ pub(super) async fn compute_objects(
         None => sqlx::query_as!(
             SnapshotSourceRow,
             r#"
-            SELECT object_type, object_id, operation_type, encryption_version, payload
+            SELECT object_type, object_id, operation_type, encryption_version, payload,
+                   lamport_timestamp, device_id, operation_id
             FROM sync_operations
             WHERE user_id = $1 AND server_cursor > $2
               AND (object_type <> 'historyVisit' OR $3::timestamptz IS NULL OR created_at >= $3::timestamptz)
-            ORDER BY object_type, object_id, lamport_timestamp ASC, device_id ASC, operation_id ASC
+            ORDER BY server_cursor ASC
             "#,
             user_id,
             base_cursor,
@@ -839,7 +858,15 @@ pub(super) async fn compute_objects(
             .push(row);
     }
 
-    for ((object_type, object_id), ops) in new_groups {
+    for ((object_type, object_id), mut ops) in new_groups {
+        // Rows arrived in `server_cursor` order, not `OrderingKey` order —
+        // `combine_object` requires the latter (see its doc comment), so
+        // restore it here, per object, before handing the group off.
+        ops.sort_by_key(|row| super::conflict::OrderingKey {
+            lamport_timestamp: row.lamport_timestamp,
+            device_id: row.device_id,
+            operation_id: row.operation_id,
+        });
         let base_entry = objects.remove(&(object_type.clone(), object_id));
         if let Some(combined) = combine_object(object_type.clone(), object_id, base_entry, ops) {
             objects.insert((object_type, object_id), combined);

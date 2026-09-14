@@ -577,7 +577,7 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
     );
     if (!confirmed) return;
     await clearDevice();
-    invalidateSettingsCache();
+    await invalidateSettingsCache();
     await chrome.runtime.sendMessage({ type: "DEVICE_DISCONNECTED" }).catch(() => {});
     await clearDraft(SETTINGS_DRAFT_KEY);
     connectedView = "status";

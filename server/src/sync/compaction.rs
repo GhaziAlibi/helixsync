@@ -40,9 +40,15 @@ pub fn spawn(state: AppState) {
 // per user, one transaction each), so running users one at a time left
 // most of the connection pool (`database::connect`'s max_connections=20)
 // idle for the length of an hourly compaction pass while ordinary request
-// traffic competed for the one connection actually in use. Bounded well
-// under the pool size to leave headroom for concurrent request traffic.
-const COMPACTION_CONCURRENCY: usize = 8;
+// traffic competed for the one connection actually in use. 8 fixed that but
+// overshot: with max_connections=20, 8 concurrent compaction transactions
+// could tie up 40% of the pool at once, starving ordinary request traffic
+// during the pass (SRV-3). 3 is the middle ground — still enough to
+// parallelize compaction across users, but even if all 3 slots land on
+// unusually large/slow accounts simultaneously, that's a small, bounded
+// share of the pool, leaving the large majority of connections free for
+// ordinary traffic throughout.
+const COMPACTION_CONCURRENCY: usize = 3;
 
 /// Runs one compaction pass over every user that currently has any
 /// operations. Exposed separately from `spawn`'s loop so tests (and any

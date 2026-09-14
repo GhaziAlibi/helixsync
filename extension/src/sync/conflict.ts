@@ -6,7 +6,15 @@
 // NOT causal order, docs/protocol.md §4.3) can silently produce
 // non-deterministic results that diverge between devices.
 import type { IDBPTransaction } from "idb";
-import { fieldStateKey, getDb, getFieldState, putFieldState, type FieldStateRecord, type HelixSyncDB } from "../storage/db";
+import {
+  fieldStateKey,
+  getDb,
+  getFieldState,
+  putFieldState,
+  putFieldStatesBatch,
+  type FieldStateRecord,
+  type HelixSyncDB,
+} from "../storage/db";
 import type { OperationType } from "./types";
 
 export interface OrderingKey {
@@ -154,6 +162,21 @@ export async function recordLocalFieldState(
   value: unknown,
 ): Promise<void> {
   await putFieldState({ objectId, field, ...key, value });
+}
+
+export interface LocalFieldStateEntry {
+  objectId: string;
+  field: string;
+  key: OrderingKey & { operationType: OperationType };
+  value: unknown;
+}
+
+/** Batch counterpart to `recordLocalFieldState` — one transaction for the
+ * whole array instead of one per (objectId, field) pair. Used by
+ * bookmarks/index.ts's backfill, which otherwise recorded 4 field_state
+ * rows (title/url/move/liveness) per node via 4 separate transactions. */
+export async function recordLocalFieldStatesBatch(entries: LocalFieldStateEntry[]): Promise<void> {
+  await putFieldStatesBatch(entries.map(({ objectId, field, key, value }) => ({ objectId, field, ...key, value })));
 }
 
 export function isLive(objectId: string): Promise<ResolveResult | undefined> {

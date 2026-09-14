@@ -236,16 +236,39 @@ export function mappingKey(objectType: ObjectType, chromiumLocalId: string): str
 // `getDevice` is called on nearly every operation created or applied
 // (createLocalOperation, history's per-visit handleVisit, tabs' per-op
 // restorePolicy path, etc.) — an in-memory cache turns most of those into a
-// synchronous lookup instead of an IndexedDB round trip. Safe because this
+// cheap lookup instead of an IndexedDB round trip. Safe because this
 // service worker is the only writer of the "device" store; `putDevice`/
 // `clearDevice` below keep the cache in lockstep with every write.
+//
+// This module-level mirror is reset by every MV3 service worker restart,
+// same as the IndexedDB round trip it exists to avoid — so it's backed by
+// chrome.storage.session, which specifically survives that restart. Unlike
+// `settingsCache`/`reconnectDelayMs` elsewhere, IndexedDB (not
+// storage.session) stays the source of truth here: storage.session is only
+// ever a "was this already loaded this browser session" shortcut, so
+// there's no correctness reason for it to survive a full browser restart —
+// chrome.storage.local would gain nothing over the IndexedDB "device" store
+// that already persists across those.
+const DEVICE_CACHE_STORAGE_KEY = "deviceCache";
 let deviceCache: DeviceRecord | undefined;
 let deviceCacheLoaded = false;
 
 export async function getDevice(): Promise<DeviceRecord | undefined> {
   if (deviceCacheLoaded) return deviceCache;
+
+  const stored = await chrome.storage.session.get(DEVICE_CACHE_STORAGE_KEY);
+  const sessionCached = stored[DEVICE_CACHE_STORAGE_KEY] as DeviceRecord | undefined;
+  if (sessionCached !== undefined) {
+    deviceCache = sessionCached;
+    deviceCacheLoaded = true;
+    return deviceCache;
+  }
+
   deviceCache = await (await getDb()).get("device", "self");
   deviceCacheLoaded = true;
+  if (deviceCache) {
+    await chrome.storage.session.set({ [DEVICE_CACHE_STORAGE_KEY]: deviceCache });
+  }
   return deviceCache;
 }
 
@@ -253,12 +276,14 @@ export async function putDevice(record: DeviceRecord): Promise<void> {
   await (await getDb()).put("device", record);
   deviceCache = record;
   deviceCacheLoaded = true;
+  await chrome.storage.session.set({ [DEVICE_CACHE_STORAGE_KEY]: record });
 }
 
 export async function clearDevice(): Promise<void> {
   await (await getDb()).delete("device", "self");
   deviceCache = undefined;
   deviceCacheLoaded = true;
+  await chrome.storage.session.remove(DEVICE_CACHE_STORAGE_KEY);
 }
 
 export async function getSyncState(): Promise<SyncStateRecord> {
@@ -426,12 +451,12 @@ export async function hasAppliedOperation(operationId: string): Promise<boolean>
 /** Batch counterpart to `hasAppliedOperation` — one transaction covering
  * every id in a downloaded page instead of one transaction per operation.
  * Used only as an upfront pre-filter (skip operations already applied by a
- * prior page/cycle); it does NOT replace the per-operation `markApplied`
- * call that must still happen immediately after that operation's own
- * applier runs (docs/protocol.md §15.6 / AI rule #8: an operation must
- * never be double-applied, so the crash-safety window between "applied"
- * and "recorded as applied" has to stay scoped to one operation, not
- * widened to a whole page). */
+ * prior page/cycle); it does NOT replace the chunked `markAppliedBatch`
+ * flush that must still happen every `MARK_APPLIED_CHUNK` operations, in
+ * sync/engine.ts's `downloadAndApply` (docs/protocol.md §15.6 / AI rule #8:
+ * an operation must never be double-applied, so the crash-safety window
+ * between "applied" and "recorded as applied" has to stay bounded to a
+ * small chunk of operations, not widened to a whole page). */
 export async function getAppliedOperationIds(operationIds: string[]): Promise<Set<string>> {
   if (operationIds.length === 0) return new Set();
   const db = await getDb();
@@ -450,6 +475,22 @@ export async function markApplied(operationId: string): Promise<void> {
     operationId,
     appliedAt: new Date().toISOString(),
   });
+}
+
+/** Batch counterpart to `markApplied` — one transaction covering a chunk of
+ * operation ids instead of one transaction per id. Callers (sync/engine.ts)
+ * deliberately flush this in small bounded chunks rather than once per
+ * download page — see `MARK_APPLIED_CHUNK` there for why the chunk size
+ * itself is a crash-safety tradeoff, not just a performance knob. */
+export async function markAppliedBatch(operationIds: string[]): Promise<void> {
+  if (operationIds.length === 0) return;
+  const db = await getDb();
+  const tx = db.transaction("applied_operations", "readwrite");
+  const appliedAt = new Date().toISOString();
+  for (const operationId of operationIds) {
+    await tx.store.put({ operationId, appliedAt });
+  }
+  await tx.done;
 }
 
 // Once a downloaded operation's cursor has been persisted past it
@@ -541,6 +582,19 @@ export async function getMappedChromiumIdsByType(objectType: ObjectType): Promis
 
 export async function putMapping(record: ObjectMappingRecord): Promise<void> {
   await (await getDb()).put("object_mappings", record);
+}
+
+/** Batch counterpart to `putMapping` — one transaction for the whole array
+ * instead of one per record. Used by bookmarks/index.ts's backfill, which
+ * otherwise minted+persisted one mapping per node via its own transaction. */
+export async function putMappingsBatch(records: ObjectMappingRecord[]): Promise<void> {
+  if (records.length === 0) return;
+  const db = await getDb();
+  const tx = db.transaction("object_mappings", "readwrite");
+  for (const record of records) {
+    await tx.store.put(record);
+  }
+  await tx.done;
 }
 
 export async function deleteMappingByLocalId(
@@ -710,6 +764,20 @@ export async function getFieldStatesForObjects(
 
 export async function putFieldState(record: Omit<FieldStateRecord, "key">): Promise<void> {
   await (await getDb()).put("field_state", { ...record, key: fieldStateKey(record.objectId, record.field) });
+}
+
+/** Batch counterpart to `putFieldState` — one transaction for the whole
+ * array instead of one per record. Used by bookmarks/index.ts's backfill,
+ * which otherwise wrote 4 field_state rows (title/url/move/liveness) per
+ * node in 4 separate transactions. */
+export async function putFieldStatesBatch(records: Array<Omit<FieldStateRecord, "key">>): Promise<void> {
+  if (records.length === 0) return;
+  const db = await getDb();
+  const tx = db.transaction("field_state", "readwrite");
+  for (const record of records) {
+    await tx.store.put({ ...record, key: fieldStateKey(record.objectId, record.field) });
+  }
+  await tx.done;
 }
 
 export async function getAllFieldStates(objectId: string): Promise<FieldStateRecord[]> {
