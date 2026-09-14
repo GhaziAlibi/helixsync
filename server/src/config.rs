@@ -9,6 +9,17 @@ pub struct Config {
     pub refresh_token_ttl_secs: i64,
     pub web_session_ttl_secs: i64,
     pub require_encryption: bool,
+    /// Whether the server is only ever reached through a trusted reverse
+    /// proxy (e.g. the `web` nginx service in docker-compose.yml, which
+    /// forwards `/api/` and sets `X-Real-IP`/`X-Forwarded-For`). When true,
+    /// `middleware::client_ip` trusts those headers for per-client rate
+    /// limiting instead of the raw TCP peer address, which in that topology
+    /// is always the proxy's own container IP (see client_ip.rs for why
+    /// that matters). Must stay `false` for direct/non-proxied deployments
+    /// (local dev, tests, or any setup where the server is reachable
+    /// without going through a trusted proxy first) — otherwise a client
+    /// could spoof these headers to evade or collapse rate limits.
+    pub behind_proxy: bool,
     pub cors_allowed_origins: Vec<String>,
     pub protocol_version: u32,
     pub minimum_supported_protocol_version: u32,
@@ -55,6 +66,11 @@ impl Config {
             .map(|v| v == "true" || v == "1")
             .unwrap_or(false);
 
+        let behind_proxy = env::var("BEHIND_PROXY")
+            .ok()
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
         let cors_allowed_origins = env::var("CORS_ALLOWED_ORIGINS")
             .unwrap_or_default()
             .split(',')
@@ -80,6 +96,7 @@ impl Config {
             refresh_token_ttl_secs,
             web_session_ttl_secs,
             require_encryption,
+            behind_proxy,
             cors_allowed_origins,
             protocol_version: 1,
             minimum_supported_protocol_version: 1,

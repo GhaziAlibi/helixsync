@@ -502,6 +502,53 @@ async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): 
   });
 }
 
+// Fallback cooldown (in seconds, to match ApiError.retryAfterSeconds'
+// unit) when the server returns 429 with no (or an unparseable)
+// Retry-After header — see ApiError.retryAfterSeconds in api/client.ts for
+// why that case is left `undefined` rather than guessed at that layer.
+// 30s is a conservative "don't hammer it" default, well under the
+// WebSocket connect path's own max backoff (MAX_RECONNECT_DELAY_MS in
+// api/websocket.ts) but long enough to actually matter against the
+// 1-minute periodic alarm.
+const DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 30;
+
+// Epoch ms before which runSyncCycle should skip entirely rather than hit
+// the server again. Same in-memory-mirror + write-through-to-
+// chrome.storage.session pattern as api/websocket.ts's reconnectDelayMs
+// (see the comment block above that variable for the full rationale): a
+// plain module-level `let` alone would be wiped by the MV3 service worker
+// being torn down after ~30s idle, which happens well inside both the
+// 1-minute sync alarm interval and any realistic Retry-After wait, so a
+// cooldown set on one invocation would silently vanish before the next
+// trigger arrives instead of actually suppressing it. chrome.storage.session
+// (not .local) since this, like the reconnect delay, is meant to live only
+// for the browser session and never touch disk.
+let syncBlockedUntil = 0;
+const SYNC_BLOCKED_UNTIL_STORAGE_KEY = "syncBlockedUntil";
+
+let syncBlockedUntilHydration: Promise<void> | undefined;
+
+function ensureSyncBlockedUntilHydrated(): Promise<void> {
+  if (!syncBlockedUntilHydration) {
+    syncBlockedUntilHydration = (async () => {
+      const stored = await chrome.storage.session.get(SYNC_BLOCKED_UNTIL_STORAGE_KEY);
+      const value = stored[SYNC_BLOCKED_UNTIL_STORAGE_KEY];
+      if (typeof value === "number") syncBlockedUntil = value;
+    })();
+  }
+  return syncBlockedUntilHydration;
+}
+
+/** Updates the sync mirror immediately (so the very next runSyncCycle call
+ * sees it) and write-throughs to storage.session in the background, mirroring
+ * setReconnectDelayMs in api/websocket.ts. */
+function setSyncBlockedUntil(value: number): Promise<void> {
+  syncBlockedUntil = value;
+  return chrome.storage.session
+    .set({ [SYNC_BLOCKED_UNTIL_STORAGE_KEY]: value })
+    .catch(() => {});
+}
+
 let syncInFlight = false;
 // Set when a trigger (WS push, alarm, manual "Sync Now") arrives while a
 // cycle is already running. Without this, that trigger was simply dropped
@@ -520,6 +567,18 @@ export async function runSyncCycle(): Promise<void> {
     rerunRequested = true;
     return;
   }
+  await ensureSyncBlockedUntilHydrated();
+  // A prior cycle (possibly in an earlier service-worker instance) hit a
+  // 429 and set a cooldown — skip entirely rather than hitting the server
+  // again immediately, the same way the existing `syncInFlight` check just
+  // above skips a cycle that's already running. This is on top of, not
+  // instead of, the "don't hot-loop on a failing cycle" behavior below:
+  // that one only covers the trigger that arrives *during* a failing
+  // cycle, not one that arrives afterward while the cooldown is still in
+  // effect.
+  if (Date.now() < syncBlockedUntil) {
+    return;
+  }
   syncInFlight = true;
   try {
     do {
@@ -531,6 +590,10 @@ export async function runSyncCycle(): Promise<void> {
         emitStatus("idle");
       } catch (err) {
         console.error("HelixSync: sync cycle failed", err);
+        if (err instanceof ApiError && err.status === 429) {
+          const cooldownSeconds = err.retryAfterSeconds ?? DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS;
+          void setSyncBlockedUntil(Date.now() + cooldownSeconds * 1000);
+        }
         emitStatus("error", err instanceof Error ? err.message : String(err));
         // Don't hot-loop retrying against whatever just failed (e.g. the
         // network being down) — a trigger that arrived during a failing

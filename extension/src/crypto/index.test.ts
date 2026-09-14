@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decryptPayload, deriveRekFromPassword, encryptPayload } from "./index";
+import { decryptPayload, deriveRekFromPassword, encryptPayload, fromB64, toB64 } from "./index";
 
 function randomSaltB64(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -28,6 +28,44 @@ describe("password-derived encryption root key", () => {
     const b = await deriveRekFromPassword("same password", randomSaltB64());
     expect(a).not.toBe(b);
   });
+});
+
+// Ground truth for toB64: the original per-byte String.fromCharCode loop
+// this module used before it was rewritten to chunk via
+// String.fromCharCode(...chunk) for large-payload performance (EXT-PERF-3).
+// Kept here (not in src) purely as an independent reference implementation.
+function referenceToB64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function makeBytes(length: number): Uint8Array {
+  const bytes = new Uint8Array(length);
+  // Deterministic but non-constant fill so a wrong byte offset/ordering
+  // bug would actually change the output (all-zero input wouldn't).
+  for (let i = 0; i < length; i++) bytes[i] = (i * 31 + 7) % 256;
+  return bytes;
+}
+
+describe("toB64 chunked encoding matches the naive per-byte reference", () => {
+  // 8192 is the chunk size toB64 batches String.fromCharCode(...) calls in
+  // (see B64_CHUNK_SIZE in src/crypto/index.ts). Exercise both sides of
+  // that boundary plus empty/small/large inputs.
+  const sizes = [0, 1, 8191, 8192, 8193, 50000];
+
+  for (const size of sizes) {
+    it(`produces identical base64 to the reference implementation for ${size} bytes`, () => {
+      const bytes = makeBytes(size);
+      expect(toB64(bytes)).toBe(referenceToB64(bytes));
+    });
+
+    it(`round-trips ${size} bytes through toB64/fromB64 unchanged`, () => {
+      const bytes = makeBytes(size);
+      const decoded = fromB64(toB64(bytes));
+      expect(decoded).toEqual(bytes);
+    });
+  }
 });
 
 describe("payload envelope encryption", () => {

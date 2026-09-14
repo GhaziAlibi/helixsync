@@ -234,7 +234,7 @@ export function mappingKey(objectType: ObjectType, chromiumLocalId: string): str
 }
 
 // `getDevice` is called on nearly every operation created or applied
-// (createLocalOperation, history's per-visit handleVisit, tabs' per-op
+// (createLocalOperation, history's flushVisitEvents, tabs' per-op
 // restorePolicy path, etc.) — an in-memory cache turns most of those into a
 // cheap lookup instead of an IndexedDB round trip. Safe because this
 // service worker is the only writer of the "device" store; `putDevice`/

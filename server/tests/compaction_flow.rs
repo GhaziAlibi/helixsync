@@ -19,6 +19,7 @@ fn test_config() -> Config {
         refresh_token_ttl_secs: 60 * 60 * 24 * 30,
         web_session_ttl_secs: 60 * 60 * 24 * 14,
         require_encryption: false,
+        behind_proxy: false,
         cors_allowed_origins: vec![],
         protocol_version: 1,
         minimum_supported_protocol_version: 1,
@@ -463,4 +464,85 @@ async fn terminal_operation_survives_its_own_retention_window(pool: PgPool) {
     let snapshot: serde_json::Value = snapshot_res.json();
     assert!(snapshot["objects"].as_array().unwrap().is_empty());
     assert_eq!(snapshot["tombstones"].as_array().unwrap().len(), 1);
+}
+
+/// Regression coverage for the `object_not_found` data-loss bug fixed by
+/// migration `0006_sync_objects.sql`: the batch-upload ownership pre-check
+/// used to query `sync_operations` directly for whether the caller already
+/// owned an object, but compaction deletes every `sync_operations` row
+/// (including an object's originating `create`) once it's folded into a
+/// snapshot. That made any edit to an object uploaded before compaction ran
+/// against it permanently rejected `object_not_found`, forever, once the
+/// object's raw rows were gone. The fix is a dedicated `sync_objects`
+/// existence ledger, populated when an origination op is accepted and never
+/// pruned by compaction — this test creates an object, compacts it away
+/// entirely (mirroring `reconnecting_device_gets_cursor_too_old_and_resyncs_via_snapshot`'s
+/// proof that `sync_operations` ends up empty), then uploads an ordinary
+/// `update` to that same object and asserts it's accepted rather than
+/// rejected.
+#[sqlx::test(migrations = "./migrations")]
+async fn edit_after_compaction_is_accepted_not_rejected(pool: PgPool) {
+    let state = state_for(pool.clone());
+    let server = server_for_state(state.clone());
+
+    register_and_login(&server, "finn@example.com").await;
+    let (_device_a, token_a) = register_device(&server, "finn@example.com", "Laptop").await;
+
+    let object_id = Uuid::now_v7();
+    upload(&server, &token_a, bookmark_op(Uuid::now_v7(), object_id, 1, 1, "Example")).await;
+
+    // Fully acknowledge and compact — this is what deletes the object's
+    // `create` row out of `sync_operations` entirely, folding its effect
+    // into a `sync_snapshots` row instead.
+    sync_device(&server, &token_a).await;
+
+    let user_id = user_id_for_email(&pool, "finn@example.com").await;
+    compaction::run_once(&state).await.unwrap();
+    assert_eq!(
+        count_operations(&pool, user_id).await,
+        0,
+        "the create op's raw row must be gone after compaction, same as the existing cursor_too_old test proves"
+    );
+    assert_eq!(count_snapshots(&pool, user_id).await, 1);
+
+    // Sanity check: the existence ledger survived compaction (it must,
+    // since compaction never touches `sync_objects`) and still records this
+    // object as owned by this user.
+    let ledger_rows: i64 = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) as "c!" FROM sync_objects WHERE user_id = $1 AND object_id = $2"#,
+        user_id,
+        object_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(ledger_rows, 1);
+
+    // The bug: an ordinary rename (a non-origination `update`) of the
+    // now-fully-compacted object used to be rejected `object_not_found`
+    // because its origination `create` row no longer existed in
+    // `sync_operations`. It must now be accepted.
+    let rename_op = json!({
+        "operationId": Uuid::now_v7(),
+        "deviceSequence": 2,
+        "lamportTimestamp": 2,
+        "objectType": "bookmark",
+        "objectId": object_id,
+        "operationType": "update",
+        "encryptionVersion": 0,
+        "payload": { "title": "Renamed after compaction" }
+    });
+    let res = server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&token_a)
+        .json(&json!({ "operations": [rename_op] }))
+        .await;
+    res.assert_status_ok();
+    let body: serde_json::Value = res.json();
+    assert_eq!(
+        body["rejected"].as_array().unwrap().len(),
+        0,
+        "the rename must not be rejected: {body}"
+    );
+    assert_eq!(body["accepted"].as_array().unwrap().len(), 1);
 }

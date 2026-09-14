@@ -17,6 +17,7 @@ fn test_config() -> Config {
         refresh_token_ttl_secs: 60 * 60 * 24 * 30,
         web_session_ttl_secs: 60 * 60 * 24 * 14,
         require_encryption: false,
+        behind_proxy: false,
         cors_allowed_origins: vec![],
         protocol_version: 1,
         minimum_supported_protocol_version: 1,

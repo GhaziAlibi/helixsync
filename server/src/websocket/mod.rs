@@ -152,23 +152,11 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
         }
     };
 
-    // Confirm the device is not revoked before accepting the connection.
-    let device_active = sqlx::query_scalar!(
-        "SELECT revoked_at IS NULL FROM devices WHERE id = $1",
-        claims.sub
-    )
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(Some(false))
-    .unwrap_or(false);
-
-    if !device_active {
-        let _ = socket.close().await;
-        return;
-    }
-
+    // Rate limit first, before touching the database — otherwise a
+    // reconnect storm (network flapping, MV3 service-worker restart loops,
+    // or malicious rapid connection attempts) burns a DB connection-pool
+    // checkout on every attempt before it's even rejected, risking starving
+    // ordinary HTTP request traffic of pool connections.
     if let Err(retry_after) = enforce_with_retry_after(
         &state.rate_limiter,
         WEBSOCKET_CONNECT_LIMIT,
@@ -189,6 +177,23 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
                 .to_string(),
             ))
             .await;
+        let _ = socket.close().await;
+        return;
+    }
+
+    // Confirm the device is not revoked before accepting the connection.
+    let device_active = sqlx::query_scalar!(
+        "SELECT revoked_at IS NULL FROM devices WHERE id = $1",
+        claims.sub
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or(Some(false))
+    .unwrap_or(false);
+
+    if !device_active {
         let _ = socket.close().await;
         return;
     }

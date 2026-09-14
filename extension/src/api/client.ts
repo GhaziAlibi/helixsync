@@ -11,9 +11,39 @@ export class ApiError extends Error {
     message: string,
     public status: number,
     public code?: string,
+    // Seconds to wait before retrying, from the server's `Retry-After`
+    // header (server/src/error.rs's `AppError::RateLimited` response) —
+    // only ever meaningful when `status === 429`. `undefined` whenever the
+    // header is missing or unparseable, never a guessed number: a caller
+    // that wants a fallback wait (sync/engine.ts's cooldown) is in a much
+    // better position to pick a sane default than this layer is.
+    public retryAfterSeconds?: number,
   ) {
     super(message);
   }
+}
+
+/** Parses the `Retry-After` header for a 429 response. Per the server side
+ * of this (server/src/error.rs), it's always a whole-seconds decimal
+ * string, never an HTTP date — but this still guards against a missing or
+ * malformed value rather than trusting it blindly, since it ultimately
+ * came over the network. */
+function parseRetryAfterSeconds(res: Response): number | undefined {
+  const header = res.headers.get("Retry-After");
+  if (header === null) return undefined;
+  const seconds = Number(header);
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
+/** Builds the `ApiError` to throw for a non-ok `Response`: parses the JSON
+ * error body (if any) for a server-supplied message/code, and the
+ * `Retry-After` header (if any) for `retryAfterSeconds`. Centralized here
+ * rather than duplicated per call site so every `authedFetch`-based call
+ * (and registration, below) threads retry-after consistently instead of
+ * only some of them remembering to. */
+async function buildApiError(res: Response, fallbackMessage: string): Promise<ApiError> {
+  const body = await res.json().catch(() => ({}));
+  return new ApiError(body.message ?? fallbackMessage, res.status, body.error, parseRetryAfterSeconds(res));
 }
 
 /** Thrown by authenticated calls when the access token is rejected and a
@@ -115,8 +145,7 @@ export async function registerDevice(params: RegisterDeviceParams): Promise<Regi
   });
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(body.message ?? `registration failed (${res.status})`, res.status, body.error);
+    throw await buildApiError(res, `registration failed (${res.status})`);
   }
 
   return res.json();
@@ -131,7 +160,7 @@ export interface DevicePublicDto {
 export async function listDevices(): Promise<DevicePublicDto[]> {
   const res = await authedFetch("/api/v1/devices");
   if (!res.ok) {
-    throw new ApiError(`failed to list devices (${res.status})`, res.status);
+    throw await buildApiError(res, `failed to list devices (${res.status})`);
   }
   return res.json();
 }
@@ -143,8 +172,7 @@ export async function uploadOperations(operations: LocalOperation[]): Promise<Up
     body: JSON.stringify({ operations }),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(body.message ?? `upload failed (${res.status})`, res.status, body.error);
+    throw await buildApiError(res, `upload failed (${res.status})`);
   }
   return res.json();
 }
@@ -152,8 +180,7 @@ export async function uploadOperations(operations: LocalOperation[]): Promise<Up
 export async function downloadChanges(cursor: number, limit = 500): Promise<DownloadResponse> {
   const res = await authedFetch(`/api/v1/sync/changes?cursor=${cursor}&limit=${limit}`);
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(body.message ?? `download failed (${res.status})`, res.status, body.error);
+    throw await buildApiError(res, `download failed (${res.status})`);
   }
   return res.json();
 }
@@ -161,8 +188,7 @@ export async function downloadChanges(cursor: number, limit = 500): Promise<Down
 export async function fetchSnapshot(): Promise<SnapshotResponse> {
   const res = await authedFetch("/api/v1/sync/snapshot");
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new ApiError(body.message ?? `snapshot failed (${res.status})`, res.status, body.error);
+    throw await buildApiError(res, `snapshot failed (${res.status})`);
   }
   return res.json();
 }
@@ -235,7 +261,7 @@ export async function fetchSettings(): Promise<UserSettingsDto> {
   }
   const res = await authedFetch("/api/v1/sync/settings");
   if (!res.ok) {
-    throw new ApiError(`failed to fetch settings (${res.status})`, res.status);
+    throw await buildApiError(res, `failed to fetch settings (${res.status})`);
   }
   const settings: UserSettingsDto = await res.json();
   await writeSettingsCache({ value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS });
@@ -259,7 +285,7 @@ export async function updateSettings(patch: UpdateSettingsRequest): Promise<User
     body: JSON.stringify(patch),
   });
   if (!res.ok) {
-    throw new ApiError(`failed to update settings (${res.status})`, res.status);
+    throw await buildApiError(res, `failed to update settings (${res.status})`);
   }
   const settings: UserSettingsDto = await res.json();
   await writeSettingsCache({ value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS });

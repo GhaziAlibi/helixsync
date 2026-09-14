@@ -1,4 +1,5 @@
 use axum::extract::{ConnectInfo, Path, State};
+use axum::http::HeaderMap;
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
@@ -9,6 +10,7 @@ use uuid::Uuid;
 use crate::auth::extractors::CsrfProtectedUser;
 use crate::crypto::{generate_opaque_token, hash_token, verify_password_async};
 use crate::error::{AppError, AppResult};
+use crate::middleware::client_ip::client_ip;
 use crate::middleware::rate_limit::{enforce, DEVICE_REGISTER_LIMIT, TOKEN_REFRESH_LIMIT};
 use crate::state::AppState;
 
@@ -57,9 +59,13 @@ struct RegisterDeviceResponse {
 async fn register_device(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<RegisterDeviceRequest>,
 ) -> AppResult<Json<RegisterDeviceResponse>> {
-    enforce(&state.rate_limiter, DEVICE_REGISTER_LIMIT, &addr.ip().to_string())?;
+    // See middleware::client_ip for why the raw ConnectInfo address alone
+    // isn't enough in the docker-compose (behind-nginx) deployment.
+    let ip = client_ip(&headers, addr, state.config.behind_proxy);
+    enforce(&state.rate_limiter, DEVICE_REGISTER_LIMIT, &ip.to_string())?;
 
     if req.name.trim().is_empty() || req.name.len() > 200 {
         return Err(AppError::Validation("invalid device name".into()));
@@ -164,12 +170,17 @@ struct RefreshResponse {
 /// detected (its hash will already be revoked) rather than silently reused.
 async fn refresh_credentials(
     State(state): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<RefreshRequest>,
 ) -> AppResult<Json<RefreshResponse>> {
-    enforce(&state.rate_limiter, TOKEN_REFRESH_LIMIT, &addr.ip().to_string())?;
-
     let hash = hash_token(&req.refresh_token);
+
+    // Keyed by the presented refresh token's hash rather than client IP:
+    // this ties the limit to the actual credential being refreshed (so one
+    // stolen/guessed token can't be hammered regardless of what IP it's
+    // hammered from) and sidesteps the ConnectInfo-behind-nginx IP-masking
+    // problem entirely (see middleware::client_ip) since no IP is used here
+    // at all.
+    enforce(&state.rate_limiter, TOKEN_REFRESH_LIMIT, &hash)?;
 
     let cred = sqlx::query!(
         r#"

@@ -3,10 +3,11 @@
 // Retention/compaction of *sync* history is a server concern
 // (docs/protocol.md §11); this module does not prune the browser's native
 // history, which has its own independent retention already.
-import { createLocalOperation, createLocalOperationsBatch, registerApplier } from "../sync/engine";
+import { createLocalOperationsBatch, registerApplier } from "../sync/engine";
 import type { PendingLocalOperation } from "../sync/engine";
 import { getDevice, putRemoteObject } from "../storage/db";
 import { createSuppressionGuard } from "../sync/suppress";
+import { createMicroBatchQueue } from "../sync/micro-batch";
 import { deterministicUuid } from "../util/uuid";
 import type { HistoryVisitPayload, OperationOut } from "../sync/types";
 
@@ -19,23 +20,45 @@ import type { HistoryVisitPayload, OperationOut } from "../sync/types";
 // nothing if the event turns out not to fire.
 const guard = createSuppressionGuard();
 
-async function handleVisit(url: string, title: string | undefined, visitTime: number): Promise<void> {
-  if (guard.isSuppressed()) return;
+// --- Local capture: browser event -> operation --------------------------
+//
+// chrome.history.onVisited can fire in bursts (session restore, fast
+// navigation chains) and each visit used to pay createLocalOperation's
+// three separate IndexedDB transactions plus a WebCrypto encryption call,
+// one at a time. The listener below now does only the synchronous
+// guard.isSuppressed() check (see the guard's module comment above — this
+// MUST happen at event-fire time, not inside flushVisitEvents, or the
+// suppression window has already closed by the time a deferred flush
+// runs) and pushes the rest onto the shared micro-batch queue
+// (sync/micro-batch.ts); flushVisitEvents then turns the whole queue into
+// one createLocalOperationsBatch call, the same batch primitive EXT-1's
+// backfill below already uses.
+
+interface QueuedVisitEvent {
+  url: string;
+  title: string | undefined;
+  visitTime: number;
+}
+
+async function flushVisitEvents(items: QueuedVisitEvent[]): Promise<void> {
   const device = await getDevice();
-  if (!device) return;
+  if (!device) return; // unregistered device: the burst silently no-ops, same as the old per-visit check
 
-  const visitedAt = new Date(visitTime).toISOString();
-  const objectId = await deterministicUuid("historyVisit", url, visitedAt, device.deviceId);
-
-  const payload: HistoryVisitPayload = { url, title, visitedAt };
-
-  await createLocalOperation("historyVisit", objectId, "visit", payload);
+  const pending: PendingLocalOperation[] = await Promise.all(
+    items.map(async (item): Promise<PendingLocalOperation> => {
+      const visitedAt = new Date(item.visitTime).toISOString();
+      const objectId = await deterministicUuid("historyVisit", item.url, visitedAt, device.deviceId);
+      const payload: HistoryVisitPayload = { url: item.url, title: item.title, visitedAt };
+      return { objectType: "historyVisit", objectId, operationType: "visit", payload };
+    }),
+  );
+  // Reserves one contiguous device-sequence/lamport range for the whole
+  // batch — `items` (and therefore `pending`) is in original event-fire
+  // order, so the range is assigned in that same chronological order too.
+  await createLocalOperationsBatch(pending);
 }
 
-async function handleVisited(item: chrome.history.HistoryItem): Promise<void> {
-  if (!item.url) return;
-  await handleVisit(item.url, item.title, item.lastVisitTime ?? Date.now());
-}
+const enqueueVisitEvent = createMicroBatchQueue<QueuedVisitEvent>(flushVisitEvents);
 
 let captureRegistered = false;
 
@@ -48,7 +71,9 @@ export function registerCapture(): void {
   captureRegistered = true;
 
   chrome.history.onVisited.addListener((item) => {
-    handleVisited(item).catch((e) => console.error("HelixSync history onVisited", e));
+    if (!item.url) return;
+    if (guard.isSuppressed()) return; // our own applyRemote()'s addUrl call below, not a real local visit
+    enqueueVisitEvent({ url: item.url, title: item.title, visitTime: item.lastVisitTime ?? Date.now() });
   });
 }
 

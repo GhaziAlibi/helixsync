@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::crypto::{generate_encryption_salt, hash_password_async, verify_password_async};
 use crate::error::{AppError, AppResult};
+use crate::middleware::client_ip::client_ip;
 use crate::middleware::rate_limit::{enforce, LOGIN_LIMIT, REGISTER_LIMIT};
 use crate::state::AppState;
 
@@ -48,7 +49,10 @@ async fn register(
     jar: CookieJar,
     Json(req): Json<RegisterRequest>,
 ) -> AppResult<(CookieJar, Json<AuthResponse>)> {
-    enforce(&state.rate_limiter, REGISTER_LIMIT, &addr.ip().to_string())?;
+    // See middleware::client_ip for why the raw ConnectInfo address alone
+    // isn't enough in the docker-compose (behind-nginx) deployment.
+    let ip = client_ip(&headers, addr, state.config.behind_proxy);
+    enforce(&state.rate_limiter, REGISTER_LIMIT, &ip.to_string())?;
 
     if !req.email.contains('@') || req.email.len() > 320 {
         return Err(AppError::Validation("invalid email".into()));
@@ -107,7 +111,8 @@ async fn login(
     jar: CookieJar,
     Json(req): Json<LoginRequest>,
 ) -> AppResult<(CookieJar, Json<AuthResponse>)> {
-    enforce(&state.rate_limiter, LOGIN_LIMIT, &addr.ip().to_string())?;
+    let ip = client_ip(&headers, addr, state.config.behind_proxy);
+    enforce(&state.rate_limiter, LOGIN_LIMIT, &ip.to_string())?;
 
     let user = sqlx::query!(
         "SELECT id, email, password_hash FROM users WHERE email = $1",

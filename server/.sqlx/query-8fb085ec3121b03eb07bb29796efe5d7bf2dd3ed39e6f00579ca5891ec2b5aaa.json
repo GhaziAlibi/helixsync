@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO sync_stats (user_id, bookmark_count, history_visit_count, tab_count)\n                VALUES ($1, $2, $3, $4)\n                ON CONFLICT (user_id) DO NOTHING\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8fb085ec3121b03eb07bb29796efe5d7bf2dd3ed39e6f00579ca5891ec2b5aaa"
+}

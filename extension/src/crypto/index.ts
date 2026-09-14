@@ -22,13 +22,23 @@ export async function ensureCryptoReady(): Promise<void> {
   // lifecycle) don't need to change if a WASM backend is reintroduced later.
 }
 
-function toB64(bytes: Uint8Array): string {
+// Chunk size for String.fromCharCode(...chunk) below: spreading a whole
+// large Uint8Array as call arguments can exceed the JS engine's max
+// call-argument count (the exact limit is undocumented and varies by
+// engine). 8192 is comfortably under any realistic engine limit while
+// still batching far fewer string concatenations than a per-byte loop.
+const B64_CHUNK_SIZE = 8192;
+
+export function toB64(bytes: Uint8Array): string {
   let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
+  for (let i = 0; i < bytes.length; i += B64_CHUNK_SIZE) {
+    const chunk = bytes.subarray(i, i + B64_CHUNK_SIZE);
+    binary += String.fromCharCode(...chunk);
+  }
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function fromB64(value: string): Uint8Array {
+export function fromB64(value: string): Uint8Array {
   const padded = value.replace(/-/g, "+").replace(/_/g, "/");
   const withPadding = padded + "=".repeat((4 - (padded.length % 4)) % 4);
   const binary = atob(withPadding);

@@ -201,12 +201,15 @@ pub const SYNC_SETTINGS_LIMIT: RateLimitConfig = RateLimitConfig {
 /// if exceeded. Called directly from handlers (keyed by client IP for
 /// unauthenticated endpoints, or by user/device id for authenticated ones)
 /// rather than as generic tower middleware, since limits vary per-route.
+///
+/// Uses `check_with_retry_after` (rather than the bare `check`) so the
+/// real wait duration reaches `AppError::RateLimited` instead of being
+/// discarded — every non-WebSocket rate-limited route goes through this
+/// function, so this is what puts a `Retry-After` header on their 429s.
 pub fn enforce(limiter: &RateLimiter, config: RateLimitConfig, key: &str) -> Result<(), AppError> {
-    if limiter.check(config.bucket, key, config.limit, config.window) {
-        Ok(())
-    } else {
-        Err(AppError::RateLimited)
-    }
+    limiter
+        .check_with_retry_after(config.bucket, key, config.limit, config.window)
+        .map_err(AppError::RateLimited)
 }
 
 /// Like `enforce`, but for the one call site (the WebSocket connect path)

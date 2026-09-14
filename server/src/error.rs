@@ -1,3 +1,6 @@
+use std::time::Duration;
+
+use axum::http::header::RETRY_AFTER;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -15,8 +18,11 @@ pub enum AppError {
     Validation(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    // Carries how long the client should wait before retrying, so
+    // `into_response` can attach a `Retry-After` header instead of leaving
+    // the client to guess/poll blindly (see rate_limit.rs::enforce).
     #[error("rate limited")]
-    RateLimited,
+    RateLimited(Duration),
     #[error("protocol version too old")]
     ProtocolTooOld,
     #[error("database error")]
@@ -33,7 +39,7 @@ impl IntoResponse for AppError {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not_found", self.to_string()),
             AppError::Validation(_) => (StatusCode::BAD_REQUEST, "validation_error", self.to_string()),
             AppError::Conflict(reason) => (StatusCode::CONFLICT, reason.as_str(), self.to_string()),
-            AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited", self.to_string()),
+            AppError::RateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited", self.to_string()),
             AppError::ProtocolTooOld => (StatusCode::UPGRADE_REQUIRED, "protocol_too_old", self.to_string()),
             AppError::Database(e) => {
                 tracing::error!(error = %e, "database error");
@@ -45,7 +51,19 @@ impl IntoResponse for AppError {
             }
         };
 
-        (status, Json(json!({ "error": code, "message": message }))).into_response()
+        let mut response = (status, Json(json!({ "error": code, "message": message }))).into_response();
+
+        // HTTP's Retry-After is specified in whole seconds (or an HTTP
+        // date) — round up rather than truncate so a client never retries
+        // a moment before a token has actually refilled.
+        if let AppError::RateLimited(retry_after) = &self {
+            let seconds = (retry_after.as_millis() as u64).div_ceil(1000).max(1);
+            if let Ok(value) = axum::http::HeaderValue::from_str(&seconds.to_string()) {
+                response.headers_mut().insert(RETRY_AFTER, value);
+            }
+        }
+
+        response
     }
 }
 

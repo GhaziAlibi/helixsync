@@ -202,6 +202,16 @@ async fn process_batch(
     // earlier in this same batch* won't show up here (its insert hasn't
     // happened yet) — that case is handled separately via
     // `originated_in_batch` below.
+    //
+    // This checks `sync_objects`, a dedicated existence ledger that is
+    // *never* pruned by `sync::compaction` (see migration
+    // `0006_sync_objects.sql`) — not `sync_operations` directly.
+    // `sync_operations` rows get deleted by compaction once folded into a
+    // snapshot, including an object's originating `create` row, so
+    // querying it here would make every already-compacted object
+    // permanently fail this check on any later edit (the bug this table
+    // exists to fix). `sync_objects` has its own primary key
+    // `(user_id, object_type, object_id)`, so no `DISTINCT` is needed here.
     let mut lookup_types: Vec<String> = Vec::new();
     let mut lookup_ids: Vec<Uuid> = Vec::new();
     for op in ops {
@@ -218,8 +228,8 @@ async fn process_batch(
     } else {
         sqlx::query!(
             r#"
-            SELECT DISTINCT so.object_type, so.object_id
-            FROM sync_operations so
+            SELECT so.object_type, so.object_id
+            FROM sync_objects so
             JOIN UNNEST($1::text[], $2::uuid[]) AS lookup(object_type, object_id)
               ON so.object_type = lookup.object_type AND so.object_id = lookup.object_id
             WHERE so.user_id = $3
@@ -349,6 +359,13 @@ async fn process_batch(
         // per object survives into the bulk tombstone write.
         let mut tombstones: HashMap<(String, Uuid), i64> = HashMap::new();
         let mut restores: HashSet<(String, Uuid)> = HashSet::new();
+        // Every accepted origination op in this batch gets a row in
+        // `sync_objects` (the never-compacted existence ledger — see
+        // migration `0006_sync_objects.sql`), deduped since a batch could
+        // contain more than one origination op for the same object (e.g. a
+        // resent `create` after a dropped response) and the insert below is
+        // `ON CONFLICT DO NOTHING` per key anyway.
+        let mut originations: HashSet<(String, Uuid)> = HashSet::new();
 
         for (i, op) in accepted_ops.iter().enumerate() {
             let cursor = start_cursor + i as i64;
@@ -367,7 +384,60 @@ async fn process_batch(
             } else if vocabulary::is_restore_operation(&op.object_type, &op.operation_type) {
                 restores.insert((op.object_type.clone(), op.object_id));
             }
+            if vocabulary::is_origination_operation(&op.object_type, &op.operation_type) {
+                originations.insert((op.object_type.clone(), op.object_id));
+            }
         }
+
+        // `sync_stats` incremental upkeep (see migrations/0007_sync_stats.sql
+        // for the three-part design this is one leg of — the other two are
+        // `sync::compaction::compact_user`'s authoritative reconciliation and
+        // the lazy backfill in the `/stats` handler). Computed here, from
+        // `originations`/`tombstones`/`restores` above, while they're still
+        // borrowable — they get moved (`into_iter().unzip()`) into the
+        // existence-ledger/tombstone/restore writes below, so counting must
+        // happen before that.
+        //
+        // Net per-bucket deltas, NOT raw operation counts: a single batch
+        // can create-then-delete the same object, and the delta must net to
+        // the right final answer without reacting to that intermediate
+        // state. `originations` counts objects newly brought into existence
+        // in this batch; `tombstones` counts objects terminally removed in
+        // this batch; `restores` counts objects brought back from tombstone
+        // in this batch (each deduped to one entry per object, see their
+        // declarations above). An object created and deleted within the same
+        // batch appears in both `originations` and `tombstones`, contributing
+        // +1 and -1 -> nets to 0 (correct: it never became observably live).
+        // An object that already existed (created in an earlier batch) and
+        // is merely updated in this batch appears in none of the three sets
+        // -> contributes 0 (correct: no bucket transition happened).
+        //
+        // `historyVisit` has no tombstone/restore at all — every accepted
+        // historyVisit op is itself an origination
+        // (`vocabulary::is_origination_operation` returns true whenever
+        // `object_type == "historyVisit"`, and neither
+        // `is_terminal_operation` nor `is_restore_operation` ever matches
+        // it) — so its delta is originations-only. Tabs have a terminal op
+        // ("close", via `is_terminal_operation`) but no restore operation
+        // type at all (`is_restore_operation` only ever matches
+        // bookmark/bookmarkFolder per docs/protocol.md §8.2), so the tab
+        // restore term below is always 0 in practice — kept in the formula
+        // anyway for symmetry with bookmarks and in case that ever changes.
+        let bookmark_types: &[&str] = &["bookmark", "bookmarkFolder"];
+        let tab_types: &[&str] = &["tab"];
+        let history_types: &[&str] = &["historyVisit"];
+        let count_set = |types: &[&str], set: &HashSet<(String, Uuid)>| -> i32 {
+            set.iter().filter(|(t, _)| types.contains(&t.as_str())).count() as i32
+        };
+        let count_map = |types: &[&str], map: &HashMap<(String, Uuid), i64>| -> i32 {
+            map.keys().filter(|(t, _)| types.contains(&t.as_str())).count() as i32
+        };
+        let bookmark_delta = count_set(bookmark_types, &originations)
+            - count_map(bookmark_types, &tombstones)
+            + count_set(bookmark_types, &restores);
+        let history_visit_delta = count_set(history_types, &originations);
+        let tab_delta = count_set(tab_types, &originations) - count_map(tab_types, &tombstones)
+            + count_set(tab_types, &restores);
 
         sqlx::query!(
             r#"
@@ -397,6 +467,30 @@ async fn process_batch(
         )
         .execute(&mut *tx)
         .await?;
+
+        // Populate the existence ledger in the same transaction as the
+        // operation insert above, so acceptance and ownership-recording are
+        // atomic — a crash between the two would otherwise leave an
+        // accepted `create` whose later edits can never pass the ownership
+        // pre-check. `ON CONFLICT DO NOTHING` since the same object can be
+        // (re-)originated across multiple batches (e.g. a resent `create`)
+        // without that being an error.
+        if !originations.is_empty() {
+            let (types, ids): (Vec<String>, Vec<Uuid>) = originations.into_iter().unzip();
+            sqlx::query!(
+                r#"
+                INSERT INTO sync_objects (user_id, object_type, object_id)
+                SELECT $1, u.object_type, u.object_id
+                FROM UNNEST($2::text[], $3::uuid[]) AS u(object_type, object_id)
+                ON CONFLICT DO NOTHING
+                "#,
+                device.user_id,
+                &types,
+                &ids
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
 
         if !tombstones.is_empty() {
             let (types, (ids, tomb_cursors)): (Vec<String>, (Vec<Uuid>, Vec<i64>)) = tombstones
@@ -431,6 +525,34 @@ async fn process_batch(
                 device.user_id,
                 &types,
                 &ids
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        // Apply the net deltas computed above. Skipped entirely when all
+        // three are zero (no relevant object types in this batch, or a
+        // batch whose only effect on these buckets was churn that netted to
+        // nothing) to avoid a no-op write on every upload. `ON CONFLICT ...
+        // DO UPDATE SET ... = sync_stats.x + EXCLUDED.x` is what makes this
+        // additive rather than a bare overwrite: a nonexistent row is
+        // equivalent to one starting at zero either way, since the INSERT
+        // arm seeds a fresh row with the delta itself as its initial value.
+        if bookmark_delta != 0 || history_visit_delta != 0 || tab_delta != 0 {
+            sqlx::query!(
+                r#"
+                INSERT INTO sync_stats (user_id, bookmark_count, history_visit_count, tab_count)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    bookmark_count = sync_stats.bookmark_count + EXCLUDED.bookmark_count,
+                    history_visit_count = sync_stats.history_visit_count + EXCLUDED.history_visit_count,
+                    tab_count = sync_stats.tab_count + EXCLUDED.tab_count,
+                    updated_at = now()
+                "#,
+                device.user_id,
+                bookmark_delta,
+                history_visit_delta,
+                tab_delta
             )
             .execute(&mut *tx)
             .await?;
@@ -936,30 +1058,36 @@ struct SyncStats {
     tabs: i64,
 }
 
-// `stats` recomputes an account's entire merged object state via
-// `compute_objects` — the same full-snapshot-blob parse `sync::compaction`
-// pays hourly — to return three integers, on a dashboard endpoint the web
-// UI can poll/refresh repeatedly. A short TTL cache collapses repeated
-// calls within the window into one actual computation, the same tradeoff
-// the extension's own settings cache (extension/src/api/client.ts) already
-// makes for a similarly "rarely changes, never needs sub-minute freshness"
-// endpoint. Keyed by user_id and never swept: bounded by the number of
-// distinct users who have ever called this, not by how much sync data
-// they have, so it carries none of the unbounded-growth risk a per-request
-// or per-operation cache would.
+// A short TTL cache collapses repeated dashboard polls within the window
+// into one actual query, the same tradeoff the extension's own settings
+// cache (extension/src/api/client.ts) already makes for a similarly
+// "rarely changes, never needs sub-minute freshness" endpoint. Keyed by
+// user_id and never swept: bounded by the number of distinct users who have
+// ever called this, not by how much sync data they have, so it carries
+// none of the unbounded-growth risk a per-request or per-operation cache
+// would.
 static STATS_CACHE: LazyLock<DashMap<Uuid, (Instant, SyncStats)>> = LazyLock::new(DashMap::new);
 const STATS_CACHE_TTL: Duration = Duration::from_secs(30);
 
-/// Item counts for the web dashboard's "what's synced" summary. Reuses
-/// `compute_objects` — the same compaction-aware object reconstruction the
-/// `/snapshot` route and `sync::compaction` rely on — rather than counting
-/// `sync_operations` rows directly: compaction deletes old rows once
-/// they're folded into a snapshot, so a raw-row count would silently drop
-/// the moment compaction first runs (default hourly). `historyVisit`
-/// objects are never tombstoned (each visit is its own permanent object,
-/// docs/protocol.md §6) — the history count only shrinks via
-/// `history_retention_cutoff` (if the account has retention configured),
-/// never via ordinary deletion.
+/// Item counts for the web dashboard's "what's synced" summary. Backed by
+/// the `sync_stats` table (migrations/0007_sync_stats.sql) rather than
+/// deriving counts from the snapshot blob on every cache miss:
+/// `compute_objects` deserializes an account's *entire* live object set
+/// (potentially 50,000+ bookmarks/tabs/historyVisits, each carrying a full
+/// encrypted payload) purely to produce three integers — that used to be
+/// paid on every 30-second `STATS_CACHE` miss, the same full-blob parse
+/// `sync::compaction` pays hourly, but on a dashboard endpoint the web UI
+/// can poll/refresh repeatedly.
+///
+/// `sync_stats` is kept fresh by `sync::routes::process_batch` (incremental
+/// per-batch deltas) and reconciled authoritatively by
+/// `sync::compaction::compact_user` on every snapshot it persists — see the
+/// migration's doc comment for the full three-part design. If neither has
+/// ever run for this user (a brand new account, or one that predates this
+/// table and hasn't synced or been compacted since upgrading), no row
+/// exists yet: fall back to the exact old `compute_objects`-based
+/// computation exactly once, and persist the result so every subsequent
+/// request for this user takes the fast path from then on.
 async fn stats(
     user: AnyAuthenticatedUser,
     State(state): State<AppState>,
@@ -974,37 +1102,77 @@ async fn stats(
 
     let mut tx = state.db.begin().await?;
 
-    let history_cutoff = history_retention_cutoff(&mut tx, user.user_id).await?;
-    let (_, objects_map) = compute_objects(&mut tx, user.user_id, None, history_cutoff).await?;
-
-    let tombstone_ids: HashSet<(String, Uuid)> = sqlx::query!(
-        "SELECT object_type, object_id FROM tombstones WHERE user_id = $1 AND active = true",
+    let row = sqlx::query!(
+        "SELECT bookmark_count, history_visit_count, tab_count FROM sync_stats WHERE user_id = $1",
         user.user_id
     )
-    .fetch_all(&mut *tx)
-    .await?
-    .into_iter()
-    .map(|t| (t.object_type, t.object_id))
-    .collect();
+    .fetch_optional(&mut *tx)
+    .await?;
 
-    tx.commit().await?;
+    let stats = match row {
+        Some(r) => {
+            tx.commit().await?;
+            SyncStats {
+                bookmarks: r.bookmark_count as i64,
+                history_visits: r.history_visit_count as i64,
+                tabs: r.tab_count as i64,
+            }
+        }
+        None => {
+            // Lazy backfill path — see doc comment above. Unchanged from
+            // the original always-on computation, plus the trailing
+            // `INSERT ... ON CONFLICT DO NOTHING` that makes this a
+            // one-time-ever cost per account instead of a recurring one
+            // every 30-second cache miss.
+            let history_cutoff = history_retention_cutoff(&mut tx, user.user_id).await?;
+            let (_, objects_map) =
+                compute_objects(&mut tx, user.user_id, None, history_cutoff).await?;
 
-    let mut stats = SyncStats {
-        bookmarks: 0,
-        history_visits: 0,
-        tabs: 0,
+            let tombstone_ids: HashSet<(String, Uuid)> = sqlx::query!(
+                "SELECT object_type, object_id FROM tombstones WHERE user_id = $1 AND active = true",
+                user.user_id
+            )
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .map(|t| (t.object_type, t.object_id))
+            .collect();
+
+            let mut stats = SyncStats {
+                bookmarks: 0,
+                history_visits: 0,
+                tabs: 0,
+            };
+            for (object_type, object_id) in objects_map.keys() {
+                if tombstone_ids.contains(&(object_type.clone(), *object_id)) {
+                    continue;
+                }
+                match object_type.as_str() {
+                    "bookmark" | "bookmarkFolder" => stats.bookmarks += 1,
+                    "historyVisit" => stats.history_visits += 1,
+                    "tab" => stats.tabs += 1,
+                    _ => {}
+                }
+            }
+
+            sqlx::query!(
+                r#"
+                INSERT INTO sync_stats (user_id, bookmark_count, history_visit_count, tab_count)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (user_id) DO NOTHING
+                "#,
+                user.user_id,
+                stats.bookmarks as i32,
+                stats.history_visits as i32,
+                stats.tabs as i32
+            )
+            .execute(&mut *tx)
+            .await?;
+
+            tx.commit().await?;
+            stats
+        }
     };
-    for (object_type, object_id) in objects_map.keys() {
-        if tombstone_ids.contains(&(object_type.clone(), *object_id)) {
-            continue;
-        }
-        match object_type.as_str() {
-            "bookmark" | "bookmarkFolder" => stats.bookmarks += 1,
-            "historyVisit" => stats.history_visits += 1,
-            "tab" => stats.tabs += 1,
-            _ => {}
-        }
-    }
 
     STATS_CACHE.insert(user.user_id, (Instant::now(), stats.clone()));
 

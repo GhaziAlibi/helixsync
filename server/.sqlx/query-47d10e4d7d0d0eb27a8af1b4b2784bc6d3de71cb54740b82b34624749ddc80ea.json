@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO sync_stats (user_id, bookmark_count, history_visit_count, tab_count)\n                VALUES ($1, $2, $3, $4)\n                ON CONFLICT (user_id) DO UPDATE SET\n                    bookmark_count = sync_stats.bookmark_count + EXCLUDED.bookmark_count,\n                    history_visit_count = sync_stats.history_visit_count + EXCLUDED.history_visit_count,\n                    tab_count = sync_stats.tab_count + EXCLUDED.tab_count,\n                    updated_at = now()\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "47d10e4d7d0d0eb27a8af1b4b2784bc6d3de71cb54740b82b34624749ddc80ea"
+}

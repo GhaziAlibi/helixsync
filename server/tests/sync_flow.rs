@@ -4,6 +4,7 @@ use axum_test::{TestServer, TestServerConfig, Transport};
 use helixsync_server::config::Config;
 use helixsync_server::middleware::rate_limit::RateLimiter;
 use helixsync_server::state::AppState;
+use helixsync_server::sync::compaction;
 use helixsync_server::websocket::ConnectionRegistry;
 use serde_json::json;
 use sqlx::PgPool;
@@ -18,6 +19,7 @@ fn test_config() -> Config {
         refresh_token_ttl_secs: 60 * 60 * 24 * 30,
         web_session_ttl_secs: 60 * 60 * 24 * 14,
         require_encryption: false,
+        behind_proxy: false,
         cors_allowed_origins: vec![],
         protocol_version: 1,
         minimum_supported_protocol_version: 1,
@@ -454,7 +456,8 @@ fn history_visit_op(op_id: Uuid, object_id: Uuid, seq: i64, url: &str) -> serde_
 /// API alone within a single test run.
 #[sqlx::test(migrations = "./migrations")]
 async fn expired_history_visit_is_excluded_from_snapshot_and_stats(pool: PgPool) {
-    let server = server_for(pool.clone());
+    let state = state_for_config(pool.clone(), test_config());
+    let server = server_for_state(state.clone());
     register_and_login(&server, "nora@example.com").await;
     let (_device_id, access_token) = register_device(&server, "nora@example.com", "Laptop").await;
 
@@ -501,13 +504,44 @@ async fn expired_history_visit_is_excluded_from_snapshot_and_stats(pool: PgPool)
     assert_eq!(objects.len(), 1, "expired visit must not appear in the snapshot: {objects:?}");
     assert_eq!(objects[0]["objectId"], json!(recent_object_id));
 
+    // `/stats` is now backed by `sync_stats` (migrations/0007_sync_stats.sql),
+    // which `process_batch` maintains via per-batch origination/tombstone/
+    // restore deltas — see the module doc comment there. That mechanism has
+    // no way to react to a historyVisit aging *past* retention with no new
+    // operation involved: retention expiry is a function of wall-clock time
+    // (`history_retention_cutoff`, evaluated fresh on every `/snapshot`/
+    // compaction call), not an event `process_batch` ever sees. So
+    // immediately after the backdate above — before any compaction pass —
+    // `sync_stats` is still counting the now-expired visit: the incremental
+    // path is only ever eventually consistent with retention, not
+    // real-time-accurate the way `/snapshot`'s direct `compute_objects`
+    // call above is. Checked directly against the table (not through
+    // `/stats`) since a second HTTP call here would just hit the 30-second
+    // `STATS_CACHE` and prove nothing about the underlying reconciliation
+    // this test is actually about.
+    let user_id = user_id_for_email(&pool, "nora@example.com").await;
+    let (_, history_visits_before_compaction, _) = sync_stats_row(&pool, user_id).await;
+    assert_eq!(
+        history_visits_before_compaction, 2,
+        "incremental sync_stats has no retention-decay signal, so it still counts the not-yet-reconciled expired visit"
+    );
+
+    // `sync::compaction::compact_user`'s authoritative reconciliation is
+    // what actually converges `sync_stats` toward the configured retention
+    // window — it recomputes the live object set (itself already
+    // retention-filtered, same as `/snapshot`) and overwrites the row. Ack
+    // the device's cursor first so `compact_user`'s ack boundary covers
+    // both uploaded operations.
+    sync_device(&server, &access_token).await;
+    compaction::run_once(&state).await.unwrap();
+
     let stats_res = server
         .get("/api/v1/sync/stats")
         .authorization_bearer(&access_token)
         .await;
     stats_res.assert_status_ok();
     let stats: serde_json::Value = stats_res.json();
-    assert_eq!(stats["historyVisits"], json!(1));
+    assert_eq!(stats["historyVisits"], json!(1), "compaction must reconcile sync_stats to exclude the expired visit");
 }
 
 /// Control for the test above: with retention left at "unlimited", the
@@ -606,4 +640,273 @@ async fn batch_upload_dedupes_tombstone_writes_for_same_object(pool: PgPool) {
     let tombstones = snapshot["tombstones"].as_array().unwrap();
     assert_eq!(tombstones.len(), 1);
     assert_eq!(tombstones[0]["objectId"], json!(object_id));
+}
+
+// --- sync_stats regression coverage (migrations/0007_sync_stats.sql) ---
+//
+// These exercise the three-part design directly:
+//   - `stats_reflects_counts_across_batches` and
+//     `stats_nets_out_same_batch_create_then_delete` /
+//     `stats_decreases_when_object_deleted_in_later_batch` cover
+//     `process_batch`'s incremental net-delta upkeep.
+//   - `compaction_reconciles_stats_after_snapshot` covers
+//     `compaction::compact_user`'s authoritative overwrite.
+// The lazy-backfill path (no `sync_stats` row yet) only matters for
+// accounts that predate this migration and haven't synced or been
+// compacted since upgrading — not reachable from a fresh `sqlx::test`
+// database, since `process_batch` (the primary write path exercised by
+// every test in this file) always populates the row itself now.
+
+async fn user_id_for_email(pool: &PgPool, email: &str) -> Uuid {
+    sqlx::query_scalar!("SELECT id FROM users WHERE email = $1", email)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Direct read of the `sync_stats` table, bypassing the `/stats` HTTP
+/// route's 30-second `STATS_CACHE`. Needed whenever a test wants to observe
+/// the count change *within* a single run — two HTTP calls close together
+/// would otherwise just return the same cached response instead of proving
+/// anything about the underlying table. Missing row reads as all-zero,
+/// mirroring the column defaults (`process_batch` only ever writes a row
+/// once a batch has a nonzero delta to apply).
+async fn sync_stats_row(pool: &PgPool, user_id: Uuid) -> (i32, i32, i32) {
+    sqlx::query!(
+        "SELECT bookmark_count, history_visit_count, tab_count FROM sync_stats WHERE user_id = $1",
+        user_id
+    )
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+    .map(|r| (r.bookmark_count, r.history_visit_count, r.tab_count))
+    .unwrap_or((0, 0, 0))
+}
+
+/// Generic operation builder for the `sync_stats` tests below — unlike
+/// `sample_bookmark_op`/`history_visit_op`, payload contents don't matter
+/// here (only object type / operation type / bucket membership do), so an
+/// empty payload keeps each test focused on the counting behavior being
+/// verified rather than on payload shape.
+fn make_op(
+    object_type: &str,
+    operation_type: &str,
+    op_id: Uuid,
+    object_id: Uuid,
+    seq: i64,
+    lamport: i64,
+) -> serde_json::Value {
+    json!({
+        "operationId": op_id,
+        "deviceSequence": seq,
+        "lamportTimestamp": lamport,
+        "objectType": object_type,
+        "objectId": object_id,
+        "operationType": operation_type,
+        "encryptionVersion": 0,
+        "payload": {}
+    })
+}
+
+/// Round-trips a device's cursor through `/changes` twice, same as
+/// `sync_device` in `compaction_flow.rs`: docs/protocol.md §4.4 means the
+/// server only learns a device has acknowledged up to `nextCursor` on that
+/// device's *next* request, so a single download isn't enough to advance
+/// `compact_user`'s ack boundary past the operations just uploaded.
+async fn sync_device(server: &TestServer, token: &str) {
+    let res = server
+        .get("/api/v1/sync/changes?cursor=0")
+        .authorization_bearer(token)
+        .await;
+    res.assert_status_ok();
+    let body: serde_json::Value = res.json();
+    let next_cursor = body["nextCursor"].as_i64().unwrap();
+    server
+        .get(&format!("/api/v1/sync/changes?cursor={next_cursor}"))
+        .authorization_bearer(token)
+        .await
+        .assert_status_ok();
+}
+
+/// Basic correctness: bookmarks, a history visit, and a tab created across
+/// two separate upload batches must all be reflected in `/stats`' counts.
+#[sqlx::test(migrations = "./migrations")]
+async fn stats_reflects_counts_across_batches(pool: PgPool) {
+    let server = server_for(pool.clone());
+    register_and_login(&server, "priya@example.com").await;
+    let (_device_id, access_token) = register_device(&server, "priya@example.com", "Laptop").await;
+
+    let bookmark_a = Uuid::now_v7();
+    let bookmark_b = Uuid::now_v7();
+    let visit_a = Uuid::now_v7();
+    server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&access_token)
+        .json(&json!({ "operations": [
+            make_op("bookmark", "create", Uuid::now_v7(), bookmark_a, 1, 1),
+            make_op("bookmark", "create", Uuid::now_v7(), bookmark_b, 2, 2),
+            make_op("historyVisit", "visit", Uuid::now_v7(), visit_a, 3, 3),
+        ] }))
+        .await
+        .assert_status_ok();
+
+    // Second batch, uploaded separately so the assertion below exercises
+    // cross-batch accumulation rather than everything landing in one
+    // `process_batch` call.
+    let tab_a = Uuid::now_v7();
+    server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&access_token)
+        .json(&json!({ "operations": [
+            make_op("tab", "create", Uuid::now_v7(), tab_a, 4, 4),
+        ] }))
+        .await
+        .assert_status_ok();
+
+    let stats_res = server
+        .get("/api/v1/sync/stats")
+        .authorization_bearer(&access_token)
+        .await;
+    stats_res.assert_status_ok();
+    let stats: serde_json::Value = stats_res.json();
+    assert_eq!(stats["bookmarks"], json!(2));
+    assert_eq!(stats["historyVisits"], json!(1));
+    assert_eq!(stats["tabs"], json!(1));
+}
+
+/// Same-batch churn: a bookmark created and deleted within the same upload
+/// batch must net to zero — it appears in both `originations` and
+/// `tombstones` for that batch, contributing +1 and -1, and must never have
+/// been observably live.
+#[sqlx::test(migrations = "./migrations")]
+async fn stats_nets_out_same_batch_create_then_delete(pool: PgPool) {
+    let server = server_for(pool.clone());
+    register_and_login(&server, "quinn@example.com").await;
+    let (_device_id, access_token) = register_device(&server, "quinn@example.com", "Laptop").await;
+
+    let object_id = Uuid::now_v7();
+    let res = server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&access_token)
+        .json(&json!({ "operations": [
+            make_op("bookmark", "create", Uuid::now_v7(), object_id, 1, 1),
+            make_op("bookmark", "delete", Uuid::now_v7(), object_id, 2, 2),
+        ] }))
+        .await;
+    res.assert_status_ok();
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["accepted"].as_array().unwrap().len(), 2);
+
+    let user_id = user_id_for_email(&pool, "quinn@example.com").await;
+    let (bookmarks, _, _) = sync_stats_row(&pool, user_id).await;
+    assert_eq!(bookmarks, 0, "create+delete in the same batch must net to zero, not undercount/overcount");
+
+    let stats_res = server
+        .get("/api/v1/sync/stats")
+        .authorization_bearer(&access_token)
+        .await;
+    stats_res.assert_status_ok();
+    let stats: serde_json::Value = stats_res.json();
+    assert_eq!(stats["bookmarks"], json!(0));
+}
+
+/// Cross-batch: an object created in one batch and deleted in a later batch
+/// must have its count decrease accordingly — the second batch's -1 delta
+/// applies on top of the first batch's +1, both against the same
+/// `sync_stats` row via the `ON CONFLICT ... DO UPDATE SET x = sync_stats.x
+/// + EXCLUDED.x` upsert.
+#[sqlx::test(migrations = "./migrations")]
+async fn stats_decreases_when_object_deleted_in_later_batch(pool: PgPool) {
+    let server = server_for(pool.clone());
+    register_and_login(&server, "rex@example.com").await;
+    let (_device_id, access_token) = register_device(&server, "rex@example.com", "Laptop").await;
+
+    let object_id = Uuid::now_v7();
+    server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&access_token)
+        .json(&json!({ "operations": [make_op("bookmark", "create", Uuid::now_v7(), object_id, 1, 1)] }))
+        .await
+        .assert_status_ok();
+
+    let user_id = user_id_for_email(&pool, "rex@example.com").await;
+    let (bookmarks_after_create, _, _) = sync_stats_row(&pool, user_id).await;
+    assert_eq!(bookmarks_after_create, 1, "creation batch must apply a +1 delta");
+
+    server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&access_token)
+        .json(&json!({ "operations": [make_op("bookmark", "delete", Uuid::now_v7(), object_id, 2, 2)] }))
+        .await
+        .assert_status_ok();
+
+    let (bookmarks_after_delete, _, _) = sync_stats_row(&pool, user_id).await;
+    assert_eq!(
+        bookmarks_after_delete, 0,
+        "a later batch's -1 delta must be applied on top of the earlier +1"
+    );
+}
+
+/// Compaction reconciliation: `compact_user` must *overwrite* (not merely
+/// leave alone) the `sync_stats` row with the authoritative count from the
+/// live object set it just persisted into a snapshot. Deliberately corrupts
+/// the row first to prove this is an overwrite and not just an accidental
+/// match — if compaction only incremented, or skipped reconciliation
+/// entirely, the corrupted values would survive.
+#[sqlx::test(migrations = "./migrations")]
+async fn compaction_reconciles_stats_after_snapshot(pool: PgPool) {
+    let state = state_for_config(pool.clone(), test_config());
+    let server = server_for_state(state.clone());
+    register_and_login(&server, "sana@example.com").await;
+    let (_device_id, access_token) = register_device(&server, "sana@example.com", "Laptop").await;
+
+    let bookmark_id = Uuid::now_v7();
+    let tab_id = Uuid::now_v7();
+    let visit_id = Uuid::now_v7();
+    server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&access_token)
+        .json(&json!({ "operations": [
+            make_op("bookmark", "create", Uuid::now_v7(), bookmark_id, 1, 1),
+            make_op("tab", "create", Uuid::now_v7(), tab_id, 2, 2),
+            make_op("historyVisit", "visit", Uuid::now_v7(), visit_id, 3, 3),
+        ] }))
+        .await
+        .assert_status_ok();
+
+    // Fully ack the device's cursor so `compact_user`'s ack boundary can
+    // advance past these operations (see `sync_device`'s doc comment).
+    sync_device(&server, &access_token).await;
+
+    let user_id = user_id_for_email(&pool, "sana@example.com").await;
+
+    // Simulate whatever drift the incremental path (`process_batch`) could
+    // in principle accumulate over time — exactly the scenario compaction's
+    // reconciliation exists to correct.
+    sqlx::query!(
+        "UPDATE sync_stats SET bookmark_count = 999, tab_count = 999, history_visit_count = 999 WHERE user_id = $1",
+        user_id
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    compaction::run_once(&state).await.unwrap();
+
+    let (bookmarks, history_visits, tabs) = sync_stats_row(&pool, user_id).await;
+    assert_eq!(bookmarks, 1, "compaction must overwrite the corrupted bookmark_count with the true count");
+    assert_eq!(history_visits, 1, "compaction must overwrite the corrupted history_visit_count with the true count");
+    assert_eq!(tabs, 1, "compaction must overwrite the corrupted tab_count with the true count");
+
+    // The fast path, now backed by the reconciled row, must report the
+    // same corrected counts through the actual HTTP route.
+    let stats_res = server
+        .get("/api/v1/sync/stats")
+        .authorization_bearer(&access_token)
+        .await;
+    stats_res.assert_status_ok();
+    let stats: serde_json::Value = stats_res.json();
+    assert_eq!(stats["bookmarks"], json!(1));
+    assert_eq!(stats["historyVisits"], json!(1));
+    assert_eq!(stats["tabs"], json!(1));
 }

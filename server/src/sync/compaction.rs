@@ -101,11 +101,20 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
     // without the per-row coalesce such a device would be excluded
     // entirely and its not-yet-synced history could be compacted away
     // before it ever gets a chance to sync.
+    //
+    // The join predicate also matches `sc.user_id = d.user_id` in addition
+    // to `sc.device_id = d.id`: `sync_cursors` rows are always written with
+    // `user_id` and `device_id` together for the same device (see
+    // `sync::routes`), so this can't exclude any legitimately-matching row —
+    // but it does let Postgres use the existing composite index on
+    // `sync_cursors(user_id, device_id)` (from its `uq_sync_cursors_user_device`
+    // unique constraint) for this join, instead of falling back to a full
+    // sequential scan of `sync_cursors` on every user, every compaction pass.
     let ack_boundary: Option<i64> = sqlx::query_scalar!(
         r#"
         SELECT MIN(COALESCE(sc.cursor_value, 0))
         FROM devices d
-        LEFT JOIN sync_cursors sc ON sc.device_id = d.id
+        LEFT JOIN sync_cursors sc ON sc.user_id = d.user_id AND sc.device_id = d.id
         WHERE d.user_id = $1 AND d.revoked_at IS NULL
         "#,
         user_id
@@ -206,6 +215,52 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
             user_id,
             ack_boundary,
             data
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        // Authoritative `sync_stats` reconciliation (see
+        // migrations/0007_sync_stats.sql for the full three-part design):
+        // `objects` above is exactly the live, post-tombstone-filter object
+        // set this pass just persisted into the snapshot — counting it here
+        // is free (already in memory) and, unlike `sync::routes::
+        // process_batch`'s incremental per-batch deltas, authoritative: it
+        // *overwrites* rather than adds, so it self-corrects any drift the
+        // incremental path might have accumulated, and correctly
+        // initializes the row for any account that had operations before
+        // this table existed, the first time compaction runs for them
+        // post-upgrade. Deliberately scoped to the `existing.is_none()`
+        // branch (a snapshot is actually (re)computed this pass) rather
+        // than running unconditionally on every `compact_user` call — the
+        // early-return paths above (nothing acknowledged yet, or too few
+        // new operations since the last snapshot to bother) have no fresh
+        // object set to reconcile against.
+        let mut bookmark_count: i32 = 0;
+        let mut history_visit_count: i32 = 0;
+        let mut tab_count: i32 = 0;
+        for obj in &objects {
+            match obj.object_type.as_str() {
+                "bookmark" | "bookmarkFolder" => bookmark_count += 1,
+                "historyVisit" => history_visit_count += 1,
+                "tab" => tab_count += 1,
+                _ => {}
+            }
+        }
+
+        sqlx::query!(
+            r#"
+            INSERT INTO sync_stats (user_id, bookmark_count, history_visit_count, tab_count, updated_at)
+            VALUES ($1, $2, $3, $4, now())
+            ON CONFLICT (user_id) DO UPDATE SET
+                bookmark_count = EXCLUDED.bookmark_count,
+                history_visit_count = EXCLUDED.history_visit_count,
+                tab_count = EXCLUDED.tab_count,
+                updated_at = now()
+            "#,
+            user_id,
+            bookmark_count,
+            history_visit_count,
+            tab_count
         )
         .execute(&mut *tx)
         .await?;
