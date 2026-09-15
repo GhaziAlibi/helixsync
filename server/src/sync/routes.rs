@@ -1178,6 +1178,7 @@ pub(super) async fn compute_objects(
             let parsed: Vec<SnapshotObject> = decompress_snapshot_data(&data)?;
             let map = parsed
                 .into_iter()
+                .filter(|o| history_cutoff.map_or(true, |c| o.object_type != "historyVisit" || o.created_at >= c))
                 .map(|o| ((o.object_type.clone(), o.object_id), o))
                 .collect();
             (cursor, map)
@@ -1392,7 +1393,7 @@ async fn stats(
         }
     }
 
-    enforce(&state.rate_limiter, SYNC_STATS_LIMIT, &user.user_id.to_string())?;
+    enforce(&state.rate_limiter, SYNC_STATS_LIMIT, &user.rate_limit_key)?;
 
     let row = sqlx::query!(
         "SELECT bookmark_count, history_visit_count, tab_count FROM sync_stats WHERE user_id = $1",
@@ -1475,12 +1476,9 @@ async fn stats(
 /// `sync_snapshots` row by `sync::compaction`, and is also reused by the
 /// `/snapshot` route above.
 pub(super) fn filter_tombstoned(
-    objects_map: HashMap<(String, Uuid), SnapshotObject>,
+    mut objects_map: HashMap<(String, Uuid), SnapshotObject>,
     tombstone_ids: &HashSet<(String, Uuid)>,
 ) -> Vec<SnapshotObject> {
-    objects_map
-        .into_iter()
-        .filter(|(key, _)| !tombstone_ids.contains(key))
-        .map(|(_, o)| o)
-        .collect()
+    objects_map.retain(|key, _| !tombstone_ids.contains(key));
+    objects_map.into_values().collect()
 }

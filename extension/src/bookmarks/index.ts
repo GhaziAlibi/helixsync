@@ -5,6 +5,7 @@
 // fixed, deterministic objectIds every device agrees on rather than
 // device-generated random ones.
 import {
+  commitBookmarkBackfillBatch,
   deleteDeferredMaterialization,
   deleteDeferredMaterializationsBatch,
   getDeferredMaterializationsWaitingOn,
@@ -15,8 +16,8 @@ import {
   getMappingsByObjectIds,
   mappingKey,
   putDeferredMaterialization,
-  putMappingsBatch,
   recordConflict,
+  type FieldStateRecord,
 } from "../storage/db";
 import {
   establishMapping,
@@ -62,8 +63,14 @@ const ROOT_CHROMIUM_IDS: Record<string, string> = Object.fromEntries(
   Object.entries(ROOT_OBJECT_IDS).map(([chromiumId, objectId]) => [objectId, chromiumId]),
 );
 
-async function objectIdFor(chromiumId: string): Promise<string> {
-  return ROOT_OBJECT_IDS[chromiumId] ?? (await getOrCreateObjectId(MAP_TYPE, chromiumId));
+async function objectIdFor(chromiumId: string, mappingCache?: Map<string, string>): Promise<string> {
+  const root = ROOT_OBJECT_IDS[chromiumId];
+  if (root) return root;
+  const cached = mappingCache?.get(chromiumId);
+  if (cached) return cached;
+  const objectId = await getOrCreateObjectId(MAP_TYPE, chromiumId);
+  mappingCache?.set(chromiumId, objectId);
+  return objectId;
 }
 
 async function chromiumIdFor(objectId: string): Promise<string | undefined> {
@@ -105,7 +112,9 @@ async function overlayOrFieldState(
 ): Promise<unknown> {
   const key = overlayKey(objectId, field);
   if (overlay.has(key)) return overlay.get(key);
-  return (await getFieldState(objectId, field))?.value;
+  const val = (await getFieldState(objectId, field))?.value;
+  overlay.set(key, val);
+  return val;
 }
 
 export async function positionOf(objectId: string, overlay?: Map<string, unknown>): Promise<string | undefined> {
@@ -122,6 +131,7 @@ export async function computePosition(
   index: number,
   overlay?: Map<string, unknown>,
   siblingCache?: Map<string, chrome.bookmarks.BookmarkTreeNode[]>,
+  mappingCache?: Map<string, string>,
 ): Promise<string> {
   let siblings = siblingCache?.get(parentChromiumId);
   if (!siblings) {
@@ -130,8 +140,8 @@ export async function computePosition(
   }
   const beforeId = siblings[index - 1]?.id;
   const afterId = siblings[index + 1]?.id;
-  const lo = beforeId ? ((await positionOf(await objectIdFor(beforeId), overlay)) ?? null) : null;
-  const hi = afterId ? ((await positionOf(await objectIdFor(afterId), overlay)) ?? null) : null;
+  const lo = beforeId ? ((await positionOf(await objectIdFor(beforeId, mappingCache), overlay)) ?? null) : null;
+  const hi = afterId ? ((await positionOf(await objectIdFor(afterId, mappingCache), overlay)) ?? null) : null;
   return keyBetween(lo, hi);
 }
 
@@ -171,15 +181,20 @@ async function stageCreated(
   node: chrome.bookmarks.BookmarkTreeNode,
   overlay: Map<string, unknown>,
   siblingCache?: Map<string, chrome.bookmarks.BookmarkTreeNode[]>,
+  mappingCache?: Map<string, string>,
 ): Promise<StagedBookmarkOp> {
-  const objectId = await getOrCreateObjectId(MAP_TYPE, id);
+  let objectId = mappingCache?.get(id);
+  if (!objectId) {
+    objectId = await getOrCreateObjectId(MAP_TYPE, id);
+    mappingCache?.set(id, objectId);
+  }
   const objectType: ObjectType = node.url ? "bookmark" : "bookmarkFolder";
-  const parentObjectId = node.parentId ? await objectIdFor(node.parentId) : null;
+  const parentObjectId = node.parentId ? await objectIdFor(node.parentId, mappingCache) : null;
   // EXT-03: computePosition reuses siblingCache across the batch and checks
   // overlay when resolving sibling positions so sequential inserts don't
   // degrade position keys or re-query Chrome IPC.
   const position = node.parentId
-    ? await computePosition(node.parentId, node.index ?? 0, overlay, siblingCache)
+    ? await computePosition(node.parentId, node.index ?? 0, overlay, siblingCache, mappingCache)
     : keyBetween(null, null);
 
   const payload: BookmarkPayload = {
@@ -209,8 +224,13 @@ async function stageCreated(
 async function stageRemoved(
   id: string,
   removeInfo: chrome.bookmarks.BookmarkRemoveInfo,
+  mappingCache?: Map<string, string>,
 ): Promise<StagedBookmarkOp | null> {
-  const objectId = await lookupObjectId(MAP_TYPE, id);
+  let objectId = mappingCache?.get(id);
+  if (!objectId) {
+    objectId = await lookupObjectId(MAP_TYPE, id);
+    if (objectId) mappingCache?.set(id, objectId);
+  }
   if (!objectId) return null;
   const objectType: ObjectType = removeInfo.node.url ? "bookmark" : "bookmarkFolder";
   // forgetMapping runs immediately (not deferred to the batch flush like
@@ -218,6 +238,7 @@ async function stageRemoved(
   // throughout this file (see stageCreated's getOrCreateObjectId), so a
   // later event in the same burst always sees an accurate mapping table.
   await forgetMapping(MAP_TYPE, id);
+  mappingCache?.delete(id);
   return {
     objectType,
     objectId,
@@ -231,8 +252,13 @@ async function stageChanged(
   id: string,
   changeInfo: chrome.bookmarks.BookmarkChangeInfo,
   overlay: Map<string, unknown>,
+  mappingCache?: Map<string, string>,
 ): Promise<StagedBookmarkOp | null> {
-  const objectId = await lookupObjectId(MAP_TYPE, id);
+  let objectId = mappingCache?.get(id);
+  if (!objectId) {
+    objectId = await lookupObjectId(MAP_TYPE, id);
+    if (objectId) mappingCache?.set(id, objectId);
+  }
   if (!objectId) return null;
   const [node] = await chrome.bookmarks.get(id);
   const objectType: ObjectType = node.url ? "bookmark" : "bookmarkFolder";
@@ -270,14 +296,19 @@ async function stageMoved(
   moveInfo: chrome.bookmarks.BookmarkMoveInfo,
   overlay: Map<string, unknown>,
   siblingCache?: Map<string, chrome.bookmarks.BookmarkTreeNode[]>,
+  mappingCache?: Map<string, string>,
 ): Promise<StagedBookmarkOp | null> {
-  const objectId = await lookupObjectId(MAP_TYPE, id);
+  let objectId = mappingCache?.get(id);
+  if (!objectId) {
+    objectId = await lookupObjectId(MAP_TYPE, id);
+    if (objectId) mappingCache?.set(id, objectId);
+  }
   if (!objectId) return null;
   const [node] = await chrome.bookmarks.get(id);
   const objectType: ObjectType = node.url ? "bookmark" : "bookmarkFolder";
 
-  const parentObjectId = await objectIdFor(moveInfo.parentId);
-  const position = await computePosition(moveInfo.parentId, moveInfo.index, overlay, siblingCache);
+  const parentObjectId = await objectIdFor(moveInfo.parentId, mappingCache);
+  const position = await computePosition(moveInfo.parentId, moveInfo.index, overlay, siblingCache, mappingCache);
   const payload = { parent: parentObjectId, position };
 
   // Defense in depth alongside the guard above (see stageChanged) — reads
@@ -303,6 +334,28 @@ async function stageMoved(
 export async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promise<void> {
   const overlay = new Map<string, unknown>();
   const siblingCache = new Map<string, chrome.bookmarks.BookmarkTreeNode[]>();
+  const mappingCache = new Map<string, string>();
+
+  // Pre-fetch mappings for all local IDs known from the events up front in one batch transaction (EXT-04)
+  const localIdsToPrefetch = new Set<string>();
+  for (const event of events) {
+    localIdsToPrefetch.add(event.id);
+    if (event.kind === "created" && event.node.parentId) {
+      localIdsToPrefetch.add(event.node.parentId);
+    }
+    if (event.kind === "moved" && event.moveInfo.parentId) {
+      localIdsToPrefetch.add(event.moveInfo.parentId);
+    }
+  }
+  if (localIdsToPrefetch.size > 0) {
+    const prefetched = await getMappingsByLocalIds(MAP_TYPE, [...localIdsToPrefetch]);
+    if (prefetched && typeof prefetched[Symbol.iterator] === "function") {
+      for (const [id, record] of prefetched) {
+        mappingCache.set(id, record.objectId);
+      }
+    }
+  }
+
   const staged: StagedBookmarkOp[] = [];
 
   for (const event of events) {
@@ -310,16 +363,16 @@ export async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promis
       let op: StagedBookmarkOp | null;
       switch (event.kind) {
         case "created":
-          op = await stageCreated(event.id, event.node, overlay, siblingCache);
+          op = await stageCreated(event.id, event.node, overlay, siblingCache, mappingCache);
           break;
         case "removed":
-          op = await stageRemoved(event.id, event.removeInfo);
+          op = await stageRemoved(event.id, event.removeInfo, mappingCache);
           break;
         case "changed":
-          op = await stageChanged(event.id, event.changeInfo, overlay);
+          op = await stageChanged(event.id, event.changeInfo, overlay, mappingCache);
           break;
         case "moved":
-          op = await stageMoved(event.id, event.moveInfo, overlay, siblingCache);
+          op = await stageMoved(event.id, event.moveInfo, overlay, siblingCache, mappingCache);
           break;
       }
       if (op) staged.push(op);
@@ -468,8 +521,8 @@ function flattenForBackfill(
  */
 export async function backfillExisting(): Promise<void> {
   const [root] = await chrome.bookmarks.getTree();
-  const alreadyMapped = await getMappedChromiumIdsByType(MAP_TYPE);
-  const mappingsForAlreadyMapped = await getMappingsByLocalIds(MAP_TYPE, [...alreadyMapped]);
+  const rawMapped = await getMappedChromiumIdsByType(MAP_TYPE);
+  const mappingsForAlreadyMapped = await getMappingsByLocalIds(MAP_TYPE, [...rawMapped]);
 
   const moveStates = await getFieldStatesForObjects(
     [...mappingsForAlreadyMapped.values()].map((m) => m.objectId),
@@ -479,6 +532,18 @@ export async function backfillExisting(): Promise<void> {
   for (const [objectId, state] of moveStates) {
     const position = (state.value as { position?: string } | undefined)?.position;
     if (position) positionsForAlreadyMapped.set(objectId, position);
+  }
+
+  // EXT-05: A node is only considered already-mapped if its backfill or live-create
+  // transaction committed durably — which always writes a "move" field_state.
+  // Any mapping lacking field state is an orphaned remnant of a crashed
+  // non-atomic backfill from prior versions; treating it as unmapped allows
+  // backfillExisting to re-capture and commit it atomically.
+  const alreadyMapped = new Set<string>();
+  for (const [chromiumId, mapping] of mappingsForAlreadyMapped) {
+    if (moveStates.has(mapping.objectId)) {
+      alreadyMapped.add(chromiumId);
+    }
   }
 
   const { newMappings, newNodes } = flattenForBackfill(
@@ -492,32 +557,65 @@ export async function backfillExisting(): Promise<void> {
     const mappingChunk = newMappings.slice(i, i + BACKFILL_FLUSH_CHUNK);
     const nodeChunk = newNodes.slice(i, i + BACKFILL_FLUSH_CHUNK);
 
-    // Mapping written before the operation exists, matching live capture's
-    // getOrCreateObjectId-then-operation order in `stageCreated` above — so
-    // a live event racing this backfill for one of these nodes can still
-    // find its mapping even before this chunk's operations land.
-    await putMappingsBatch(mappingChunk);
-
     const pending: PendingLocalOperation[] = nodeChunk.map((n) => ({
       objectType: n.objectType,
       objectId: n.objectId,
       operationType: "create",
       payload: n.payload,
     }));
-    const created = await createLocalOperationsBatch(pending);
+    // EXT-05: Prepare encrypted operations without enqueuing into IndexedDB immediately,
+    // so mappings, pending operations, and field states are committed together in a single
+    // atomic IndexedDB transaction below.
+    const created = await createLocalOperationsBatch(pending, { enqueue: false });
 
-    const fieldStateEntries: LocalFieldStateEntry[] = [];
+    const fieldStates: Array<Omit<FieldStateRecord, "key">> = [];
     created.forEach(({ operation, deviceId }, idx) => {
       const node = nodeChunk[idx];
-      const key = opKey(operation.lamportTimestamp, deviceId, operation.operationId, "create");
-      fieldStateEntries.push(
-        { objectId: node.objectId, field: "title", key, value: node.payload.title },
-        { objectId: node.objectId, field: "url", key, value: node.payload.url },
-        { objectId: node.objectId, field: "move", key, value: { parent: node.payload.parent, position: node.payload.position } },
-        { objectId: node.objectId, field: "liveness", key, value: "live" },
+      fieldStates.push(
+        {
+          objectId: node.objectId,
+          field: "title",
+          lamportTimestamp: operation.lamportTimestamp,
+          deviceId,
+          operationId: operation.operationId,
+          operationType: "create",
+          value: node.payload.title,
+        },
+        {
+          objectId: node.objectId,
+          field: "url",
+          lamportTimestamp: operation.lamportTimestamp,
+          deviceId,
+          operationId: operation.operationId,
+          operationType: "create",
+          value: node.payload.url,
+        },
+        {
+          objectId: node.objectId,
+          field: "move",
+          lamportTimestamp: operation.lamportTimestamp,
+          deviceId,
+          operationId: operation.operationId,
+          operationType: "create",
+          value: { parent: node.payload.parent, position: node.payload.position },
+        },
+        {
+          objectId: node.objectId,
+          field: "liveness",
+          lamportTimestamp: operation.lamportTimestamp,
+          deviceId,
+          operationId: operation.operationId,
+          operationType: "create",
+          value: "live",
+        },
       );
     });
-    await recordLocalFieldStatesBatch(fieldStateEntries);
+
+    await commitBookmarkBackfillBatch({
+      mappings: mappingChunk,
+      operations: created.map((c) => c.operation),
+      fieldStates,
+    });
   }
 }
 

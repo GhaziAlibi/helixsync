@@ -342,24 +342,33 @@ async function stageGroupRemoved(group: chrome.tabGroups.TabGroup): Promise<Stag
   };
 }
 
-/** EXT-05: Coalesce multiple staged operations for the same `objectId` within a batch:
+/** EXT-05 & EXT-03: Coalesce multiple staged operations for the same `objectId` within a batch:
  * - If multiple `update` operations for the same `objectId` are staged within the batch,
  *   keep only the latest `update` operation.
+ * - If multiple `activate` operations for the same `objectId` are staged within the batch,
+ *   keep only the latest `activate` operation.
  * - If a `close` operation is staged for an `objectId`, discard any earlier `update`
- *   operations for that `objectId` in the same batch.
+ *   or `activate` operations for that `objectId` in the same batch.
  */
 export function coalesceStagedOps(staged: StagedTabOp[]): StagedTabOp[] {
   const result: StagedTabOp[] = [];
   const discardEarlierUpdate = new Set<string>();
+  const discardEarlierActivate = new Set<string>();
 
   for (let i = staged.length - 1; i >= 0; i--) {
     const op = staged[i];
     if (op.operationType === "close") {
       discardEarlierUpdate.add(op.objectId);
+      discardEarlierActivate.add(op.objectId);
       result.push(op);
     } else if (op.operationType === "update") {
       if (!discardEarlierUpdate.has(op.objectId)) {
         discardEarlierUpdate.add(op.objectId);
+        result.push(op);
+      }
+    } else if (op.operationType === "activate") {
+      if (!discardEarlierActivate.has(op.objectId)) {
+        discardEarlierActivate.add(op.objectId);
         result.push(op);
       }
     } else {

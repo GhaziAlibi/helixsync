@@ -441,13 +441,25 @@ export async function enqueueOperationsBatch(operations: LocalOperation[]): Prom
  * because `resetInFlightOperations` (below) guarantees `UPLOAD_IN_FLIGHT`
  * never survives across a service-worker restart — otherwise a
  * crash-orphaned in-flight record would become permanently invisible here
- * and simply never sync again. */
-export async function getPendingOperations(limit = 200): Promise<PendingOperationRecord[]> {
+ * and simply never sync again.
+ *
+ * If `excludeIds` is provided, operations whose `operationId` is in the set
+ * are skipped without counting toward `limit`. This allows callers (like
+ * `uploadPending`) to skip operations already requeued or in-flight earlier
+ * in the same sync cycle and fetch subsequent ready operations (resolving
+ * head-of-line blocking). */
+export async function getPendingOperations(
+  limit = 200,
+  excludeIds?: ReadonlySet<string>,
+): Promise<PendingOperationRecord[]> {
   const db = await getDb();
   const results: PendingOperationRecord[] = [];
   let cursor = await db.transaction("pending_operations").store.index("by-sequence").openCursor();
   while (cursor && results.length < limit) {
-    if (cursor.value.state === "LOCAL_QUEUED") {
+    if (
+      cursor.value.state === "LOCAL_QUEUED" &&
+      (!excludeIds || !excludeIds.has(cursor.value.operation.operationId))
+    ) {
       results.push(cursor.value);
     }
     cursor = await cursor.continue();
@@ -721,6 +733,54 @@ export async function putMappingsBatch(records: ObjectMappingRecord[]): Promise<
   for (const record of records) {
     await tx.store.put(record);
   }
+  await tx.done;
+}
+
+export interface BookmarkBackfillBatch {
+  mappings: ObjectMappingRecord[];
+  operations: LocalOperation[];
+  fieldStates: Array<Omit<FieldStateRecord, "key">>;
+}
+
+/**
+ * Commits bookmark backfill chunks atomically across object_mappings,
+ * pending_operations, and field_state in a single IndexedDB transaction.
+ *
+ * EXT-05: Prevents crash-inconsistency during bookmark backfill. Previously,
+ * mappings were committed in one transaction, operations in a second, and field states
+ * in a third. If the service worker crashed or was terminated after mappings were
+ * written but before operations were committed, subsequent backfill runs skipped the
+ * nodes because they appeared in `alreadyMapped`, while their create operations were
+ * never queued, causing permanent data loss across devices.
+ */
+export async function commitBookmarkBackfillBatch(batch: BookmarkBackfillBatch): Promise<void> {
+  const { mappings, operations, fieldStates } = batch;
+  if (mappings.length === 0 && operations.length === 0 && fieldStates.length === 0) return;
+
+  const db = await getDb();
+  const tx = db.transaction(["object_mappings", "pending_operations", "field_state"], "readwrite");
+  const createdAt = new Date().toISOString();
+  const recordedAt = Date.now();
+
+  const mappingsStore = tx.objectStore("object_mappings");
+  for (const record of mappings) {
+    await mappingsStore.put(record);
+  }
+
+  const opsStore = tx.objectStore("pending_operations");
+  for (const operation of operations) {
+    await opsStore.put({ operation, state: "LOCAL_QUEUED", createdAt, attempts: 0 });
+  }
+
+  const fieldStateStore = tx.objectStore("field_state");
+  for (const record of fieldStates) {
+    await fieldStateStore.put({
+      ...record,
+      key: fieldStateKey(record.objectId, record.field),
+      recordedAt,
+    });
+  }
+
   await tx.done;
 }
 

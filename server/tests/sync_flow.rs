@@ -3,7 +3,9 @@ use std::sync::Arc;
 use axum_test::{TestServer, TestServerConfig, Transport};
 use chrono::{DateTime, Utc};
 use helixsync_server::config::Config;
-use helixsync_server::middleware::rate_limit::{RateLimiter, SYNC_SETTINGS_LIMIT};
+use helixsync_server::middleware::rate_limit::{
+    RateLimiter, SYNC_SETTINGS_LIMIT, SYNC_STATS_LIMIT,
+};
 use helixsync_server::state::AppState;
 use helixsync_server::sync::compaction;
 use helixsync_server::websocket::ConnectionRegistry;
@@ -667,6 +669,56 @@ async fn sync_settings_rate_limit_is_independent_per_device(pool: PgPool) {
     for _ in 0..requests_per_device {
         server
             .get("/api/v1/sync/settings")
+            .authorization_bearer(&access_token_b)
+            .await
+            .assert_status_ok();
+    }
+}
+
+/// Two devices belonging to the same user account must have independent rate limits
+/// for `/api/v1/sync/stats` (keyed by `device:<device_id>`), so exhausting the limit
+/// on device A does not block device B.
+#[sqlx::test(migrations = "./migrations")]
+async fn sync_stats_rate_limit_is_independent_per_device(pool: PgPool) {
+    let rate_limiter = Arc::new(RateLimiter::new());
+    let state = AppState {
+        db: pool,
+        config: Arc::new(test_config()),
+        rate_limiter: Arc::clone(&rate_limiter),
+        ws_registry: Arc::new(ConnectionRegistry::new()),
+        last_seen_cache: Arc::new(dashmap::DashMap::new()),
+        device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+    };
+    let server = server_for_state(state);
+    register_and_login(&server, "priya-two-devices-stats@example.com").await;
+    let (device_a_id, access_token_a) =
+        register_device(&server, "priya-two-devices-stats@example.com", "Laptop").await;
+    let (_device_b_id, access_token_b) =
+        register_device(&server, "priya-two-devices-stats@example.com", "Phone").await;
+
+    // Exhaust device A's quota in the authenticated rate-limiter partition.
+    for _ in 0..SYNC_STATS_LIMIT.limit {
+        helixsync_server::middleware::rate_limit::enforce(
+            &rate_limiter,
+            SYNC_STATS_LIMIT,
+            &format!("device:{device_a_id}"),
+        )
+        .unwrap();
+    }
+
+    // Device A has exhausted its limit and must receive HTTP 429.
+    server
+        .get("/api/v1/sync/stats")
+        .authorization_bearer(&access_token_a)
+        .await
+        .assert_status(axum::http::StatusCode::TOO_MANY_REQUESTS);
+
+    // Device B belongs to the same user account but has its own independent rate limit,
+    // so it must not be blocked and receives HTTP 200.
+    let requests_per_device = SYNC_STATS_LIMIT.limit - 1;
+    for _ in 0..requests_per_device {
+        server
+            .get("/api/v1/sync/stats")
             .authorization_bearer(&access_token_b)
             .await
             .assert_status_ok();

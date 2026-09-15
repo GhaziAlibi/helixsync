@@ -359,6 +359,61 @@ describe("EXT-05: Redundant Tab Update Op Churn During Progressive Navigation", 
       });
     });
 
+    it("collapses multiple activate operations for the same tab into the latest activate operation (EXT-03)", () => {
+      const staged: StagedTabOp[] = [
+        {
+          objectType: "tab",
+          objectId: "tab-1",
+          operationType: "activate",
+          payload: { active: true },
+          fields: [{ field: "active", value: true }],
+        },
+        {
+          objectType: "tab",
+          objectId: "tab-1",
+          operationType: "activate",
+          payload: { active: true },
+          fields: [{ field: "active", value: true }],
+        },
+      ];
+
+      const result = coalesceStagedOps(staged);
+      expect(result).toHaveLength(1);
+      expect(result[0].operationType).toBe("activate");
+      expect(result[0].objectId).toBe("tab-1");
+    });
+
+    it("discards earlier activate operations for an objectId when a close operation is staged in the same batch (EXT-03)", () => {
+      const staged: StagedTabOp[] = [
+        {
+          objectType: "tab",
+          objectId: "tab-1",
+          operationType: "activate",
+          payload: { active: true },
+          fields: [{ field: "active", value: true }],
+        },
+        {
+          objectType: "tab",
+          objectId: "tab-1",
+          operationType: "update",
+          payload: { title: "Tab 1" },
+          fields: [{ field: "state", value: { title: "Tab 1" } }],
+        },
+        {
+          objectType: "tab",
+          objectId: "tab-1",
+          operationType: "close",
+          payload: {},
+          fields: [{ field: "liveness", value: "deleted" }],
+        },
+      ];
+
+      const result = coalesceStagedOps(staged);
+      expect(result).toHaveLength(1);
+      expect(result[0].operationType).toBe("close");
+      expect(result[0].objectId).toBe("tab-1");
+    });
+
     it("preserves non-update operations such as create and activate", () => {
       const staged: StagedTabOp[] = [
         {

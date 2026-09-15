@@ -146,6 +146,7 @@ const CRYPTO_YIELD_CHUNK = 25;
  * a pending macrotask (e.g. a popup message) can run. */
 export async function createLocalOperationsBatch(
   items: PendingLocalOperation[],
+  options?: { enqueue?: boolean },
 ): Promise<CreatedOperation[]> {
   if (items.length === 0) return [];
 
@@ -181,7 +182,9 @@ export async function createLocalOperationsBatch(
     if (start + CRYPTO_YIELD_CHUNK < items.length) await yieldToEventLoop();
   }
 
-  await enqueueOperationsBatch(operations);
+  if (options?.enqueue !== false) {
+    await enqueueOperationsBatch(operations);
+  }
   return operations.map((operation) => ({ operation, deviceId: device.deviceId }));
 }
 
@@ -256,16 +259,16 @@ export function classifyRejections(rejected: UploadRejection[]): {
 
 export async function uploadPending(): Promise<void> {
   // Operation ids already requeued as `object_not_found` earlier in this
-  // same call. Since a requeued op goes back to LOCAL_QUEUED and keeps the
-  // lowest device sequence in the queue, `getPendingOperations` will hand it
-  // back to us again at the head of the very next batch — this set makes
-  // sure we don't treat that re-fetch as a fresh attempt (see the comment
+  // same call. Passed to `getPendingOperations` so subsequent batches skip
+  // them and fetch ready operations further down the queue (preventing
+  // head-of-line blocking). This also ensures we don't treat requeued
+  // operations as fresh attempts within the same cycle (see the comment
   // above `MAX_UPLOAD_ATTEMPTS`). The op stays queued and simply waits for a
   // later cycle, by which point `downloadAndApply` has had a chance to run.
   const requeuedThisCycle = new Set<string>();
 
   for (let batch = 0; batch < MAX_BATCHES_PER_CYCLE; batch++) {
-    const pending = await getPendingOperations(MAX_UPLOAD_BATCH);
+    const pending = await getPendingOperations(MAX_UPLOAD_BATCH, requeuedThisCycle);
     if (pending.length === 0) return;
 
     const stuck = pending.filter((p) => p.attempts >= MAX_UPLOAD_ATTEMPTS);
@@ -281,11 +284,10 @@ export async function uploadPending(): Promise<void> {
     );
 
     if (retryable.length === 0) {
-      // Nothing left to upload this round, but dropping `stuck` above still
-      // counts as progress, and there may be more queued beyond this batch.
-      // (Or everything left in this batch was already requeued earlier in
-      // this cycle and is just waiting it out — see `requeuedThisCycle`.)
-      if (pending.length < MAX_UPLOAD_BATCH) return;
+      // Nothing left to upload this round. If no stuck items were dropped,
+      // no progress was made and we must exit cleanly instead of spinning
+      // through remaining iterations.
+      if (stuck.length === 0 || pending.length < MAX_UPLOAD_BATCH) return;
       continue;
     }
 
@@ -313,6 +315,7 @@ export async function uploadPending(): Promise<void> {
       if (toRequeue.length > 0) {
         await requeueInFlight(toRequeue, true);
         for (const id of toRequeue) requeuedThisCycle.add(id);
+        progressed = true;
       }
       if (toRemove.length > 0) {
         await removeFromQueue(toRemove);
@@ -327,9 +330,7 @@ export async function uploadPending(): Promise<void> {
       throw err;
     }
 
-    // Nothing resolved this round (e.g. every operation is an
-    // object-not-found requeue waiting on a parent that hasn't landed yet) —
-    // stop rather than spinning on the same stuck batch.
+    // Nothing resolved or requeued this round — stop rather than spinning.
     if (!progressed) return;
     // Fetched fewer than a full batch: the queue is drained.
     if (pending.length < MAX_UPLOAD_BATCH) return;
@@ -532,43 +533,30 @@ async function decryptOrSkip(op: OperationOut, rek: string): Promise<{ payload: 
   return { payload: op.payload };
 }
 
-/** Applies one remote operation and returns its operationId for the caller
- * to feed into the chunked `markAppliedBatch` bookkeeping (this function no
- * longer marks applied itself — see `MARK_APPLIED_CHUNK` for why that's now
- * the caller's responsibility). Every path through this function — success,
- * undecryptable payload, unknown object type — ends the same way: the op is
- * considered done and must eventually be recorded as applied, so it always
- * returns `op.operationId` rather than signaling "skip". Ordering is
- * preserved: by the time this function returns, the applier (if any) has
- * already run and its own writes (if it makes any) are committed — only
- * *when the bookkeeping transaction commits* is deferred, not the
- * sequencing of "apply then eventually mark". Only used for applySnapshot's
- * tombstone loop now — `downloadAndApply` and applySnapshot's main object
- * dispatch inline the same decrypt/apply/warn steps directly instead of
- * calling this, since they need to group items by object type for a
- * registered batch applier first (see `registerBatchApplier`), which
- * this single-op, single-type function has no way to do. This one never
- * needs to, since a tombstone's applier is always the terminal-operation
- * one-at-a-time path regardless of whether a batch applier exists for that
- * type (a delete is comparatively rare and cheap next to a bulk snapshot's
- * create volume, so it was never worth batching). */
-async function applyOneRemote(op: OperationOut, rek: string): Promise<string> {
+/** Applies one remote operation (decrypts and invokes registered applier).
+ * Only used for applySnapshot's tombstone loop now — `downloadAndApply` and
+ * applySnapshot's main object dispatch inline the same decrypt/apply/warn steps
+ * directly instead of calling this, since they need to group items by object
+ * type for a registered batch applier first (see `registerBatchApplier`), which
+ * this single-op, single-type function has no way to do. This one never needs
+ * to, since a tombstone's applier is always the terminal-operation one-at-a-time
+ * path regardless of whether a batch applier exists for that type (a delete is
+ * comparatively rare and cheap next to a bulk snapshot's create volume, so it
+ * was never worth batching). */
+async function applyOneRemote(op: OperationOut, rek: string): Promise<void> {
   const decrypted = await decryptOrSkip(op, rek);
-  if (!decrypted) return op.operationId;
+  if (!decrypted) return;
   const { payload } = decrypted;
 
   const applier = appliers.get(op.objectType);
   if (!applier) {
     // Unknown/unsupported object type: protocol compatibility rule — never
-    // silently apply, but don't crash the batch either. Mark as applied (by
-    // the caller) so we don't retry forever; it is recoverable later via
-    // full resync if a future version adds support.
+    // silently apply, but don't crash the batch either.
     console.warn("HelixSync: no applier registered for object type", op.objectType);
-    return op.operationId;
+    return;
   }
 
   await applier(op, payload);
-  return op.operationId;
 }
 
 // A snapshot object's `operationType` is the true originating type for
@@ -615,20 +603,18 @@ const SNAPSHOT_DISPATCH_CHUNK = 500;
  * restore policy, etc. all behave identically either way); the only
  * difference is that `field_state` is wiped first, per `clearFieldState`'s
  * own docs, so each field lands unconditionally instead of via a numeric
- * ordering-key comparison against data that predates the snapshot. */
-async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): Promise<void> {
+ * ordering-key comparison against data that predates the snapshot.
+ *
+ * Note on applied_operations (EXT-02): unlike incremental downloadAndApply,
+ * snapshot objects and tombstones do not record synthetic operationIds into
+ * applied_operations. Because synthetic UUIDs are generated randomly on the
+ * client, server operations will never match them, so persisting them would
+ * cause write amplification and phantom key bloat. */
+export async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): Promise<void> {
   await clearFieldState();
 
   const lamportTimestamp = await tickLamportClock();
-  // Same chunked bookkeeping as downloadAndApply's loop, and for the same
-  // reason (see MARK_APPLIED_CHUNK) — a snapshot can carry as many objects
-  // as a large account's entire bookmark/tab/history state.
-  let appliedBuffer: string[] = [];
-  const flushAppliedBuffer = async () => {
-    if (appliedBuffer.length === 0) return;
-    await markAppliedBatch(appliedBuffer);
-    appliedBuffer = [];
-  };
+
   // Shared across both loops below (see CRYPTO_YIELD_CHUNK) — a snapshot's
   // object list and tombstone list are really one long bulk-decrypt stretch
   // from the thread's perspective, so the yield cadence spans both rather
@@ -670,10 +656,9 @@ async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): 
       const decrypted = await decryptOrSkip(op, device.encryptionRootKey);
       await maybeYield();
       if (!decrypted) {
-        // Undecryptable: "applied" the same way applyOneRemote already
-        // treats it, just without ever reaching a type dispatch.
-        appliedBuffer.push(op.operationId);
-        if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
+        // Undecryptable: skipped without reaching a type dispatch.
+        // Unlike incremental download, we do not record synthetic operationIds
+        // into applied_operations (EXT-02) as they have zero cache hits and bloat storage.
         continue;
       }
       let group = decryptedByType.get(op.objectType);
@@ -690,10 +675,6 @@ async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): 
         // Never more than SNAPSHOT_DISPATCH_CHUNK items in one call — see
         // that constant's comment.
         await batchApplier(items);
-        for (const { op } of items) {
-          appliedBuffer.push(op.operationId);
-          if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
-        }
         continue;
       }
 
@@ -704,11 +685,9 @@ async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): 
         } else {
           // Same "unknown/unsupported object type" handling as
           // applyOneRemote: never silently apply, but don't crash the
-          // batch, and mark applied so it isn't retried forever.
+          // batch either.
           console.warn("HelixSync: no applier registered for object type", op.objectType);
         }
-        appliedBuffer.push(op.operationId);
-        if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
       }
     }
   }
@@ -727,12 +706,9 @@ async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): 
       serverCursor: snapshot.snapshotCursor,
       createdAt: new Date().toISOString(),
     };
-    appliedBuffer.push(await applyOneRemote(op, device.encryptionRootKey));
-    if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
+    await applyOneRemote(op, device.encryptionRootKey);
     await maybeYield();
   }
-
-  await flushAppliedBuffer();
 
   await putSyncState({
     ...(await getSyncState()),

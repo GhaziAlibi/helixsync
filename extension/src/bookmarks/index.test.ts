@@ -26,15 +26,20 @@ const getTreeMock = vi.fn();
 };
 
 const getFieldStateMock = vi.fn<(objectId: string, field: string) => Promise<{ value: unknown } | undefined>>();
+const commitBookmarkBackfillBatchMock = vi.fn();
+const getFieldStatesForObjectsMock = vi.fn();
+const getMappedChromiumIdsByTypeMock = vi.fn();
+const getMappingsByLocalIdsMock = vi.fn(async (_type: any, _ids: any) => new Map<string, any>());
 
 vi.mock("../storage/db", () => ({
+  commitBookmarkBackfillBatch: (...args: unknown[]) => commitBookmarkBackfillBatchMock(...args),
   deleteDeferredMaterialization: vi.fn(),
   deleteDeferredMaterializationsBatch: vi.fn(),
   getDeferredMaterializationsWaitingOn: vi.fn(),
   getFieldState: (objectId: string, field: string) => getFieldStateMock(objectId, field),
-  getFieldStatesForObjects: vi.fn(),
-  getMappedChromiumIdsByType: vi.fn(),
-  getMappingsByLocalIds: vi.fn(),
+  getFieldStatesForObjects: (...args: unknown[]) => getFieldStatesForObjectsMock(...args),
+  getMappedChromiumIdsByType: (...args: unknown[]) => getMappedChromiumIdsByTypeMock(...args),
+  getMappingsByLocalIds: (type: any, ids: any) => getMappingsByLocalIdsMock(type, ids),
   getMappingsByObjectIds: vi.fn(),
   mappingKey: (type: string, id: string) => `${type}:${id}`,
   putDeferredMaterialization: vi.fn(),
@@ -64,25 +69,28 @@ vi.mock("../sync/conflict", () => ({
   resolveFields: vi.fn(),
 }));
 
-const createLocalOperationsBatchMock = vi.fn(async (items: PendingLocalOperation[]) => {
-  return items.map((_item, idx) => ({
-    operation: {
-      operationId: `op-${idx}`,
-      lamportTimestamp: idx + 1,
-    },
-    deviceId: "device-1",
-  }));
-});
+const createLocalOperationsBatchMock = vi.fn(
+  async (items: PendingLocalOperation[], _options?: { enqueue?: boolean }) => {
+    return items.map((_item, idx) => ({
+      operation: {
+        operationId: `op-${idx}`,
+        lamportTimestamp: idx + 1,
+      },
+      deviceId: "device-1",
+    }));
+  },
+);
 const scheduleLocalSyncMock = vi.fn();
 
 vi.mock("../sync/engine", () => ({
-  createLocalOperationsBatch: (items: PendingLocalOperation[]) => createLocalOperationsBatchMock(items),
+  createLocalOperationsBatch: (items: PendingLocalOperation[], options?: { enqueue?: boolean }) =>
+    createLocalOperationsBatchMock(items, options),
   registerApplier: vi.fn(),
   registerBatchApplier: vi.fn(),
   scheduleLocalSync: () => scheduleLocalSyncMock(),
 }));
 
-const { positionOf, computePosition, flushBookmarkEvents } = await import("./index");
+const { positionOf, computePosition, flushBookmarkEvents, backfillExisting } = await import("./index");
 
 describe("EXT-03: Sibling IPC and Transaction Amplification in bookmarks", () => {
   beforeEach(() => {
@@ -255,5 +263,232 @@ describe("EXT-03: Sibling IPC and Transaction Amplification in bookmarks", () =>
       // pos1 should be < pos2 because bm-2 was at index 1 and bm-1 was at index 0
       expect(pos1 < pos2).toBe(true);
     });
+
+    it("pre-fetches known mapping IDs in a single batch read (EXT-04)", async () => {
+      getMappingsByLocalIdsMock.mockClear();
+      getOrCreateObjectIdMock.mockClear();
+
+      const fakeMappings = new Map([
+        ["bm-10", { key: "bookmark:bm-10", objectType: "bookmark" as const, chromiumLocalId: "bm-10", objectId: "obj-bm-10" }],
+      ]);
+      getMappingsByLocalIdsMock.mockResolvedValueOnce(fakeMappings);
+      getMock.mockResolvedValueOnce([{ id: "bm-10", title: "Updated title", url: "https://helixsync.test" }]);
+
+      await flushBookmarkEvents([
+        {
+          kind: "changed",
+          id: "bm-10",
+          changeInfo: { title: "Updated title" },
+        },
+      ]);
+
+      // Verified: getMappingsByLocalIds was called in a single batch read
+      expect(getMappingsByLocalIdsMock).toHaveBeenCalledTimes(1);
+      expect(getMappingsByLocalIdsMock).toHaveBeenCalledWith("bookmark", expect.arrayContaining(["bm-10"]));
+      // And getOrCreateObjectId was bypassed because the mapping was in the batch pre-fetch
+      expect(getOrCreateObjectIdMock).not.toHaveBeenCalledWith("bookmark", "bm-10");
+    });
+  });
+});
+
+describe("EXT-05: Non-Atomic Mapping vs. Operation Creation in backfillExisting", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("atomically commits mappings, operations, and field states in a single batch on clean run", async () => {
+    const tree: chrome.bookmarks.BookmarkTreeNode[] = [
+      {
+        id: "0",
+        title: "Root",
+        children: [
+          {
+            id: "1",
+            title: "Bookmarks Bar",
+            children: [
+              {
+                id: "folder-1",
+                title: "Folder 1",
+                children: [
+                  { id: "bm-1", title: "Bookmark 1", url: "https://example.com/1" },
+                ],
+              },
+              {
+                id: "bm-2",
+                title: "Bookmark 2",
+                url: "https://example.com/2",
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    getTreeMock.mockResolvedValue(tree);
+    getMappedChromiumIdsByTypeMock.mockResolvedValue(new Set());
+    getMappingsByLocalIdsMock.mockResolvedValue(new Map());
+    getFieldStatesForObjectsMock.mockResolvedValue(new Map());
+
+    await backfillExisting();
+
+    // Verify operations were prepared with { enqueue: false } so they aren't committed before mappings
+    expect(createLocalOperationsBatchMock).toHaveBeenCalledTimes(1);
+    expect(createLocalOperationsBatchMock).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ objectType: "bookmarkFolder" }),
+        expect.objectContaining({ objectType: "bookmark" }),
+      ]),
+      { enqueue: false },
+    );
+
+    // Verify atomic multi-store commit was invoked
+    expect(commitBookmarkBackfillBatchMock).toHaveBeenCalledTimes(1);
+    const batch = commitBookmarkBackfillBatchMock.mock.calls[0][0];
+
+    // Mappings for the 3 new nodes: folder-1, bm-1, bm-2
+    expect(batch.mappings).toHaveLength(3);
+    const mappingIds = batch.mappings.map((m: { chromiumLocalId: string }) => m.chromiumLocalId);
+    expect(mappingIds).toEqual(["folder-1", "bm-1", "bm-2"]);
+
+    // Operations for the 3 new nodes
+    expect(batch.operations).toHaveLength(3);
+
+    // Field states: 4 per node (title, url, move, liveness) = 12 total
+    expect(batch.fieldStates).toHaveLength(12);
+
+    // Verify child references parent objectId
+    const folderMapping = batch.mappings.find((m: { chromiumLocalId: string }) => m.chromiumLocalId === "folder-1");
+    const childOp = batch.operations.find((_op: unknown, idx: number) => batch.mappings[idx].chromiumLocalId === "bm-1");
+    expect(childOp).toBeDefined();
+    expect(folderMapping).toBeDefined();
+  });
+
+  it("survives mid-backfill crash and resumes without re-creating already-committed operations", async () => {
+    // 501 items so it spans across the 500-item chunk boundary:
+    // Chunk 1 has 500 items, Chunk 2 has 1 item
+    const bookmarks: chrome.bookmarks.BookmarkTreeNode[] = Array.from({ length: 501 }, (_, i) => ({
+      id: `bm-${i}`,
+      title: `Bookmark ${i}`,
+      url: `https://example.com/${i}`,
+    }));
+
+    const tree: chrome.bookmarks.BookmarkTreeNode[] = [
+      {
+        id: "0",
+        title: "Root",
+        children: [
+          {
+            id: "1",
+            title: "Bookmarks Bar",
+            children: bookmarks,
+          },
+        ],
+      },
+    ];
+
+    getTreeMock.mockResolvedValue(tree);
+    getMappedChromiumIdsByTypeMock.mockResolvedValue(new Set());
+    getMappingsByLocalIdsMock.mockResolvedValue(new Map());
+    getFieldStatesForObjectsMock.mockResolvedValue(new Map());
+
+    // First call: chunk 1 commits successfully, chunk 2 fails with simulated crash
+    let chunkCount = 0;
+    const committedMappings = new Map<string, { objectId: string }>();
+    const committedFieldStates = new Map<string, { value: unknown }>();
+
+    commitBookmarkBackfillBatchMock.mockImplementation(async (batch) => {
+      chunkCount++;
+      if (chunkCount === 1) {
+        // Record committed records for chunk 1
+        for (const m of batch.mappings) {
+          committedMappings.set(m.chromiumLocalId, { objectId: m.objectId });
+        }
+        for (const fs of batch.fieldStates) {
+          if (fs.field === "move") {
+            committedFieldStates.set(fs.objectId, { value: fs.value });
+          }
+        }
+        return;
+      }
+      // Chunk 2 simulates service worker termination
+      throw new Error("simulated service worker termination");
+    });
+
+    await expect(backfillExisting()).rejects.toThrow("simulated service worker termination");
+
+    // Chunk 1 committed 500 items
+    expect(committedMappings.size).toBe(500);
+
+    // Reset mocks for service worker restart
+    commitBookmarkBackfillBatchMock.mockReset();
+    commitBookmarkBackfillBatchMock.mockImplementation(async () => {});
+    createLocalOperationsBatchMock.mockClear();
+
+    // On restart: DB has chunk 1's 500 items
+    getMappedChromiumIdsByTypeMock.mockResolvedValue(new Set(committedMappings.keys()));
+    getMappingsByLocalIdsMock.mockImplementation(async (_type: string, ids: string[]) => {
+      const res = new Map();
+      for (const id of ids) {
+        if (committedMappings.has(id)) res.set(id, committedMappings.get(id));
+      }
+      return res;
+    });
+    getFieldStatesForObjectsMock.mockImplementation(async (objectIds: string[]) => {
+      const res = new Map();
+      for (const oid of objectIds) {
+        if (committedFieldStates.has(oid)) res.set(oid, committedFieldStates.get(oid));
+      }
+      return res;
+    });
+
+    // Run backfillExisting on restart
+    await backfillExisting();
+
+    // Chunk 2 only has 1 item remaining — must be committed in exactly 1 call
+    expect(commitBookmarkBackfillBatchMock).toHaveBeenCalledTimes(1);
+    const resumedBatch = commitBookmarkBackfillBatchMock.mock.calls[0][0];
+
+    // Only the remaining 1 item is processed; chunk 1's 500 items were NOT re-created
+    expect(resumedBatch.mappings).toHaveLength(1);
+    expect(resumedBatch.mappings[0].chromiumLocalId).toBe("bm-500");
+    expect(resumedBatch.operations).toHaveLength(1);
+  });
+
+  it("heals orphaned mappings lacking field states left by past non-atomic crash", async () => {
+    // Older buggy version wrote object_mappings but crashed before operations/field_state
+    const tree: chrome.bookmarks.BookmarkTreeNode[] = [
+      {
+        id: "0",
+        title: "Root",
+        children: [
+          {
+            id: "1",
+            title: "Bookmarks Bar",
+            children: [
+              { id: "bm-orphan", title: "Orphaned Bookmark", url: "https://example.com/orphan" },
+            ],
+          },
+        ],
+      },
+    ];
+
+    getTreeMock.mockResolvedValue(tree);
+    // Mappings table has the orphan
+    getMappedChromiumIdsByTypeMock.mockResolvedValue(new Set(["bm-orphan"]));
+    getMappingsByLocalIdsMock.mockResolvedValue(
+      new Map([["bm-orphan", { objectId: "old-orphaned-obj-id" }]]),
+    );
+    // But field_state has NO move state for the orphan (since it was never committed)
+    getFieldStatesForObjectsMock.mockResolvedValue(new Map());
+
+    await backfillExisting();
+
+    // Node was NOT skipped! It was healed and committed atomically
+    expect(commitBookmarkBackfillBatchMock).toHaveBeenCalledTimes(1);
+    const batch = commitBookmarkBackfillBatchMock.mock.calls[0][0];
+    expect(batch.mappings).toHaveLength(1);
+    expect(batch.mappings[0].chromiumLocalId).toBe("bm-orphan");
+    expect(batch.operations).toHaveLength(1);
+    expect(batch.fieldStates).toHaveLength(4);
   });
 });

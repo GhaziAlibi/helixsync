@@ -1167,3 +1167,99 @@ async fn prune_compacted_operations_tolerates_preexisting_temp_table_and_connect
         .await
         .expect("subsequent prune_compacted_operations call must succeed");
 }
+
+/// SRV-01 regression: large operation backlogs must not hold connections
+/// indefinitely or starve the connection pool.
+/// 1. `prune_compacted_operations` enforces `MAX_PRUNED_PER_PASS` (50,000 rows),
+///    halting the deletion loop once reached and leaving remainder for subsequent passes.
+/// 2. Between chunks, it sleeps `PRUNE_COOPERATIVE_DELAY` (10ms) so concurrent
+///    tasks can acquire pool connections without experiencing `PoolTimedOut`.
+#[sqlx::test(migrations = "./migrations")]
+async fn prune_compacted_operations_respects_per_pass_limit_and_cooperative_yield(pool: PgPool) {
+    let state = state_for(pool.clone());
+    let server = server_for_state(state.clone());
+
+    register_and_login(&server, "prune_limit@example.com").await;
+    let (device_a, _token_a) = register_device(&server, "prune_limit@example.com", "Laptop").await;
+
+    let user_id = user_id_for_email(&pool, "prune_limit@example.com").await;
+    let device_id: Uuid = device_a.parse().unwrap();
+
+    const OP_COUNT: i64 = compaction::MAX_PRUNED_PER_PASS + 5_000;
+    let object_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO sync_operations \
+            (operation_id, user_id, device_id, device_sequence, lamport_timestamp, server_cursor, \
+             object_type, object_id, operation_type, encryption_version, payload) \
+         SELECT gen_random_uuid(), $1, $2, seq, seq, seq, 'bookmark', $3, \
+             CASE WHEN seq = 1 THEN 'create' ELSE 'update' END, 0, \
+             CASE WHEN seq = 1 \
+                 THEN jsonb_build_object('title', 'Example', 'url', 'https://example.com', 'parent', NULL, 'position', 'a0') \
+                 ELSE jsonb_build_object('title', 'Title ' || seq) \
+             END \
+         FROM generate_series(1, $4::bigint) AS seq",
+    )
+    .bind(user_id)
+    .bind(device_id)
+    .bind(object_id)
+    .bind(OP_COUNT)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query("INSERT INTO sync_cursors (user_id, device_id, cursor_value) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(device_id)
+        .bind(OP_COUNT)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(count_operations(&pool, user_id).await, OP_COUNT);
+
+    // Concurrently verify that other tasks can acquire connections and execute queries
+    // while the chunked deletion loop yields cooperatively between chunks.
+    let probe_pool = pool.clone();
+    let probe_task = tokio::spawn(async move {
+        // Give pruning a short moment to start deleting chunks
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        let mut conn = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            probe_pool.acquire(),
+        )
+        .await
+        .expect("connection checkout should not time out")
+        .expect("connection checkout should succeed");
+
+        let val: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(val, 1);
+    });
+
+    // Pass 1: should prune exactly MAX_PRUNED_PER_PASS operations (50,000)
+    // and stop, leaving the remaining 5,000 rows for subsequent compaction.
+    compaction::prune_compacted_operations(&state, user_id, OP_COUNT)
+        .await
+        .expect("first pass of prune_compacted_operations should succeed");
+
+    probe_task.await.unwrap();
+
+    let remaining_after_pass1 = count_operations(&pool, user_id).await;
+    assert_eq!(
+        remaining_after_pass1, 5_000,
+        "first pass must cap deletions at MAX_PRUNED_PER_PASS (50,000), leaving 5,000 operations"
+    );
+
+    // Pass 2: subsequent run picks up the remainder and completes pruning.
+    compaction::prune_compacted_operations(&state, user_id, OP_COUNT)
+        .await
+        .expect("second pass of prune_compacted_operations should succeed");
+
+    let remaining_after_pass2 = count_operations(&pool, user_id).await;
+    assert_eq!(
+        remaining_after_pass2, 0,
+        "second pass should delete the remaining 5,000 operations"
+    );
+}

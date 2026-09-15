@@ -13,11 +13,20 @@ import type { PendingOperationRecord } from "../storage/db";
 // `requeueInFlight` together, not in any single pure function.
 let store: Map<string, PendingOperationRecord>;
 
+function defaultGetPendingOperations(
+  limit = 200,
+  excludeIds?: ReadonlySet<string>,
+): PendingOperationRecord[] {
+  return [...store.values()]
+    .filter((r) => r.state === "LOCAL_QUEUED" && (!excludeIds || !excludeIds.has(r.operation.operationId)))
+    .slice(0, limit);
+}
+
 const uploadOperationsMock = vi.fn<(ops: LocalOperation[]) => Promise<UploadResponse>>();
 
 vi.mock("../storage/db", () => ({
-  getPendingOperations: vi.fn(async (limit: number) =>
-    [...store.values()].filter((r) => r.state === "LOCAL_QUEUED").slice(0, limit),
+  getPendingOperations: vi.fn(async (limit = 200, excludeIds?: ReadonlySet<string>) =>
+    defaultGetPendingOperations(limit, excludeIds),
   ),
   markUploadInFlight: vi.fn(async (ids: string[]) => {
     for (const id of ids) {
@@ -71,7 +80,8 @@ vi.mock("../api/client", () => ({
   fetchSnapshot: vi.fn(),
 }));
 
-const { uploadPending, runSyncCycle, clearSyncBlockedState, MAX_UPLOAD_ATTEMPTS } = await import("./engine");
+const { uploadPending, runSyncCycle, clearSyncBlockedState, MAX_UPLOAD_ATTEMPTS, applySnapshot } = await import("./engine");
+const { getPendingOperations, markAppliedBatch } = await import("../storage/db");
 
 function pendingRecord(operationId: string): PendingOperationRecord {
   return {
@@ -277,5 +287,248 @@ describe("clearSyncBlockedState unblocking runSyncCycle after a 429 cooldown", (
     await runSyncCycle();
     expect(uploadOperationsMock).toHaveBeenCalledTimes(1);
     expect(store.has("op-during-cooldown")).toBe(false);
+  });
+});
+
+describe("uploadPending head-of-line blocking and busy-spin prevention (EXT-01 fix, review.md)", () => {
+  beforeEach(() => {
+    store = new Map();
+    uploadOperationsMock.mockReset();
+    vi.mocked(getPendingOperations).mockReset();
+    vi.mocked(getPendingOperations).mockImplementation(async (limit = 200, excludeIds?: ReadonlySet<string>) =>
+      defaultGetPendingOperations(limit, excludeIds),
+    );
+  });
+
+  it("cleanly returns when all items are requeued without spinning 50 iterations", async () => {
+    const BATCH_SIZE = 500;
+    for (let i = 0; i < BATCH_SIZE; i++) {
+      const record = pendingRecord(`op-requeued-${i}`);
+      store.set(record.operation.operationId, record);
+    }
+
+    uploadOperationsMock.mockImplementation(async (ops) => ({
+      accepted: [],
+      duplicate: [],
+      rejected: ops.map((op) => ({
+        operationId: op.operationId,
+        reason: "object_not_found" as const,
+      })),
+      serverCursor: 0,
+    }));
+
+    await uploadPending();
+
+    // The first batch uploads all 500 ops and they get requeued.
+    // The second batch calls getPendingOperations with all 500 ops excluded,
+    // which returns 0 pending items and terminates uploadPending immediately.
+    // It must NOT spin for the remaining 48 iterations.
+    expect(uploadOperationsMock).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(getPendingOperations)).toHaveBeenCalledTimes(2);
+
+    // All items remain in the store with attempts incremented once
+    expect(store.size).toBe(BATCH_SIZE);
+    for (let i = 0; i < BATCH_SIZE; i++) {
+      const rec = store.get(`op-requeued-${i}`);
+      expect(rec?.attempts).toBe(1);
+      expect(rec?.state).toBe("LOCAL_QUEUED");
+    }
+  });
+
+  it("terminates cleanly when retryable is empty and no stuck items were removed", async () => {
+    // If pending operations returned from the store are somehow non-retryable
+    // (e.g. all in requeuedThisCycle or otherwise not retryable) and no stuck ops were removed,
+    // uploadPending must exit cleanly rather than continuing through remaining iterations.
+    const BATCH_SIZE = 500;
+    for (let i = 0; i < BATCH_SIZE; i++) {
+      const record = pendingRecord(`op-${i}`);
+      store.set(record.operation.operationId, record);
+    }
+
+    // Force getPendingOperations to simulate returning items that are already considered non-retryable
+    let callCount = 0;
+    vi.mocked(getPendingOperations).mockImplementation(async () => {
+      callCount++;
+      // Return 500 items that are not stuck
+      return [...store.values()].slice(0, BATCH_SIZE);
+    });
+
+    uploadOperationsMock.mockImplementation(async (ops) => ({
+      accepted: [],
+      duplicate: [],
+      rejected: ops.map((op) => ({
+        operationId: op.operationId,
+        reason: "object_not_found" as const,
+      })),
+      serverCursor: 0,
+    }));
+
+    await uploadPending();
+
+    // Call 1: 500 ops returned, all requeued and added to requeuedThisCycle.
+    // Call 2: mock returns same 500 ops. All are in requeuedThisCycle, so retryable.length === 0.
+    // stuck.length === 0, so it immediately returns without spinning through iterations 2..49!
+    expect(callCount).toBe(2);
+    expect(uploadOperationsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("fetches and uploads operations beyond the requeued batch (items 501+) in subsequent batches", async () => {
+    const BATCH_SIZE = 500;
+    // 500 blocked ops followed by 100 healthy ops (total 600)
+    for (let i = 0; i < BATCH_SIZE; i++) {
+      const record = pendingRecord(`op-blocked-${i}`);
+      store.set(record.operation.operationId, record);
+    }
+    for (let i = 0; i < 100; i++) {
+      const record = pendingRecord(`op-healthy-${i}`);
+      store.set(record.operation.operationId, record);
+    }
+
+    uploadOperationsMock.mockImplementation(async (ops) => ({
+      accepted: ops
+        .filter((op) => op.operationId.startsWith("op-healthy-"))
+        .map((op) => op.operationId),
+      duplicate: [],
+      rejected: ops
+        .filter((op) => op.operationId.startsWith("op-blocked-"))
+        .map((op) => ({ operationId: op.operationId, reason: "object_not_found" as const })),
+      serverCursor: 0,
+    }));
+
+    await uploadPending();
+
+    // Batch 0 uploaded the 500 blocked ops; Batch 1 uploaded the 100 healthy ops.
+    expect(uploadOperationsMock).toHaveBeenCalledTimes(2);
+    expect(uploadOperationsMock.mock.calls[0][0]).toHaveLength(500);
+    expect(uploadOperationsMock.mock.calls[1][0]).toHaveLength(100);
+
+    // Verify excludeIds passed to getPendingOperations in the second batch contains the 500 blocked ops
+    const secondCallArgs = vi.mocked(getPendingOperations).mock.calls[1];
+    expect(secondCallArgs[0]).toBe(BATCH_SIZE);
+    expect(secondCallArgs[1]?.size).toBe(500);
+    expect(secondCallArgs[1]?.has("op-blocked-0")).toBe(true);
+
+    // All 100 healthy operations were successfully accepted and removed from the queue
+    expect(store.size).toBe(500);
+    for (let i = 0; i < 100; i++) {
+      expect(store.has(`op-healthy-${i}`)).toBe(false);
+    }
+    // Blocked operations remain in the queue with 1 attempt
+    for (let i = 0; i < BATCH_SIZE; i++) {
+      expect(store.has(`op-blocked-${i}`)).toBe(true);
+      expect(store.get(`op-blocked-${i}`)?.attempts).toBe(1);
+    }
+  });
+
+  it("handles multiple consecutive requeued batches and uploads subsequent ready ops", async () => {
+    const BATCH_SIZE = 500;
+    // 1000 blocked ops (2 full batches) followed by 50 healthy ops
+    for (let i = 0; i < BATCH_SIZE * 2; i++) {
+      const record = pendingRecord(`op-blocked-${i}`);
+      store.set(record.operation.operationId, record);
+    }
+    for (let i = 0; i < 50; i++) {
+      const record = pendingRecord(`op-healthy-${i}`);
+      store.set(record.operation.operationId, record);
+    }
+
+    uploadOperationsMock.mockImplementation(async (ops) => ({
+      accepted: ops
+        .filter((op) => op.operationId.startsWith("op-healthy-"))
+        .map((op) => op.operationId),
+      duplicate: [],
+      rejected: ops
+        .filter((op) => op.operationId.startsWith("op-blocked-"))
+        .map((op) => ({ operationId: op.operationId, reason: "object_not_found" as const })),
+      serverCursor: 0,
+    }));
+
+    await uploadPending();
+
+    // Batch 0: ops 0..499 (blocked)
+    // Batch 1: ops 500..999 (blocked)
+    // Batch 2: ops 1000..1049 (healthy)
+    expect(uploadOperationsMock).toHaveBeenCalledTimes(3);
+    expect(uploadOperationsMock.mock.calls[0][0]).toHaveLength(500);
+    expect(uploadOperationsMock.mock.calls[1][0]).toHaveLength(500);
+    expect(uploadOperationsMock.mock.calls[2][0]).toHaveLength(50);
+
+    // The healthy ops got removed, leaving only the 1000 blocked ops
+    expect(store.size).toBe(1000);
+    for (let i = 0; i < 50; i++) {
+      expect(store.has(`op-healthy-${i}`)).toBe(false);
+    }
+  });
+
+  it("advances to subsequent batch when all items in a full batch are dropped as stuck", async () => {
+    const BATCH_SIZE = 500;
+    // 500 stuck ops (attempts >= MAX_UPLOAD_ATTEMPTS) followed by 50 healthy ops
+    for (let i = 0; i < BATCH_SIZE; i++) {
+      const record = pendingRecord(`op-stuck-${i}`);
+      record.attempts = MAX_UPLOAD_ATTEMPTS;
+      store.set(record.operation.operationId, record);
+    }
+    for (let i = 0; i < 50; i++) {
+      const record = pendingRecord(`op-healthy-${i}`);
+      store.set(record.operation.operationId, record);
+    }
+
+    uploadOperationsMock.mockImplementation(async (ops) => ({
+      accepted: ops.map((op) => op.operationId),
+      duplicate: [],
+      rejected: [],
+      serverCursor: 0,
+    }));
+
+    await uploadPending();
+
+    // Stuck ops dropped without calling uploadOperations, then healthy ops uploaded in next batch
+    expect(uploadOperationsMock).toHaveBeenCalledTimes(1);
+    expect(uploadOperationsMock.mock.calls[0][0]).toHaveLength(50);
+    expect(store.size).toBe(0);
+  });
+});
+
+describe("applySnapshot synthetic ID write prevention (EXT-02 fix, review.md)", () => {
+  it("applies snapshot objects and tombstones without recording synthetic IDs to applied_operations", async () => {
+    const markAppliedBatchMock = vi.mocked(markAppliedBatch);
+    markAppliedBatchMock.mockClear();
+
+    const snapshot = {
+      snapshotCursor: 42,
+      objects: [
+        {
+          objectType: "bookmark" as const,
+          objectId: "b-1",
+          operationType: "create" as const,
+          encryptionVersion: 0,
+          payload: { title: "Test", url: "https://example.com" },
+        },
+      ],
+      tombstones: [
+        {
+          objectType: "bookmark" as const,
+          objectId: "b-2",
+        },
+      ],
+    };
+
+    const device = {
+      id: "self" as const,
+      deviceId: "dev-1",
+      userId: "user-1",
+      email: "test@example.com",
+      serverUrl: "http://localhost:8080",
+      accessToken: "token",
+      refreshToken: "refresh",
+      accessTokenExpiresAt: new Date(Date.now() + 3600000).toISOString(),
+      encryptionRootKey: "rek",
+      encryptionRootKeyVersion: 1,
+    };
+
+    await applySnapshot(snapshot, device);
+
+    // Verified: markAppliedBatch must NOT be called for synthetic IDs
+    expect(markAppliedBatchMock).not.toHaveBeenCalled();
   });
 });

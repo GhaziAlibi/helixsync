@@ -353,6 +353,18 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
     Ok(())
 }
 
+/// Chunk size for deleting unneeded sync operations during compaction.
+pub const DELETE_CHUNK_SIZE: i64 = 5_000;
+
+/// Sensible upper bound on total rows deleted per compaction pass per user (SRV-01).
+/// Caps the deletion loop so an enormous backlog does not monopolize connections
+/// for minutes in a single pass (any remainder will be picked up on the next pass).
+pub const MAX_PRUNED_PER_PASS: i64 = 50_000;
+
+/// Cooperative delay between chunk deletions (SRV-01) to yield to Tokio so concurrent
+/// tasks can acquire connections and Postgres write load is amortized.
+pub const PRUNE_COOPERATIVE_DELAY: Duration = Duration::from_millis(10);
+
 /// Deletes `sync_operations` rows already covered by the snapshot at
 /// `ack_boundary` (which must already be durably committed by the caller —
 /// see `compact_user`). Runs as a series of separate, short-lived
@@ -457,9 +469,16 @@ pub async fn prune_compacted_operations(state: &AppState, user_id: Uuid, ack_bou
     // The temp table is dropped explicitly before the connection is
     // returned to the pool, since a pooled connection is recycled rather
     // than closed and Postgres would otherwise leave it visible to whatever
-    // this connection serves next.
-    const DELETE_CHUNK_SIZE: i64 = 5_000;
-
+    //
+    // SRV-01: To prevent holding the pooled connection indefinitely across
+    // massive operation backlogs (which under concurrent compaction runs could
+    // exhaust the pool and starve incoming HTTP requests within ACQUIRE_TIMEOUT):
+    // 1. Each committed chunk sleeps for `PRUNE_COOPERATIVE_DELAY` (10ms) to
+    //    yield the runtime to concurrent tasks and amortize write spikes.
+    // 2. The total deletions in a single pass are capped at `MAX_PRUNED_PER_PASS`
+    //    (50,000 rows / 10 chunks). If reached, the loop breaks so the connection
+    //    is returned to the pool; any remaining backlog will be collected on
+    //    subsequent compaction cycles.
     let mut conn = state.db.acquire().await?;
 
     // Plain (non-macro) `sqlx::query` here, not `sqlx::query!`: the latter's
@@ -487,6 +506,8 @@ pub async fn prune_compacted_operations(state: &AppState, user_id: Uuid, ack_bou
     }
 
     let sweep_result: AppResult<()> = async {
+        let mut total_pruned: i64 = 0;
+
         loop {
             let mut tx = Acquire::begin(&mut conn).await?;
 
@@ -509,9 +530,26 @@ pub async fn prune_compacted_operations(state: &AppState, user_id: Uuid, ack_bou
 
             tx.commit().await?;
 
-            if result.rows_affected() == 0 {
+            let rows_affected = result.rows_affected();
+            total_pruned += rows_affected as i64;
+
+            if rows_affected < DELETE_CHUNK_SIZE as u64 {
                 break;
             }
+
+            if total_pruned >= MAX_PRUNED_PER_PASS {
+                tracing::info!(
+                    %user_id,
+                    total_pruned,
+                    max = MAX_PRUNED_PER_PASS,
+                    "compaction prune hit per-pass deletion limit; remaining rows deferred to next pass"
+                );
+                break;
+            }
+
+            // Yield cooperatively to Tokio and give other concurrent tasks time to acquire
+            // connections and amortize Postgres write load (SRV-01).
+            tokio::time::sleep(PRUNE_COOPERATIVE_DELAY).await;
         }
 
         Ok(())
