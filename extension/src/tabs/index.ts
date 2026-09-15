@@ -90,6 +90,9 @@ async function handleWindowCreated(win: chrome.windows.Window): Promise<void> {
   const { operation, deviceId } = await createLocalOperation(WINDOW_TYPE, objectId, "create", payload);
   const key = opKey(operation.lamportTimestamp, deviceId, operation.operationId, "create");
   await recordLocalFieldState(objectId, "liveness", key, "live");
+  // The operation and its conflict state are durable now; nudge the
+  // debounced sync rather than waiting for the next periodic cycle.
+  scheduleLocalSync();
 }
 
 async function handleWindowRemoved(windowId: number): Promise<void> {
@@ -98,6 +101,10 @@ async function handleWindowRemoved(windowId: number): Promise<void> {
   const { operation, deviceId } = await createLocalOperation(WINDOW_TYPE, objectId, "close", {});
   const key = opKey(operation.lamportTimestamp, deviceId, operation.operationId, "close");
   await recordLocalFieldState(objectId, "liveness", key, "deleted");
+  // Keep the close operation eligible for the same prompt sync path as
+  // other locally captured changes. Do this only after its field state is
+  // durable, and before the local-ID mapping is discarded.
+  scheduleLocalSync();
   await forgetMapping(WINDOW_TYPE, String(windowId));
 }
 
@@ -539,8 +546,15 @@ async function materializeTab(objectId: string, p: TabPayload): Promise<void> {
   const existingChromiumId = await lookupChromiumLocalId(objectId);
   let chromiumId: string | undefined = existingChromiumId;
   if (existingChromiumId) {
+    // Mapping storage uses strings for all Chromium IDs, while the tabs API
+    // requires a numeric tab ID at runtime (a TypeScript cast does not
+    // convert it).
+    const tabId = Number(existingChromiumId);
+    if (!Number.isSafeInteger(tabId) || tabId < 0) {
+      throw new Error(`Invalid mapped Chromium tab ID: ${existingChromiumId}`);
+    }
     await guard.run(() =>
-      chrome.tabs.update(existingChromiumId as unknown as number, { url: p.url, pinned: p.pinned }),
+      chrome.tabs.update(tabId, { url: p.url, pinned: p.pinned }),
     );
   } else {
     const created = await guard.run(() => chrome.tabs.create({ url: p.url, pinned: p.pinned, active: false }));

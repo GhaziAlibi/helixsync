@@ -32,7 +32,7 @@ import {
   type FieldResolution,
   type LocalFieldStateEntry,
 } from "../sync/conflict";
-import { createLocalOperationsBatch, registerApplier, scheduleLocalSync } from "../sync/engine";
+import { createLocalOperationsBatch, registerApplier, registerBatchApplier, scheduleLocalSync } from "../sync/engine";
 import type { PendingLocalOperation } from "../sync/engine";
 import { createMicroBatchQueue } from "../sync/micro-batch";
 import { createSuppressionGuard } from "../sync/suppress";
@@ -508,6 +508,12 @@ export async function backfillExisting(): Promise<void> {
 
 let captureRegistered = false;
 
+// A cached remote-reorder plan is valid only while Chrome's bookmark tree has
+// not been changed by somebody other than the remote applier.  Event handlers
+// increment this synchronously, before their async local-capture work starts.
+// Our own mutations remain suppressed and therefore do not invalidate a plan.
+let bookmarkLayoutGeneration = 0;
+
 export function registerCapture(): void {
   // `initializeCaptureForSettings` (background/index.ts) calls this on
   // every startup *and* every REFRESH_CAPTURE_CONFIG message (sent on
@@ -526,10 +532,12 @@ export function registerCapture(): void {
   // a deferred flush ran, silently breaking loop prevention.
   chrome.bookmarks.onCreated.addListener((id, node) => {
     if (guard.isSuppressed()) return; // our own materialize() call, not a real local change
+    bookmarkLayoutGeneration++;
     enqueueBookmarkEvent({ kind: "created", id, node });
   });
   chrome.bookmarks.onRemoved.addListener((id, info) => {
     if (guard.isSuppressed()) return; // our own applyDelete() call; forgetMapping already runs there
+    bookmarkLayoutGeneration++;
     enqueueBookmarkEvent({ kind: "removed", id, removeInfo: info });
   });
   chrome.bookmarks.onChanged.addListener((id, info) => {
@@ -538,6 +546,7 @@ export function registerCapture(): void {
   });
   chrome.bookmarks.onMoved.addListener((id, info) => {
     if (guard.isSuppressed()) return; // our own applyMove() call
+    bookmarkLayoutGeneration++;
     enqueueBookmarkEvent({ kind: "moved", id, moveInfo: info });
   });
 }
@@ -716,25 +725,9 @@ async function applyMove(
   // every single move within it. Both lookups are now one batch each,
   // regardless of N.
   //
-  // The chrome.bookmarks.getChildren call itself is NOT similarly
-  // cacheable/batchable across a run of consecutive moves into the same
-  // folder (e.g. a whole folder reordered on another device, arriving here
-  // as one "move" op per item) — evaluated and rejected, not an oversight.
-  // chrome.bookmarks.move(chromiumId, { index }) below mutates Chrome's own
-  // live child ordering as a side effect, so the very next move's correct
-  // target index depends on that mutated state; caching the sibling list
-  // instead of re-fetching would mean simulating Chrome's reordering in
-  // memory rather than asking Chrome directly. That's only safe if the
-  // simulated cache is invalidated on every actual mutation to the folder —
-  // not just this function's own moves, but also `materialize`'s creates,
-  // `applyDelete`'s removals, and genuine concurrent local edits (drag-and-
-  // drop etc., captured by `registerCapture`'s listeners below), which can
-  // land in the multiple event-loop turns this function and its callers
-  // (`applyOneRemote`/`applySnapshot` in sync/engine.ts) await through
-  // between processing one op and the next. A stale simulated cache would
-  // silently reorder bookmarks wrong — a correctness bug worse than the
-  // performance cost being weighed here — so this stays a live per-move
-  // getChildren call.
+  // A one-off move intentionally reads Chrome's live tree. Consecutive remote
+  // moves use `applyMovesBatch` below, whose cache is invalidated whenever an
+  // unsuppressed bookmark-tree event arrives.
   const siblings = await chrome.bookmarks.getChildren(parentChromiumId);
   const siblingChromiumIds = siblings.filter((s) => s.id !== chromiumId).map((s) => s.id);
   const mappingBySiblingId = await getMappingsByLocalIds(MAP_TYPE, siblingChromiumIds);
@@ -756,6 +749,102 @@ async function applyMove(
   if (index === -1) index = withPositions.length;
 
   await guard.run(() => chrome.bookmarks.move(chromiumId, { parentId: parentChromiumId, index }));
+}
+
+interface RemoteMove {
+  objectId: string;
+  objectType: ObjectType;
+  parent: string;
+  position: string;
+}
+
+interface CachedParentOrder {
+  generation: number;
+  childChromiumIds: Set<string>;
+  objectIdByChromiumId: Map<string, string>;
+  positionByObjectId: Map<string, string>;
+}
+
+/** Applies a consecutive run of already-resolved moves. Chrome has no bulk
+ * move API, so moves remain sequential, but each destination folder's child
+ * list and field-state lookup are shared for the run. The cache tracks this
+ * function's own mutations and is thrown away as soon as a real local change
+ * is observed, preserving the live-tree correctness of `applyMove`. */
+async function applyMovesBatch(moves: RemoteMove[]): Promise<void> {
+  if (moves.length === 0) return;
+
+  const chromiumIds = await chromiumIdsFor([...new Set(moves.flatMap((move) => [move.objectId, move.parent]))]);
+  const cacheByParent = new Map<string, CachedParentOrder>();
+  const incomingPositionByObjectId = new Map(moves.map((move) => [move.objectId, move.position]));
+
+  const getParentOrder = async (parentChromiumId: string): Promise<CachedParentOrder> => {
+    const cached = cacheByParent.get(parentChromiumId);
+    if (cached && cached.generation === bookmarkLayoutGeneration) return cached;
+
+    const siblings = await chrome.bookmarks.getChildren(parentChromiumId);
+    const childChromiumIds = siblings.map((sibling) => sibling.id);
+    const mappings = await getMappingsByLocalIds(MAP_TYPE, childChromiumIds);
+    const objectIds = childChromiumIds
+      .map((id) => mappings.get(id)?.objectId)
+      .filter((id): id is string => !!id);
+    const states = await getFieldStatesForObjects(objectIds, "move");
+    const objectIdByChromiumId = new Map<string, string>();
+    const positionByObjectId = new Map<string, string>();
+    for (const chromiumId of childChromiumIds) {
+      const objectId = mappings.get(chromiumId)?.objectId;
+      if (objectId) objectIdByChromiumId.set(chromiumId, objectId);
+    }
+    for (const objectId of objectIds) {
+      const position = (states.get(objectId)?.value as { position?: string } | undefined)?.position;
+      if (position) positionByObjectId.set(objectId, position);
+    }
+    const order: CachedParentOrder = {
+      generation: bookmarkLayoutGeneration,
+      childChromiumIds: new Set(childChromiumIds),
+      objectIdByChromiumId,
+      positionByObjectId,
+    };
+    cacheByParent.set(parentChromiumId, order);
+    return order;
+  };
+
+  for (const move of moves) {
+    const chromiumId = chromiumIds.get(move.objectId);
+    if (!chromiumId) continue; // it will be placed correctly when materialized
+    const parentChromiumId = chromiumIds.get(move.parent);
+    if (!parentChromiumId) {
+      await putDeferredMaterialization({
+        objectId: move.objectId,
+        objectType: move.objectType,
+        waitingOnParent: move.parent,
+        createdAt: new Date().toISOString(),
+      });
+      continue;
+    }
+    await deleteDeferredMaterialization(move.objectId);
+
+    const order = await getParentOrder(parentChromiumId);
+    const withPositions: Array<{ chromiumId: string; position: string }> = [];
+    for (const siblingChromiumId of order.childChromiumIds) {
+      if (siblingChromiumId === chromiumId) continue;
+      const siblingObjectId = order.objectIdByChromiumId.get(siblingChromiumId);
+      if (!siblingObjectId) continue;
+      const position = incomingPositionByObjectId.get(siblingObjectId) ?? order.positionByObjectId.get(siblingObjectId);
+      if (position) withPositions.push({ chromiumId: siblingChromiumId, position });
+    }
+    withPositions.sort((a, b) => (a.position < b.position ? -1 : a.position > b.position ? 1 : 0));
+    let index = withPositions.findIndex((sibling) => sibling.position > move.position);
+    if (index === -1) index = withPositions.length;
+
+    await guard.run(() => chrome.bookmarks.move(chromiumId, { parentId: parentChromiumId, index }));
+    // Keep cached membership coherent for later moves in this run. Position
+    // values are read from `incomingPositionByObjectId`, so no DB reread is
+    // needed for items moved earlier in the same batch.
+    for (const cached of cacheByParent.values()) cached.childChromiumIds.delete(chromiumId);
+    order.childChromiumIds.add(chromiumId);
+    order.objectIdByChromiumId.set(chromiumId, move.objectId);
+    order.positionByObjectId.set(move.objectId, move.position);
+  }
 }
 
 async function applyDelete(objectId: string): Promise<void> {
@@ -827,5 +916,40 @@ async function applyRemote(op: OperationOut, payload: unknown): Promise<void> {
   }
 }
 
+/** Batch path used by the sync engine for a bounded page/chunk. Field-state
+ * resolution still happens in wire order; only the browser mutations for a
+ * consecutive run of winning moves are coalesced. A create/update/delete
+ * flushes the run first because it can change the live sibling set. */
+async function applyRemoteBatch(items: Array<{ op: OperationOut; payload: unknown }>): Promise<void> {
+  let pendingMoves: RemoteMove[] = [];
+  const flushMoves = async () => {
+    if (pendingMoves.length === 0) return;
+    const moves = pendingMoves;
+    pendingMoves = [];
+    await applyMovesBatch(moves);
+  };
+
+  for (const { op, payload } of items) {
+    if (op.operationType !== "move") {
+      await flushMoves();
+      await applyRemote(op, payload);
+      continue;
+    }
+
+    const p = payload as { parent: string; position: string };
+    const key = opKey(op.lamportTimestamp, op.deviceId, op.operationId, op.operationType);
+    const [moveResult, liveness] = await resolveFields(op.objectId, [
+      { field: "move", incoming: { ...key, value: p } },
+      { field: "liveness", incoming: { ...key, value: "live" } },
+    ]);
+    if (moveResult.applied && liveness.value === "live") {
+      pendingMoves.push({ objectId: op.objectId, objectType: op.objectType, ...p });
+    }
+  }
+  await flushMoves();
+}
+
 registerApplier("bookmark", applyRemote);
 registerApplier("bookmarkFolder", applyRemote);
+registerBatchApplier("bookmark", applyRemoteBatch);
+registerBatchApplier("bookmarkFolder", applyRemoteBatch);

@@ -11,7 +11,7 @@ use crate::auth::extractors::CsrfProtectedUser;
 use crate::crypto::{generate_opaque_token, hash_token, verify_password_async};
 use crate::error::{AppError, AppResult};
 use crate::middleware::client_ip::client_ip;
-use crate::middleware::rate_limit::{enforce, DEVICE_REGISTER_LIMIT, TOKEN_REFRESH_LIMIT};
+use crate::middleware::rate_limit::{enforce, DEVICE_REGISTER_LIMIT, TOKEN_REFRESH_IP_LIMIT, TOKEN_REFRESH_LIMIT};
 use crate::state::AppState;
 
 use super::model::DevicePublic;
@@ -173,11 +173,11 @@ struct RefreshResponse {
 /// three different things, because they guard against different costs:
 ///
 /// - First, before the database is ever touched or the token hashed,
-///   `TOKEN_REFRESH_LIMIT` is enforced by client IP (via `client_ip` which
+///   `TOKEN_REFRESH_IP_LIMIT` is enforced by client IP (via `client_ip` which
 ///   accounts for reverse proxies). This bounds raw request volume from an
 ///   unauthenticated caller and prevents an attacker from bypassing rate
 ///   limits and exhausting DB connection pool slots or memory by flooding
-///   random token strings from a single IP (SRV-09).
+///   random token strings from a single IP.
 /// - Second, before the database is touched, `TOKEN_REFRESH_LIMIT` is
 ///   enforced by the presented token's hash. This ties the limit to the
 ///   actual credential being presented (so one stolen/guessed token can't
@@ -196,7 +196,7 @@ async fn refresh_credentials(
     Json(req): Json<RefreshRequest>,
 ) -> AppResult<Json<RefreshResponse>> {
     let ip = client_ip(&headers, addr, state.config.behind_proxy);
-    enforce(&state.rate_limiter, TOKEN_REFRESH_LIMIT, &ip.to_string())?;
+    enforce(&state.rate_limiter, TOKEN_REFRESH_IP_LIMIT, &ip.to_string())?;
 
     let hash = hash_token(&req.refresh_token);
 

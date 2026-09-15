@@ -203,7 +203,7 @@ async fn refresh_credentials_is_rate_limited_by_ip_even_with_random_tokens(pool:
     let server = server_for(pool);
 
     let mut hit_rate_limit = false;
-    for i in 0..40 {
+    for i in 0..310 {
         // Send a unique, random refresh token every iteration so hash-based
         // rate limiting never triggers (every call lands in a fresh hash bucket).
         let res = server

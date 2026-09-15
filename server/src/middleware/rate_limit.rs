@@ -30,7 +30,10 @@ struct TokenBucket {
 /// boundary re-burst can't happen — a client that exhausts its bucket only
 /// gets tokens back gradually, not all at once.
 pub struct RateLimiter {
-    windows: DashMap<(&'static str, String), TokenBucket>,
+    /// Untrusted keys (IP addresses and presented credentials) cannot use
+    /// capacity reserved for keys derived from a verified user or device.
+    untrusted_windows: DashMap<(&'static str, String), TokenBucket>,
+    authenticated_windows: DashMap<(&'static str, String), TokenBucket>,
     /// Wall-clock start point `last_emergency_sweep_nanos` is measured from
     /// (an `AtomicU64` can't hold an `Instant` directly).
     created_at: Instant,
@@ -42,7 +45,8 @@ pub struct RateLimiter {
     /// would trigger its own full `sweep()` (an O(n) scan) that frees
     /// nothing, turning the very defense against unbounded memory growth
     /// into an unbounded-CPU-per-request problem instead.
-    last_emergency_sweep_nanos: AtomicU64,
+    last_untrusted_emergency_sweep_nanos: AtomicU64,
+    last_authenticated_emergency_sweep_nanos: AtomicU64,
 }
 
 /// Hard cap on the number of distinct (bucket, key) entries `windows` may
@@ -53,7 +57,17 @@ pub struct RateLimiter {
 /// without bound. See `check_with_retry_after` for how this is enforced —
 /// only *new* keys are affected, and only once the map is actually at
 /// capacity.
-const MAX_ENTRIES: usize = 50_000;
+const MAX_UNTRUSTED_ENTRIES: usize = 25_000;
+const MAX_AUTHENTICATED_ENTRIES: usize = 25_000;
+
+/// The trust level of the identity used as a rate-limit key. A route can use
+/// both: refresh is first limited by a presented token and then by a verified
+/// device id.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RateLimitPartition {
+    Untrusted,
+    Authenticated,
+}
 
 /// Minimum spacing between capacity-triggered emergency sweeps (see
 /// `last_emergency_sweep_nanos`). Deliberately much shorter than
@@ -66,9 +80,11 @@ const EMERGENCY_SWEEP_COOLDOWN: Duration = Duration::from_secs(1);
 impl RateLimiter {
     pub fn new() -> Self {
         Self {
-            windows: DashMap::new(),
+            untrusted_windows: DashMap::new(),
+            authenticated_windows: DashMap::new(),
             created_at: Instant::now(),
-            last_emergency_sweep_nanos: AtomicU64::new(0),
+            last_untrusted_emergency_sweep_nanos: AtomicU64::new(0),
+            last_authenticated_emergency_sweep_nanos: AtomicU64::new(0),
         }
     }
 
@@ -78,26 +94,29 @@ impl RateLimiter {
     /// saturated, only one of them actually pays for the O(n) scan — the
     /// rest just fall through and re-check `windows.len()` (cheap: DashMap
     /// sums per-shard lengths rather than iterating entries).
-    fn maybe_emergency_sweep(&self) {
+    fn maybe_emergency_sweep(&self, partition: RateLimitPartition) {
         let now_nanos = self.created_at.elapsed().as_nanos() as u64;
-        let last = self.last_emergency_sweep_nanos.load(Ordering::Relaxed);
+        let last_sweep = match partition {
+            RateLimitPartition::Untrusted => &self.last_untrusted_emergency_sweep_nanos,
+            RateLimitPartition::Authenticated => &self.last_authenticated_emergency_sweep_nanos,
+        };
+        let last = last_sweep.load(Ordering::Relaxed);
         let cooldown_nanos = EMERGENCY_SWEEP_COOLDOWN.as_nanos() as u64;
         if now_nanos.saturating_sub(last) < cooldown_nanos {
             return;
         }
-        if self
-            .last_emergency_sweep_nanos
+        if last_sweep
             .compare_exchange(last, now_nanos, Ordering::Relaxed, Ordering::Relaxed)
             .is_ok()
         {
-            self.sweep();
+            self.sweep_partition(partition);
         }
     }
 
     /// Returns true if the request is allowed under `limit` requests per
     /// `window` for the given bucket+key.
-    pub fn check(&self, bucket: &'static str, key: &str, limit: u32, window: Duration) -> bool {
-        self.check_with_retry_after(bucket, key, limit, window).is_ok()
+    pub fn check(&self, partition: RateLimitPartition, bucket: &'static str, key: &str, limit: u32, window: Duration) -> bool {
+        self.check_with_retry_after(partition, bucket, key, limit, window).is_ok()
     }
 
     /// Same token-bucket check as `check`, but on rejection also reports how
@@ -128,16 +147,23 @@ impl RateLimiter {
     /// while the map is saturated.
     pub fn check_with_retry_after(
         &self,
+        partition: RateLimitPartition,
         bucket: &'static str,
         key: &str,
         limit: u32,
         window: Duration,
     ) -> Result<(), Duration> {
+        let (windows, capacity) = match partition {
+            RateLimitPartition::Untrusted => (&self.untrusted_windows, MAX_UNTRUSTED_ENTRIES),
+            RateLimitPartition::Authenticated => {
+                (&self.authenticated_windows, MAX_AUTHENTICATED_ENTRIES)
+            }
+        };
         let map_key = (bucket, key.to_string());
 
-        if !self.windows.contains_key(&map_key) && self.windows.len() >= MAX_ENTRIES {
-            self.maybe_emergency_sweep();
-            if self.windows.len() >= MAX_ENTRIES {
+        if !windows.contains_key(&map_key) && windows.len() >= capacity {
+            self.maybe_emergency_sweep(partition);
+            if windows.len() >= capacity {
                 // Genuinely full of active entries — reject rather than
                 // grow past the cap. Reuse `window` as the retry hint since
                 // that's roughly how long it'll take for other entries in
@@ -147,7 +173,7 @@ impl RateLimiter {
         }
 
         let now = Instant::now();
-        let mut entry = self.windows.entry(map_key).or_insert_with(|| TokenBucket {
+        let mut entry = windows.entry(map_key).or_insert_with(|| TokenBucket {
             last_refill: now,
             tokens: limit as f64,
             window,
@@ -178,10 +204,19 @@ impl RateLimiter {
     /// endpoint (login, register, device register, token refresh) — for
     /// as long as the process runs, since nothing else ever removes an
     /// entry.
-    fn sweep(&self) {
+    fn sweep_partition(&self, partition: RateLimitPartition) {
         let now = Instant::now();
-        self.windows
+        let windows = match partition {
+            RateLimitPartition::Untrusted => &self.untrusted_windows,
+            RateLimitPartition::Authenticated => &self.authenticated_windows,
+        };
+        windows
             .retain(|_, bucket| now.duration_since(bucket.last_refill) < bucket.window);
+    }
+
+    fn sweep(&self) {
+        self.sweep_partition(RateLimitPartition::Untrusted);
+        self.sweep_partition(RateLimitPartition::Authenticated);
     }
 }
 
@@ -213,37 +248,56 @@ pub struct RateLimitConfig {
     pub bucket: &'static str,
     pub limit: u32,
     pub window: Duration,
+    pub partition: RateLimitPartition,
 }
 
 pub const LOGIN_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "login",
     limit: 10,
     window: Duration::from_secs(60),
+    partition: RateLimitPartition::Untrusted,
 };
 pub const REGISTER_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "register",
     limit: 5,
     window: Duration::from_secs(60),
+    partition: RateLimitPartition::Untrusted,
 };
 pub const TOKEN_REFRESH_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "token_refresh",
     limit: 30,
     window: Duration::from_secs(60),
+    partition: RateLimitPartition::Untrusted,
+};
+pub const TOKEN_REFRESH_IP_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "token_refresh_ip",
+    limit: 300,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Untrusted,
+};
+pub const TOKEN_REFRESH_AUTHENTICATED_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "token_refresh",
+    limit: 30,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
 };
 pub const DEVICE_REGISTER_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "device_register",
     limit: 10,
     window: Duration::from_secs(60),
+    partition: RateLimitPartition::Untrusted,
 };
 pub const SYNC_UPLOAD_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "sync_upload",
     limit: 600,
     window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
 };
 pub const SYNC_DOWNLOAD_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "sync_download",
     limit: 600,
     window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
 };
 // Lower than the incremental-download limit above: unlike `/changes`, both
 // of these recompute an object's full merged state via `compute_objects`
@@ -253,16 +307,19 @@ pub const SYNC_SNAPSHOT_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "sync_snapshot",
     limit: 20,
     window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
 };
 pub const SYNC_STATS_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "sync_stats",
     limit: 30,
     window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
 };
 pub const WEBSOCKET_CONNECT_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "websocket_connect",
     limit: 30,
     window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
 };
 // Applied at the HTTP-upgrade handshake, before any auth frame has been
 // read — keyed by IP rather than device id, since there's no device claim
@@ -280,6 +337,7 @@ pub const WEBSOCKET_HANDSHAKE_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "websocket_handshake",
     limit: 300,
     window: Duration::from_secs(60),
+    partition: RateLimitPartition::Untrusted,
 };
 // Previously the only sync route with no limit at all — cheap per request
 // (a single primary-key lookup), but the extension used to call it once
@@ -292,6 +350,7 @@ pub const SYNC_SETTINGS_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "sync_settings",
     limit: 60,
     window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
 };
 
 /// Enforce a rate limit bucket for `key`, returning `AppError::RateLimited`
@@ -305,7 +364,7 @@ pub const SYNC_SETTINGS_LIMIT: RateLimitConfig = RateLimitConfig {
 /// function, so this is what puts a `Retry-After` header on their 429s.
 pub fn enforce(limiter: &RateLimiter, config: RateLimitConfig, key: &str) -> Result<(), AppError> {
     limiter
-        .check_with_retry_after(config.bucket, key, config.limit, config.window)
+        .check_with_retry_after(config.partition, config.bucket, key, config.limit, config.window)
         .map_err(AppError::RateLimited)
 }
 
@@ -318,7 +377,7 @@ pub fn enforce_with_retry_after(
     config: RateLimitConfig,
     key: &str,
 ) -> Result<(), Duration> {
-    limiter.check_with_retry_after(config.bucket, key, config.limit, config.window)
+    limiter.check_with_retry_after(config.partition, config.bucket, key, config.limit, config.window)
 }
 
 #[cfg(test)]
@@ -330,7 +389,7 @@ mod tests {
         let limiter = RateLimiter::new();
         let window = Duration::from_secs(60);
         for _ in 0..5 {
-            assert!(limiter.check("test", "key", 5, window));
+            assert!(limiter.check(RateLimitPartition::Untrusted, "test", "key", 5, window));
         }
     }
 
@@ -339,9 +398,9 @@ mod tests {
         let limiter = RateLimiter::new();
         let window = Duration::from_secs(60);
         for _ in 0..5 {
-            assert!(limiter.check("test", "key", 5, window));
+            assert!(limiter.check(RateLimitPartition::Untrusted, "test", "key", 5, window));
         }
-        assert!(!limiter.check("test", "key", 5, window));
+        assert!(!limiter.check(RateLimitPartition::Untrusted, "test", "key", 5, window));
     }
 
     // SRV-4 regression: a fixed-window limiter would let the full quota
@@ -353,11 +412,11 @@ mod tests {
         let limiter = RateLimiter::new();
         let window = Duration::from_secs(60);
         for _ in 0..3 {
-            assert!(limiter.check("test", "key", 3, window));
+            assert!(limiter.check(RateLimitPartition::Untrusted, "test", "key", 3, window));
         }
-        assert!(!limiter.check("test", "key", 3, window));
+        assert!(!limiter.check(RateLimitPartition::Untrusted, "test", "key", 3, window));
         // Immediately again, no delay at all — must still be rejected.
-        assert!(!limiter.check("test", "key", 3, window));
+        assert!(!limiter.check(RateLimitPartition::Untrusted, "test", "key", 3, window));
     }
 
     #[test]
@@ -366,19 +425,19 @@ mod tests {
         // 20 tokens/sec, so one token refills in 50ms.
         let window = Duration::from_millis(50);
         let limit = 1;
-        assert!(limiter.check("test", "key", limit, window));
-        assert!(!limiter.check("test", "key", limit, window));
+        assert!(limiter.check(RateLimitPartition::Untrusted, "test", "key", limit, window));
+        assert!(!limiter.check(RateLimitPartition::Untrusted, "test", "key", limit, window));
         std::thread::sleep(Duration::from_millis(60));
-        assert!(limiter.check("test", "key", limit, window));
+        assert!(limiter.check(RateLimitPartition::Untrusted, "test", "key", limit, window));
     }
 
     #[test]
     fn check_with_retry_after_reports_wait_duration_on_rejection() {
         let limiter = RateLimiter::new();
         let window = Duration::from_secs(60);
-        assert!(limiter.check_with_retry_after("test", "key", 1, window).is_ok());
+        assert!(limiter.check_with_retry_after(RateLimitPartition::Untrusted, "test", "key", 1, window).is_ok());
         let err = limiter
-            .check_with_retry_after("test", "key", 1, window)
+            .check_with_retry_after(RateLimitPartition::Untrusted, "test", "key", 1, window)
             .expect_err("bucket should be empty");
         assert!(err > Duration::from_secs(0));
         assert!(err <= window);
@@ -388,14 +447,14 @@ mod tests {
     fn distinct_keys_do_not_grow_windows_past_capacity() {
         let limiter = RateLimiter::new();
         let window = Duration::from_secs(60);
-        // Far more distinct keys than MAX_ENTRIES, all with plenty of
+        // Far more distinct keys than MAX_UNTRUSTED_ENTRIES, all with plenty of
         // quota left, so every rejection observed here can only be the
         // capacity guard kicking in, not the token bucket itself.
-        for i in 0..(MAX_ENTRIES * 2) {
+        for i in 0..(MAX_UNTRUSTED_ENTRIES * 2) {
             let key = format!("key-{i}");
-            limiter.check("test", &key, 1000, window);
+            limiter.check(RateLimitPartition::Untrusted, "test", &key, 1000, window);
         }
-        assert!(limiter.windows.len() <= MAX_ENTRIES);
+        assert!(limiter.untrusted_windows.len() <= MAX_UNTRUSTED_ENTRIES);
     }
 
     #[test]
@@ -404,19 +463,39 @@ mod tests {
         let window = Duration::from_secs(60);
 
         // Track one key first, then saturate the map with other keys.
-        assert!(limiter.check("test", "known-key", 5, window));
-        for i in 0..MAX_ENTRIES {
+        assert!(limiter.check(RateLimitPartition::Untrusted, "test", "known-key", 5, window));
+        for i in 0..MAX_UNTRUSTED_ENTRIES {
             let key = format!("filler-{i}");
-            limiter.check("test", &key, 1000, window);
+            limiter.check(RateLimitPartition::Untrusted, "test", &key, 1000, window);
         }
-        assert!(limiter.windows.len() >= MAX_ENTRIES);
+        assert!(limiter.untrusted_windows.len() >= MAX_UNTRUSTED_ENTRIES);
 
         // The already-tracked key still has its normal remaining quota
         // (4 more of its 5-per-window tokens), unaffected by the map being
         // at capacity.
         for _ in 0..4 {
-            assert!(limiter.check("test", "known-key", 5, window));
+            assert!(limiter.check(RateLimitPartition::Untrusted, "test", "known-key", 5, window));
         }
-        assert!(!limiter.check("test", "known-key", 5, window));
+        assert!(!limiter.check(RateLimitPartition::Untrusted, "test", "known-key", 5, window));
+    }
+
+    #[test]
+    fn saturating_untrusted_partition_does_not_block_authenticated_partition() {
+        let limiter = RateLimiter::new();
+        let window = Duration::from_secs(60);
+
+        // Saturate the untrusted partition
+        for i in 0..MAX_UNTRUSTED_ENTRIES {
+            let key = format!("filler-{i}");
+            limiter.check(RateLimitPartition::Untrusted, "test", &key, 1000, window);
+        }
+        assert!(limiter.untrusted_windows.len() >= MAX_UNTRUSTED_ENTRIES);
+
+        // A new untrusted key should be rejected purely by capacity guard
+        assert!(!limiter.check(RateLimitPartition::Untrusted, "test", "new-untrusted-key", 1000, window));
+
+        // But the authenticated partition should still have space and allow new keys
+        assert!(limiter.check(RateLimitPartition::Authenticated, "test", "new-authenticated-key", 1000, window));
+        assert!(limiter.authenticated_windows.len() == 1);
     }
 }

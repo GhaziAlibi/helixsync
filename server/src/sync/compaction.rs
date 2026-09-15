@@ -381,7 +381,9 @@ async fn prune_compacted_operations(state: &AppState, user_id: Uuid, ack_boundar
     // DELETE then excludes just that small survivor set. Read directly off
     // the pool (no transaction): this is a plain point-in-time SELECT, and
     // `ack_boundary` is already fixed by the caller, so there's nothing here
-    // that needs snapshot isolation with the deletes below.
+    // that needs snapshot isolation with the deletes below. This query is
+    // backed by the `idx_sync_operations_terminal` partial index to avoid
+    // scanning and filtering every operation below the boundary.
     let terminal_candidates = sqlx::query_as!(
         CompactionCandidate,
         "SELECT id, object_type, operation_type, created_at FROM sync_operations \

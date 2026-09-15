@@ -47,16 +47,10 @@ const batchAppliers = new Map<ObjectType, BatchObjectApplier>();
 
 /** Optional fast path alongside `registerApplier`, for object types whose
  * per-object IO cost is high enough that applying them one at a time risks
- * stalling/killing the service worker (see the review this fixes:
- * historyVisit's `chrome.history.addUrl` + `putRemoteObject` round trips,
- * multiplied by tens of thousands of visits). Most object types never
- * register one and keep going through `ObjectApplier` via the existing
- * per-object path. Consulted by both `applySnapshot`'s bulk resync loop and
- * `downloadAndApply`'s incremental loop — a type only belongs here if
- * applying its ops out of their original relative order (which both dispatch
- * paths do, to gain the batching) is actually safe, i.e. it has no
- * cross-operation ordering dependency the way field-merge types rely on
- * `field_state`'s LWW comparison. */
+ * stalling/killing the service worker (for example history's browser IPC or
+ * bookmark reorder reads). Incremental downloads preserve stream order by
+ * passing only contiguous same-type runs; snapshot dispatch may group final
+ * state by type. Most object types keep the existing per-object path. */
 export function registerBatchApplier(objectType: ObjectType, applier: BatchObjectApplier): void {
   batchAppliers.set(objectType, applier);
 }
@@ -415,22 +409,11 @@ export async function downloadAndApply(): Promise<void> {
       if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
     };
 
-    // Ops for a type with a registered batch applier (see
-    // `registerBatchApplier` — currently only historyVisit) are pulled out
-    // of the per-op loop below and buffered here instead of going through
-    // `appliers` one at a time, mirroring applySnapshot's batch dispatch.
-    // Buffered per object type, since a batch applier call only makes sense
-    // for one type at a time. Unlike applySnapshot — which regroups its
-    // *entire* object list by type, including types with no batch applier —
-    // ops for every other type still go through `appliers` immediately,
-    // right here in the loop, in their original relative order: this page's
-    // ops carry real cross-device ordering (deviceSequence/lamportTimestamp)
-    // that a field-merge applier's `field_state` LWW comparison depends on,
-    // whereas applySnapshot's synthesized ops (one shared lamportTimestamp
-    // for the whole snapshot, field_state wiped first) have no such
-    // dependency to preserve. Only types that opted into `registerBatchApplier`
-    // are asserting they have no such dependency, so only those are safe to
-    // defer out of order here.
+    // A batch applier receives only a *contiguous* run from the download
+    // stream. This keeps the stream's ordering contract for field-merge
+    // types (bookmark moves in particular), while still allowing a run to
+    // share expensive browser IPC. Snapshot dispatch can group by type
+    // independently because snapshot objects are synthesized final state.
     const batchBuffers = new Map<ObjectType, Array<{ op: OperationOut; payload: unknown }>>();
     const flushBatchBuffer = async (objectType: ObjectType) => {
       const items = batchBuffers.get(objectType);
@@ -438,6 +421,13 @@ export async function downloadAndApply(): Promise<void> {
       batchBuffers.set(objectType, []);
       await batchAppliers.get(objectType)!(items);
       for (const { op } of items) await markApplied(op.operationId);
+    };
+    let activeBatchType: ObjectType | undefined;
+    const flushActiveBatch = async () => {
+      if (!activeBatchType) return;
+      const objectType = activeBatchType;
+      activeBatchType = undefined;
+      await flushBatchBuffer(objectType);
     };
 
     let sinceYield = 0;
@@ -453,6 +443,7 @@ export async function downloadAndApply(): Promise<void> {
         await yieldToEventLoop();
       }
       if (!decrypted) {
+        await flushActiveBatch();
         // Undecryptable: still "applied" (see decryptOrSkip), never reaches
         // a type dispatch either way.
         await markApplied(op.operationId);
@@ -461,6 +452,8 @@ export async function downloadAndApply(): Promise<void> {
 
       const batchApplier = batchAppliers.get(op.objectType);
       if (batchApplier) {
+        if (activeBatchType && activeBatchType !== op.objectType) await flushActiveBatch();
+        activeBatchType = op.objectType;
         let buf = batchBuffers.get(op.objectType);
         if (!buf) {
           buf = [];
@@ -477,6 +470,7 @@ export async function downloadAndApply(): Promise<void> {
         continue;
       }
 
+      await flushActiveBatch();
       const applier = appliers.get(op.objectType);
       if (applier) {
         await applier(op, decrypted.payload);
@@ -492,9 +486,7 @@ export async function downloadAndApply(): Promise<void> {
     // otherwise a partial chunk at the end of a page (or a page smaller than
     // MARK_APPLIED_CHUNK entirely) would never get durably recorded before
     // the cursor advances below.
-    for (const objectType of batchBuffers.keys()) {
-      await flushBatchBuffer(objectType);
-    }
+    await flushActiveBatch();
     await flushAppliedBuffer();
 
     await putSyncState({

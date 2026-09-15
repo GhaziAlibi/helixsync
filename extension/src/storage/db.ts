@@ -175,7 +175,11 @@ export interface HelixSyncDB extends DBSchema {
   remote_objects: {
     key: string; // objectId
     value: RemoteObjectRecord;
-    indexes: { "by-type": ObjectType; "by-type-updated": [ObjectType, string] };
+    indexes: {
+      "by-type": ObjectType;
+      "by-type-updated": [ObjectType, string];
+      "by-type-deleted": [ObjectType, boolean];
+    };
   };
   deferred_materializations: {
     key: string; // objectId
@@ -188,7 +192,7 @@ let dbPromise: Promise<IDBPDatabase<HelixSyncDB>> | null = null;
 
 export function getDb(): Promise<IDBPDatabase<HelixSyncDB>> {
   if (!dbPromise) {
-    dbPromise = openDB<HelixSyncDB>("helixsync", 4, {
+    dbPromise = openDB<HelixSyncDB>("helixsync", 5, {
       upgrade(db, oldVersion, _newVersion, transaction) {
         if (oldVersion < 1) {
           db.createObjectStore("device", { keyPath: "id" });
@@ -255,6 +259,13 @@ export function getDb(): Promise<IDBPDatabase<HelixSyncDB>> {
           // bookmarks/index.ts::retryDeferredParent.
           const deferred = db.createObjectStore("deferred_materializations", { keyPath: "objectId" });
           deferred.createIndex("by-waiting-on-parent", "waitingOnParent");
+        }
+
+        if (oldVersion < 5) {
+          // Badge updates only care about live remote tabs. Keeping liveness
+          // in the index avoids cursor-walking every retained tombstone on
+          // every sync cycle and WebSocket push.
+          transaction.objectStore("remote_objects").createIndex("by-type-deleted", ["objectType", "deleted"]);
         }
       },
     });
@@ -897,16 +908,16 @@ export async function getPendingTabRestores(): Promise<PendingTabRestore[]> {
  * included) into one array purely to read `.length` off the end result;
  * on an account with a lot of synced tabs, `updateBadge` re-pays that full
  * cost every sync cycle and every WebSocket push just to set the toolbar
- * badge text. This instead walks the same `by-type` index via a cursor,
- * applying `isPendingTabRestore` (the exact same per-record predicate
- * `selectPendingTabRestores` filters with) one row at a time — so it never
- * holds more than one record's deserialized payload in memory at once,
- * instead of every matching record simultaneously. */
+ * badge text. This instead walks only the live-tab portion of the
+ * `by-type-deleted` index via a cursor, applying `isPendingTabRestore` (the
+ * exact same per-record predicate `selectPendingTabRestores` filters with)
+ * one row at a time — so it skips retained tombstones and never holds more
+ * than one record's deserialized payload in memory at once. */
 export async function countPendingTabRestores(): Promise<number> {
   const db = await getDb();
   const [tabMappings, cursor] = await Promise.all([
     db.getAllFromIndex("object_mappings", "by-type", "tab"),
-    db.transaction("remote_objects").store.index("by-type").openCursor(IDBKeyRange.only("tab")),
+    db.transaction("remote_objects").store.index("by-type-deleted").openCursor(IDBKeyRange.only(["tab", false])),
   ]);
   const materializedObjectIds = new Set(tabMappings.map((m) => m.objectId));
   let count = 0;

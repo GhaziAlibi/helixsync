@@ -212,7 +212,7 @@ const PENDING_RESTORE_PAGE_SIZE = 15;
  * markup reason as `renderHistoryList`. */
 function renderPendingTabRestores(
   pending: PendingTabRestore[],
-  onRestore: (objectId: string) => void,
+  onRestore: (objectId: string) => Promise<void>,
   onRestoreAll: () => void,
 ): HTMLElement | null {
   if (pending.length === 0) return null;
@@ -220,7 +220,13 @@ function renderPendingTabRestores(
   const section = document.createElement("div");
   const label = document.createElement("div");
   label.className = "section-label";
-  label.textContent = `Tabs from other devices (${pending.length})`;
+  const restoreAllButton = document.createElement("button");
+  let remainingCount = pending.length;
+  const updateCount = () => {
+    label.textContent = `Tabs from other devices (${remainingCount})`;
+    restoreAllButton.textContent = `Restore all (${remainingCount})`;
+  };
+  updateCount();
   section.appendChild(label);
 
   const list = document.createElement("ul");
@@ -238,7 +244,36 @@ function renderPendingTabRestores(
     const restoreButton = document.createElement("button");
     restoreButton.className = "restore-button";
     restoreButton.textContent = "Restore";
-    restoreButton.addEventListener("click", () => onRestore(objectId));
+    restoreButton.addEventListener("click", () => {
+      void (async () => {
+        restoreButton.disabled = true;
+        restoreButton.textContent = "Restoring…";
+        section.querySelector(".restore-error")?.remove();
+        try {
+          await onRestore(objectId);
+          item.remove();
+          remainingCount--;
+          if (remainingCount === 0) {
+            section.remove();
+          } else {
+            updateCount();
+          }
+        } catch (err) {
+          // Keep the row in place when the background worker rejected the
+          // restore. A full popup render used to do this incidentally, but it
+          // also reloaded every unrelated status/settings/history section.
+          restoreButton.disabled = false;
+          restoreButton.textContent = "Restore";
+          let error = section.querySelector<HTMLElement>(".restore-error");
+          if (!error) {
+            error = document.createElement("div");
+            error.className = "status-message error restore-error";
+            section.appendChild(error);
+          }
+          error.textContent = `Failed to restore tab: ${err instanceof Error ? err.message : String(err)}`;
+        }
+      })();
+    });
 
     item.append(info, restoreButton);
     list.appendChild(item);
@@ -261,8 +296,9 @@ function renderPendingTabRestores(
     section.appendChild(showMoreButton);
   }
 
-  const restoreAllButton = document.createElement("button");
-  restoreAllButton.textContent = `Restore all (${pending.length})`;
+  // Assigned by updateCount above; kept as a separate element so a single
+  // successful restore can update its count without rerendering the popup.
+  updateCount();
   restoreAllButton.addEventListener("click", onRestoreAll);
   section.appendChild(restoreAllButton);
 
@@ -524,8 +560,13 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
     const restoreSection = renderPendingTabRestores(
       pending,
       async (objectId) => {
-        await chrome.runtime.sendMessage({ type: "RESTORE_TAB", objectId });
-        await render();
+        const response = await chrome.runtime.sendMessage({ type: "RESTORE_TAB", objectId });
+        // The background worker returns errors as a response rather than
+        // rejecting the message promise. Treat those as failures so the
+        // targeted row update leaves the tab visible and re-enables it.
+        if (!response?.ok) {
+          throw new Error(response?.error ?? "The restore request failed");
+        }
       },
       async () => {
         await chrome.runtime.sendMessage({ type: "RESTORE_ALL_TABS" });
