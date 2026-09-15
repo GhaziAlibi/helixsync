@@ -317,6 +317,14 @@ async fn revoke_device(
     .execute(&state.db)
     .await?;
 
+    // Overwrite the revocation cache directly instead of just letting it
+    // expire — `AuthenticatedDevice::from_request_parts` (server/src/auth/extractors.rs)
+    // would otherwise keep accepting this device's existing access token for
+    // up to `DEVICE_REVOCATION_CACHE_TTL` after this handler returns.
+    state
+        .device_revocation_cache
+        .insert(id, (std::time::Instant::now(), false));
+
     crate::audit::log(&state, Some(user.user_id), Some(id), "device_revoked").await;
 
     Ok(Json(device))

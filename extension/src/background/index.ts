@@ -14,6 +14,7 @@ import {
   onChangesAvailable,
 } from "../api/websocket";
 import {
+  gcFieldStates,
   getDevice,
   getPendingTabRestores,
   getSyncState,
@@ -152,6 +153,13 @@ async function runMaintenanceIfDue(): Promise<void> {
     await pruneRemoteObjectsByType(objectType, cap);
   }
   await pruneConflicts(CONFLICTS_CAP);
+  // Cold cleanup of deleted objects' LWW provenance (storage/db.ts's
+  // gcFieldStates doc comment has the full retention-window rationale) —
+  // folded into this same once-a-day pass rather than given its own
+  // separate throttle, since "roughly once a day" is exactly this
+  // function's existing cadence and nothing about field_state GC is
+  // latency-sensitive enough to need its own guard.
+  await gcFieldStates();
   await putSyncState({ ...state, lastMaintenanceAt: new Date().toISOString() });
 }
 

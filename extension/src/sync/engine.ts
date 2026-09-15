@@ -38,15 +38,18 @@ export type BatchObjectApplier = (items: Array<{ op: OperationOut; payload: unkn
 
 const batchAppliers = new Map<ObjectType, BatchObjectApplier>();
 
-/** Optional fast path alongside `registerApplier`, used only by
- * `applySnapshot`'s bulk resync loop for object types whose per-object IO
- * cost is high enough that applying a large snapshot one object at a time
- * risks stalling/killing the service worker (see the review this fixes:
+/** Optional fast path alongside `registerApplier`, for object types whose
+ * per-object IO cost is high enough that applying them one at a time risks
+ * stalling/killing the service worker (see the review this fixes:
  * historyVisit's `chrome.history.addUrl` + `putRemoteObject` round trips,
  * multiplied by tens of thousands of visits). Most object types never
  * register one and keep going through `ObjectApplier` via the existing
- * per-object path — this map is consulted only for the bulk snapshot path,
- * never for `downloadAndApply`'s incremental per-op path. */
+ * per-object path. Consulted by both `applySnapshot`'s bulk resync loop and
+ * `downloadAndApply`'s incremental loop — a type only belongs here if
+ * applying its ops out of their original relative order (which both dispatch
+ * paths do, to gain the batching) is actually safe, i.e. it has no
+ * cross-operation ordering dependency the way field-merge types rely on
+ * `field_state`'s LWW comparison. */
 export function registerBatchApplier(objectType: ObjectType, applier: BatchObjectApplier): void {
   batchAppliers.set(objectType, applier);
 }
@@ -326,29 +329,97 @@ export async function downloadAndApply(): Promise<void> {
     );
 
     let appliedBuffer: string[] = [];
+    const flushAppliedBuffer = async () => {
+      if (appliedBuffer.length === 0) return;
+      await markAppliedBatch(appliedBuffer);
+      appliedBuffer = [];
+    };
+    const markApplied = async (operationId: string) => {
+      appliedBuffer.push(operationId);
+      if (appliedBuffer.length >= MARK_APPLIED_CHUNK) await flushAppliedBuffer();
+    };
+
+    // Ops for a type with a registered batch applier (see
+    // `registerBatchApplier` — currently only historyVisit) are pulled out
+    // of the per-op loop below and buffered here instead of going through
+    // `appliers` one at a time, mirroring applySnapshot's batch dispatch.
+    // Buffered per object type, since a batch applier call only makes sense
+    // for one type at a time. Unlike applySnapshot — which regroups its
+    // *entire* object list by type, including types with no batch applier —
+    // ops for every other type still go through `appliers` immediately,
+    // right here in the loop, in their original relative order: this page's
+    // ops carry real cross-device ordering (deviceSequence/lamportTimestamp)
+    // that a field-merge applier's `field_state` LWW comparison depends on,
+    // whereas applySnapshot's synthesized ops (one shared lamportTimestamp
+    // for the whole snapshot, field_state wiped first) have no such
+    // dependency to preserve. Only types that opted into `registerBatchApplier`
+    // are asserting they have no such dependency, so only those are safe to
+    // defer out of order here.
+    const batchBuffers = new Map<ObjectType, Array<{ op: OperationOut; payload: unknown }>>();
+    const flushBatchBuffer = async (objectType: ObjectType) => {
+      const items = batchBuffers.get(objectType);
+      if (!items || items.length === 0) return;
+      batchBuffers.set(objectType, []);
+      await batchAppliers.get(objectType)!(items);
+      for (const { op } of items) await markApplied(op.operationId);
+    };
+
     let sinceYield = 0;
     for (const op of response.operations) {
       if (alreadyApplied.has(op.operationId)) continue;
-      appliedBuffer.push(await applyOneRemote(op, device.encryptionRootKey));
-      if (appliedBuffer.length >= MARK_APPLIED_CHUNK) {
-        await markAppliedBatch(appliedBuffer);
-        appliedBuffer = [];
-      }
-      // See CRYPTO_YIELD_CHUNK: applyOneRemote's decrypt is the expensive
+
+      const decrypted = await decryptOrSkip(op, device.encryptionRootKey);
+      // See CRYPTO_YIELD_CHUNK: decryptOrSkip's decrypt is the expensive
       // synchronous step in this loop, so it — not just the bookkeeping
-      // flush above — needs its own, tighter yield cadence.
+      // flush below — needs its own, tighter yield cadence.
       if (++sinceYield >= CRYPTO_YIELD_CHUNK) {
         sinceYield = 0;
         await yieldToEventLoop();
       }
+      if (!decrypted) {
+        // Undecryptable: still "applied" (see decryptOrSkip), never reaches
+        // a type dispatch either way.
+        await markApplied(op.operationId);
+        continue;
+      }
+
+      const batchApplier = batchAppliers.get(op.objectType);
+      if (batchApplier) {
+        let buf = batchBuffers.get(op.objectType);
+        if (!buf) {
+          buf = [];
+          batchBuffers.set(op.objectType, buf);
+        }
+        buf.push({ op, payload: decrypted.payload });
+        // Same bound as appliedBuffer/MARK_APPLIED_CHUNK above — a batch
+        // applier call plus its items' bookkeeping writes is exactly the
+        // same "applied but not yet durably marked" crash-safety window as
+        // the single-item path, just for a batch instead of one op, so it
+        // gets flushed on the same cadence rather than accumulating for the
+        // rest of the page.
+        if (buf.length >= MARK_APPLIED_CHUNK) await flushBatchBuffer(op.objectType);
+        continue;
+      }
+
+      const applier = appliers.get(op.objectType);
+      if (applier) {
+        await applier(op, decrypted.payload);
+      } else {
+        // Same "unknown/unsupported object type" handling as applySnapshot's
+        // dispatch loop (see its comment) — never silently apply, but don't
+        // crash the batch, and mark applied so it isn't retried forever.
+        console.warn("HelixSync: no applier registered for object type", op.objectType);
+      }
+      await markApplied(op.operationId);
     }
-    // Flush whatever's left below the chunk threshold — otherwise a
-    // partial chunk at the end of a page (or a page smaller than
+    // Flush whatever's left below the chunk threshold in either buffer —
+    // otherwise a partial chunk at the end of a page (or a page smaller than
     // MARK_APPLIED_CHUNK entirely) would never get durably recorded before
     // the cursor advances below.
-    if (appliedBuffer.length > 0) {
-      await markAppliedBatch(appliedBuffer);
+    for (const objectType of batchBuffers.keys()) {
+      await flushBatchBuffer(objectType);
     }
+    await flushAppliedBuffer();
 
     await putSyncState({
       ...state,
@@ -361,9 +432,13 @@ export async function downloadAndApply(): Promise<void> {
 }
 
 /** Decrypts one operation's payload, or returns `undefined` if it can't be
- * (see applyOneRemote's original comment for why that's still "applied").
- * Shared by the per-object path (applyOneRemote) and applySnapshot's
- * batch-dispatch path so both skip undecryptable payloads identically. */
+ * (see the catch block below for why that's still "applied"). Shared by
+ * `applyOneRemote` (now only used for applySnapshot's tombstone loop, which
+ * has no batching to do), and inlined directly into both `downloadAndApply`
+ * and applySnapshot's main dispatch loops — both need the decrypt step
+ * separated from the apply step so they can group decrypted items by object
+ * type before dispatching, which calling through `applyOneRemote` (decrypt
+ * *and* apply in one call) wouldn't allow. */
 async function decryptOrSkip(op: OperationOut, rek: string): Promise<{ payload: unknown } | undefined> {
   if (op.encryptionVersion >= 1) {
     try {
@@ -399,7 +474,16 @@ async function decryptOrSkip(op: OperationOut, rek: string): Promise<{ payload: 
  * preserved: by the time this function returns, the applier (if any) has
  * already run and its own writes (if it makes any) are committed — only
  * *when the bookkeeping transaction commits* is deferred, not the
- * sequencing of "apply then eventually mark". */
+ * sequencing of "apply then eventually mark". Only used for applySnapshot's
+ * tombstone loop now — `downloadAndApply` and applySnapshot's main object
+ * dispatch inline the same decrypt/apply/warn steps directly instead of
+ * calling this, since they need to group items by object type for a
+ * registered batch applier first (see `registerBatchApplier`), which
+ * this single-op, single-type function has no way to do. This one never
+ * needs to, since a tombstone's applier is always the terminal-operation
+ * one-at-a-time path regardless of whether a batch applier exists for that
+ * type (a delete is comparatively rare and cheap next to a bulk snapshot's
+ * create volume, so it was never worth batching). */
 async function applyOneRemote(op: OperationOut, rek: string): Promise<string> {
   const decrypted = await decryptOrSkip(op, rek);
   if (!decrypted) return op.operationId;

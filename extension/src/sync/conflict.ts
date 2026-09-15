@@ -69,14 +69,21 @@ async function resolveFieldInTx(
   const key = fieldStateKey(objectId, field);
   const current = await store.get(key);
 
+  // `recordedAt` is a wall-clock bookkeeping stamp only, read solely by
+  // storage/db.ts's `gcFieldStates` — it plays no part in the arbitration
+  // below (which stays purely Lamport-ordered, docs/protocol.md §8.1) and
+  // must never be compared against `current.recordedAt` or otherwise used
+  // to influence a win/lose decision here.
+  const recordedAt = Date.now();
+
   if (!current) {
-    await store.put({ key, objectId, field, ...incoming } as FieldStateRecord);
+    await store.put({ key, objectId, field, ...incoming, recordedAt } as FieldStateRecord);
     return { applied: true, value: incoming.value };
   }
 
   if (field === "liveness") {
     if (incoming.operationType === "delete" && current.operationType === "move") {
-      await store.put({ key, objectId, field, ...incoming } as FieldStateRecord);
+      await store.put({ key, objectId, field, ...incoming, recordedAt } as FieldStateRecord);
       return { applied: true, value: incoming.value };
     }
     if (incoming.operationType === "move" && current.value === "deleted") {
@@ -91,7 +98,7 @@ async function resolveFieldInTx(
   });
 
   if (cmp > 0) {
-    await store.put({ key, objectId, field, ...incoming } as FieldStateRecord);
+    await store.put({ key, objectId, field, ...incoming, recordedAt } as FieldStateRecord);
     return { applied: true, value: incoming.value };
   }
   return { applied: false, value: current.value };

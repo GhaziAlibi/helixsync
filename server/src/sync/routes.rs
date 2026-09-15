@@ -188,13 +188,22 @@ async fn process_batch(
     .map(|r| (r.operation_id, r.server_cursor))
     .collect();
 
+    // `devices.last_device_sequence` (migration `0009_devices_last_sequence.sql`)
+    // is the source of truth here, not `MAX(device_sequence) FROM
+    // sync_operations` — that query used to reset to 0 once
+    // `sync::compaction` deleted a device's rows (e.g. an idle device
+    // fully folded into a snapshot), letting a later upload reuse
+    // `device_sequence` values it had already used and had accepted,
+    // instead of being rejected `sequence_conflict`. Reading it here is
+    // race-free under the same per-device `pg_advisory_xact_lock` acquired
+    // above, which already serializes concurrent uploads from this device
+    // — the same guarantee the old query relied on.
     let mut last_seq: i64 = sqlx::query_scalar!(
-        "SELECT MAX(device_sequence) FROM sync_operations WHERE device_id = $1",
+        "SELECT last_device_sequence FROM devices WHERE id = $1",
         device.device_id
     )
     .fetch_one(&mut *tx)
-    .await?
-    .unwrap_or(0);
+    .await?;
 
     // Bulk ownership pre-check: every (object_type, object_id) a
     // non-origination, non-duplicate op in this batch refers to, resolved
@@ -557,6 +566,28 @@ async fn process_batch(
             .execute(&mut *tx)
             .await?;
         }
+
+        // Persist the advanced `last_seq` back onto `devices` (see
+        // migration `0009_devices_last_sequence.sql`) so the next batch's
+        // read at the top of this function sees it, without ever having to
+        // fall back to scanning `sync_operations` again. A plain assignment
+        // (not `GREATEST`) is correct, not just simpler: the per-device
+        // `pg_advisory_xact_lock` taken above is transaction-scoped and
+        // held until `tx.commit()` below, so no concurrent upload from this
+        // same device can be interleaved between the read of
+        // `last_device_sequence` at the top of this function and this write
+        // — `last_seq` was always computed forward from the exact value
+        // this UPDATE is about to overwrite, never from a value some other
+        // in-flight transaction could have since changed. Only reached when
+        // `accepted_ops` is non-empty, i.e. `last_seq` strictly advanced at
+        // least once in the validation loop above.
+        sqlx::query!(
+            "UPDATE devices SET last_device_sequence = $1 WHERE id = $2",
+            last_seq,
+            device.device_id
+        )
+        .execute(&mut *tx)
+        .await?;
     }
 
     let max_duplicate_cursor = decisions
@@ -1173,13 +1204,13 @@ async fn stats(
     user: AnyAuthenticatedUser,
     State(state): State<AppState>,
 ) -> AppResult<Json<SyncStats>> {
-    enforce(&state.rate_limiter, SYNC_STATS_LIMIT, &user.user_id.to_string())?;
-
     if let Some(cached) = STATS_CACHE.get(&user.user_id) {
         if cached.0.elapsed() < STATS_CACHE_TTL {
             return Ok(Json(cached.1.clone()));
         }
     }
+
+    enforce(&state.rate_limiter, SYNC_STATS_LIMIT, &user.user_id.to_string())?;
 
     let mut tx = state.db.begin().await?;
 

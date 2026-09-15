@@ -2,7 +2,7 @@
 // split out so it can be unit tested without a real IndexedDB — this
 // project's vitest setup has no IndexedDB/`idb` polyfill, so anything that
 // calls `getDb()` directly can't run under `vitest run`.
-import type { RemoteObjectRecord } from "./db";
+import type { FieldStateRecord, RemoteObjectRecord } from "./db";
 import type { HistoryVisitPayload, TabPayload } from "../sync/types";
 
 /** Most recent history visits synced from other devices, newest first —
@@ -41,4 +41,28 @@ export function selectPendingTabRestores(
     .filter((r): r is RemoteObjectRecord & { payload: TabPayload } => r.objectType === "tab" && !r.deleted && !!r.payload)
     .filter((r) => !materializedObjectIds.has(r.objectId))
     .map((r) => ({ objectId: r.objectId, payload: r.payload }));
+}
+
+/** objectIds eligible for `storage/db.ts::gcFieldStates` to purge — every
+ * object whose "liveness" field_state record reads "deleted" and was
+ * recorded at least `cutoffMs` in the past. See `gcFieldStates`'s doc
+ * comment for the full resurrection-bug rationale this retention window
+ * exists to prevent; this only factors out the filtering so it can be
+ * tested without a real IndexedDB (see this file's header).
+ *
+ * A record with no `recordedAt` (written before that field existed) is
+ * deliberately excluded rather than treated as eligible: its true age is
+ * unknown, and purging data of unconfirmed age risks exactly the
+ * resurrection bug this window exists to prevent. */
+export function selectFieldStateGcCandidates(
+  records: FieldStateRecord[],
+  cutoffMs: number,
+): string[] {
+  const objectIds = new Set<string>();
+  for (const r of records) {
+    if (r.field === "liveness" && r.value === "deleted" && r.recordedAt !== undefined && r.recordedAt < cutoffMs) {
+      objectIds.add(r.objectId);
+    }
+  }
+  return [...objectIds];
 }

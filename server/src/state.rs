@@ -31,4 +31,23 @@ pub struct AppState {
     /// worth of `(Uuid, Instant)` entries is negligible, so a sweeper would
     /// add complexity without a real problem to solve.
     pub last_seen_cache: Arc<DashMap<Uuid, std::time::Instant>>,
+    /// Per-device `(cached_at, is_active)` for the revocation check every
+    /// device-authenticated request pays in
+    /// `auth::extractors::AuthenticatedDevice::from_request_parts` — that
+    /// check is a DB round trip (and pool checkout) on every single upload,
+    /// download, snapshot, and stats call, which adds up under concurrent
+    /// load against the pool's `max_connections`.
+    ///
+    /// Unlike `last_seen_cache`, entries here are read with a short TTL
+    /// (`auth::extractors::DEVICE_REVOCATION_CACHE_TTL`) rather than treated
+    /// as valid forever: a stale "active" entry has a real security
+    /// consequence (a revoked device kept accepting requests), so the cache
+    /// can only shave off the common-case round trip, not skip the freshness
+    /// check entirely. `devices::routes::revoke_device` also writes `false`
+    /// into this map directly on revocation, so the TTL window only matters
+    /// for revocations that happen through some path other than that
+    /// handler. Sized the same way as `last_seen_cache` — bounded by the
+    /// number of distinct devices, not by request volume — so it needs no
+    /// sweeper either.
+    pub device_revocation_cache: Arc<DashMap<Uuid, (std::time::Instant, bool)>>,
 }

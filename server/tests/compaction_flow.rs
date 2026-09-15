@@ -34,6 +34,9 @@ fn test_config() -> Config {
         // same test run, so the real 30-day default never age anything out
         // by accident.
         inactive_device_compaction_grace_period_secs: 60 * 60 * 24 * 30,
+        housekeeping_interval_secs: 60 * 60 * 24,
+        device_credential_retention_secs: 60 * 60 * 24 * 7,
+        audit_log_retention_secs: 60 * 60 * 24 * 90,
     }
 }
 
@@ -44,6 +47,7 @@ fn state_for(pool: PgPool) -> AppState {
         rate_limiter: Arc::new(RateLimiter::new()),
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
+        device_revocation_cache: Arc::new(dashmap::DashMap::new()),
     }
 }
 
@@ -56,6 +60,7 @@ fn state_with_tombstone_retention(pool: PgPool, retention_secs: i64) -> AppState
         rate_limiter: Arc::new(RateLimiter::new()),
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
+        device_revocation_cache: Arc::new(dashmap::DashMap::new()),
     }
 }
 
@@ -68,6 +73,7 @@ fn state_with_inactive_device_grace_period(pool: PgPool, grace_period_secs: i64)
         rate_limiter: Arc::new(RateLimiter::new()),
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
+        device_revocation_cache: Arc::new(dashmap::DashMap::new()),
     }
 }
 
@@ -566,6 +572,90 @@ async fn edit_after_compaction_is_accepted_not_rejected(pool: PgPool) {
     assert_eq!(body["accepted"].as_array().unwrap().len(), 1);
 }
 
+/// Regression coverage for the `devices.last_device_sequence` fix
+/// (migration `0009_devices_last_sequence.sql`): `process_batch` used to
+/// derive a device's last-used `device_sequence` via `SELECT
+/// MAX(device_sequence) FROM sync_operations WHERE device_id = $1`, which
+/// silently resets to 0 once compaction deletes every one of that device's
+/// rows — exactly what `edit_after_compaction_is_accepted_not_rejected`
+/// above proves happens to `sync_operations` for a fully-acknowledged
+/// device. A device that then uploaded a *new* operation reusing a
+/// `device_sequence` value it had already used (and had accepted) before
+/// compaction would have been wrongly accepted instead of rejected
+/// `sequence_conflict`, since the stale-derived `last_seq` had reset to 0
+/// and any `device_sequence >= 1` looks "new" against that. This test
+/// fully compacts a device away and then replays an old, already-used
+/// `device_sequence` and asserts it is still correctly rejected.
+#[sqlx::test(migrations = "./migrations")]
+async fn device_sequence_does_not_reset_after_full_compaction(pool: PgPool) {
+    let state = state_for(pool.clone());
+    let server = server_for_state(state.clone());
+
+    register_and_login(&server, "gwen@example.com").await;
+    let (_device_a, token_a) = register_device(&server, "gwen@example.com", "Laptop").await;
+
+    let object_id = Uuid::now_v7();
+    // Two accepted ops from this device: device_sequence 1 (create) and 2
+    // (update) — its real last sequence is 2.
+    upload(&server, &token_a, bookmark_op(Uuid::now_v7(), object_id, 1, 1, "Example")).await;
+    upload(&server, &token_a, bookmark_op(Uuid::now_v7(), object_id, 2, 2, "Renamed")).await;
+
+    // Fully acknowledge and compact — same mechanism
+    // `edit_after_compaction_is_accepted_not_rejected` uses to drain every
+    // row of this device's operations out of `sync_operations` entirely.
+    sync_device(&server, &token_a).await;
+
+    let user_id = user_id_for_email(&pool, "gwen@example.com").await;
+    compaction::run_once(&state).await.unwrap();
+    assert_eq!(
+        count_operations(&pool, user_id).await,
+        0,
+        "every one of this device's rows must be gone after compaction — the precondition for the bug this test guards against"
+    );
+
+    // Without the fix, the server would have re-derived `last_seq` as
+    // `MAX(device_sequence) FROM sync_operations` = NULL -> 0 here (no rows
+    // left), so a replayed `device_sequence = 2` (already used and accepted
+    // above) would look like a fresh, valid sequence number and be wrongly
+    // accepted — colliding with the device's own prior history. A brand
+    // new object is used for the origination op so the ownership
+    // pre-check (`sync_objects`) can never itself be the reason for a
+    // rejection here; only `sequence_conflict` should fire.
+    let replayed_op = bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 2, 3, "Replayed");
+    let res = server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&token_a)
+        .json(&json!({ "operations": [replayed_op] }))
+        .await;
+    res.assert_status_ok();
+    let body: serde_json::Value = res.json();
+    assert_eq!(
+        body["accepted"].as_array().unwrap().len(),
+        0,
+        "a replayed device_sequence must never be accepted, compacted or not: {body}"
+    );
+    let rejected = body["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["reason"], "sequence_conflict");
+
+    // And a genuinely new, higher device_sequence must still work fine —
+    // proving the fix didn't overcorrect into rejecting everything.
+    // Deliberately a fresh `create` (an origination op, per
+    // `bookmark_op`'s own seq==1 convention) on a brand-new object id, so
+    // this can only ever fail on the sequence check, never on the
+    // `sync_objects` ownership pre-check.
+    let mut next_op = bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 4, "Still works");
+    next_op["deviceSequence"] = json!(3);
+    let res2 = server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&token_a)
+        .json(&json!({ "operations": [next_op] }))
+        .await;
+    res2.assert_status_ok();
+    let body2: serde_json::Value = res2.json();
+    assert_eq!(body2["accepted"].as_array().unwrap().len(), 1, "{body2}");
+}
+
 /// Regression coverage for SRV-PERF-1: an abandoned device (old phone,
 /// uninstalled extension, a work browser never explicitly revoked) that
 /// never acknowledges anything used to pin `ack_boundary` at 0 forever,
@@ -689,4 +779,86 @@ async fn snapshot_route_falls_back_to_uncompressed_legacy_data(pool: PgPool) {
     assert_eq!(objects[0]["objectId"], json!(object_id));
     assert_eq!(objects[0]["payload"]["title"], json!("Legacy bookmark"));
     assert_eq!(snapshot["snapshotCursor"].as_i64().unwrap(), 1);
+}
+
+/// Regression coverage for the `sync_operations` DELETE chunking fix: the
+/// final deletion in `compact_user` used to be a single unchunked statement,
+/// which for a large ack'd backlog (typically a first-ever compaction pass,
+/// since `MIN_NEW_OPERATIONS_TO_COMPACT` keeps ordinary hourly passes far
+/// below this scale) could hold row locks and spike WAL for the duration of
+/// one giant statement. It's now a loop of bounded deletes inside the same
+/// transaction. This inserts more than one chunk's worth of operations
+/// (`DELETE_CHUNK_SIZE` is 5,000; this uses 12,000, requiring three loop
+/// iterations) and asserts the end state is identical to what a single
+/// unchunked DELETE would have produced: every row gone, exactly one
+/// snapshot written, at the expected cursor.
+///
+/// Rows are bulk-inserted directly by SQL rather than via `OP_COUNT` HTTP
+/// uploads — looping that many real sync requests would make this test
+/// prohibitively slow for no extra coverage, since the chunked loop's
+/// correctness doesn't depend on how the rows were created, only on what's
+/// already in `sync_operations` and `sync_cursors` when `compact_user` runs.
+#[sqlx::test(migrations = "./migrations")]
+async fn chunked_delete_drains_backlog_larger_than_one_chunk(pool: PgPool) {
+    let state = state_for(pool.clone());
+    let server = server_for_state(state.clone());
+
+    register_and_login(&server, "hugo@example.com").await;
+    let (device_a, _token_a) = register_device(&server, "hugo@example.com", "Laptop").await;
+
+    let user_id = user_id_for_email(&pool, "hugo@example.com").await;
+    let device_id: Uuid = device_a.parse().unwrap();
+
+    const OP_COUNT: i64 = 12_000;
+    let object_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO sync_operations \
+            (operation_id, user_id, device_id, device_sequence, lamport_timestamp, server_cursor, \
+             object_type, object_id, operation_type, encryption_version, payload) \
+         SELECT gen_random_uuid(), $1, $2, seq, seq, seq, 'bookmark', $3, \
+             CASE WHEN seq = 1 THEN 'create' ELSE 'update' END, 0, \
+             CASE WHEN seq = 1 \
+                 THEN jsonb_build_object('title', 'Example', 'url', 'https://example.com', 'parent', NULL, 'position', 'a0') \
+                 ELSE jsonb_build_object('title', 'Title ' || seq) \
+             END \
+         FROM generate_series(1, $4::bigint) AS seq",
+    )
+    .bind(user_id)
+    .bind(device_id)
+    .bind(object_id)
+    .bind(OP_COUNT)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Acknowledge every inserted operation from this (only) active device,
+    // same effect as the HTTP-driven `sync_device` helper but for a backlog
+    // too large to walk through the API one operation at a time.
+    sqlx::query("INSERT INTO sync_cursors (user_id, device_id, cursor_value) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(device_id)
+        .bind(OP_COUNT)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(count_operations(&pool, user_id).await, OP_COUNT);
+
+    compaction::run_once(&state).await.unwrap();
+
+    // Every operation is gone (none are terminal, so there's no survivor
+    // set to exclude) and exactly one snapshot was written — the chunked
+    // loop must have kept iterating past its first 5,000-row pass until the
+    // full backlog was drained, then stopped.
+    assert_eq!(count_operations(&pool, user_id).await, 0);
+    assert_eq!(count_snapshots(&pool, user_id).await, 1);
+
+    let snapshot_cursor: i64 = sqlx::query_scalar!(
+        "SELECT snapshot_cursor FROM sync_snapshots WHERE user_id = $1",
+        user_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(snapshot_cursor, OP_COUNT);
 }

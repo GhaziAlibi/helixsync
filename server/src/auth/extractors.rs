@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum_extra::extract::CookieJar;
@@ -10,6 +12,14 @@ use crate::state::AppState;
 pub const SESSION_COOKIE_NAME: &str = "helixsync_session";
 pub const CSRF_COOKIE_NAME: &str = "helixsync_csrf";
 pub const CSRF_HEADER_NAME: &str = "x-csrf-token";
+
+/// Matches `sync::routes::STATS_CACHE_TTL`'s tradeoff, but for a
+/// security-sensitive value rather than a purely informational one: kept
+/// short because a stale "active" entry means a revoked device keeps being
+/// accepted for up to this long on any path that revokes a device without
+/// going through `devices::routes::revoke_device` (which proactively
+/// overwrites the cache entry instead of waiting on the TTL).
+pub const DEVICE_REVOCATION_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[axum::async_trait]
 impl FromRequestParts<AppState> for AuthenticatedUser {
@@ -108,15 +118,32 @@ impl FromRequestParts<AppState> for AuthenticatedDevice {
         )
         .map_err(|_| AppError::Unauthorized)?;
 
-        let active = sqlx::query_scalar!(
-            "SELECT revoked_at IS NULL FROM devices WHERE id = $1 AND user_id = $2",
-            claims.sub,
-            claims.user_id
-        )
-        .fetch_optional(&state.db)
-        .await?
-        .flatten()
-        .unwrap_or(false);
+        let cached = state
+            .device_revocation_cache
+            .get(&claims.sub)
+            .filter(|entry| entry.0.elapsed() < DEVICE_REVOCATION_CACHE_TTL)
+            .map(|entry| entry.1);
+
+        let active = match cached {
+            Some(active) => active,
+            None => {
+                let active = sqlx::query_scalar!(
+                    "SELECT revoked_at IS NULL FROM devices WHERE id = $1 AND user_id = $2",
+                    claims.sub,
+                    claims.user_id
+                )
+                .fetch_optional(&state.db)
+                .await?
+                .flatten()
+                .unwrap_or(false);
+
+                state
+                    .device_revocation_cache
+                    .insert(claims.sub, (Instant::now(), active));
+
+                active
+            }
+        };
 
         if !active {
             return Err(AppError::Unauthorized);

@@ -189,25 +189,27 @@ async function applyRemote(op: OperationOut, payload: unknown): Promise<void> {
 // `chrome.history.getVisits`'s IPC-latency rationale (BACKFILL_URL_CONCURRENCY,
 // above) applies identically here: `chrome.history.addUrl` has no batch/bulk
 // variant (see applyRemote's comment — AI rule #4/#5, never invent browser
-// APIs), so during snapshot resync (sync/engine.ts's applySnapshot, the only
-// caller of a registered batch applier) a large synced history would
+// APIs), so applying a large batch of visits — whether from snapshot resync
+// or, now, an incremental download page (sync/engine.ts's applySnapshot and
+// downloadAndApply, both callers of a registered batch applier) — would
 // otherwise pay one fully-sequential addUrl IPC round trip per visit. This
 // bounds how many run concurrently instead, same value/rationale as
 // BACKFILL_URL_CONCURRENCY.
 const APPLY_BATCH_URL_CONCURRENCY = 25;
 
-/** Batch counterpart to `applyRemote`, used only by sync/engine.ts's
- * `applySnapshot` (via `registerBatchApplier`) for the bulk snapshot-resync
- * path — `downloadAndApply`'s incremental per-op path keeps using
- * `applyRemote` above unchanged. Mirrors `applyRemote`'s per-item semantics
- * exactly: `chrome.history.addUrl` still runs for every item (including
- * this device's own — matching `applyRemote`'s existing ordering where
- * addUrl runs unconditionally before the own-device check), just with
- * bounded concurrency instead of one at a time since there is no bulk
- * addUrl API to call instead. Only the `remote_objects` write is
- * conditional on not being this device's own visit, and is collected into
- * one `putRemoteObjectsBatch` call for the whole batch instead of one
- * `putRemoteObject` call per item. */
+/** Batch counterpart to `applyRemote`, used by sync/engine.ts (via
+ * `registerBatchApplier`) from both `applySnapshot`'s bulk snapshot-resync
+ * path and `downloadAndApply`'s incremental path — the engine buffers
+ * historyVisit ops (up to `MARK_APPLIED_CHUNK` at a time on the incremental
+ * path) and hands them here instead of calling `applyRemote` once per op.
+ * Mirrors `applyRemote`'s per-item semantics exactly: `chrome.history.addUrl`
+ * still runs for every item (including this device's own — matching
+ * `applyRemote`'s existing ordering where addUrl runs unconditionally before
+ * the own-device check), just with bounded concurrency instead of one at a
+ * time since there is no bulk addUrl API to call instead. Only the
+ * `remote_objects` write is conditional on not being this device's own
+ * visit, and is collected into one `putRemoteObjectsBatch` call for the
+ * whole batch instead of one `putRemoteObject` call per item. */
 async function applyRemoteBatch(items: Array<{ op: OperationOut; payload: unknown }>): Promise<void> {
   const device = await getDevice(); // once for the whole batch, mirroring flushVisitEvents above
 

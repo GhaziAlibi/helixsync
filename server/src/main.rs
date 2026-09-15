@@ -38,9 +38,11 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter: Arc::new(RateLimiter::new()),
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
+        device_revocation_cache: Arc::new(dashmap::DashMap::new()),
     };
 
     helixsync_server::sync::compaction::spawn(state.clone());
+    helixsync_server::housekeeping::spawn(state.clone());
     helixsync_server::middleware::rate_limit::spawn_sweeper(state.rate_limiter.clone());
 
     let router = app(state);

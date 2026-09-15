@@ -44,6 +44,20 @@ pub struct Config {
     /// correctness reason a truly stale device needs to keep blocking
     /// compaction for everyone else.
     pub inactive_device_compaction_grace_period_secs: i64,
+    /// How often the background housekeeping task (server/src/housekeeping.rs)
+    /// runs. Separate from `compaction_interval_secs` since housekeeping's
+    /// deletes are cheap, unconditional retention sweeps (no per-user work,
+    /// no snapshot to compute first) and don't need to run nearly as often.
+    pub housekeeping_interval_secs: u64,
+    /// A device credential row lingers this long past its `expires_at`
+    /// before housekeeping deletes it — a small audit-trail grace window
+    /// (mirroring `tombstone_retention_secs`'s rationale) rather than an
+    /// immediate delete the moment a credential expires.
+    pub device_credential_retention_secs: i64,
+    /// How long an `audit_logs` row is kept after being written. Unlike the
+    /// other two housekeeping tables, `audit_logs` rows have no `expires_at`
+    /// of their own, so the cutoff is measured from `created_at`.
+    pub audit_log_retention_secs: i64,
 }
 
 impl Config {
@@ -106,6 +120,21 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60 * 60 * 24 * 30); // 30 days
 
+        let housekeeping_interval_secs = env::var("HOUSEKEEPING_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60 * 60 * 24); // daily
+
+        let device_credential_retention_secs = env::var("DEVICE_CREDENTIAL_RETENTION_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60 * 60 * 24 * 7); // 7 days past expiry
+
+        let audit_log_retention_secs = env::var("AUDIT_LOG_RETENTION_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60 * 60 * 24 * 90); // 90 days
+
         Ok(Self {
             database_url,
             bind_addr,
@@ -122,6 +151,9 @@ impl Config {
             tombstone_retention_secs,
             compaction_interval_secs,
             inactive_device_compaction_grace_period_secs,
+            housekeeping_interval_secs,
+            device_credential_retention_secs,
+            audit_log_retention_secs,
         })
     }
 }

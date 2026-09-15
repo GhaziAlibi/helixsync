@@ -25,6 +25,9 @@ fn test_config() -> Config {
         tombstone_retention_secs: 60 * 60 * 24 * 30,
         compaction_interval_secs: 60 * 60,
         inactive_device_compaction_grace_period_secs: 60 * 60 * 24 * 30,
+        housekeeping_interval_secs: 60 * 60 * 24,
+        device_credential_retention_secs: 60 * 60 * 24 * 7,
+        audit_log_retention_secs: 60 * 60 * 24 * 90,
     }
 }
 
@@ -35,6 +38,7 @@ fn server_for(pool: PgPool) -> TestServer {
         rate_limiter: Arc::new(RateLimiter::new()),
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
+        device_revocation_cache: Arc::new(dashmap::DashMap::new()),
     };
     let config = TestServerConfig {
         transport: Some(Transport::HttpRandomPort),

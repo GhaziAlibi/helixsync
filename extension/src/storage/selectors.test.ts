@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { selectPendingTabRestores, selectRecentHistoryVisits } from "./selectors";
-import type { RemoteObjectRecord } from "./db";
+import { selectFieldStateGcCandidates, selectPendingTabRestores, selectRecentHistoryVisits } from "./selectors";
+import type { FieldStateRecord, RemoteObjectRecord } from "./db";
 
 function historyRecord(
   objectId: string,
@@ -94,5 +94,64 @@ describe("selectPendingTabRestores (README.md 'ask' restore policy)", () => {
     ];
     const result = selectPendingTabRestores(records, new Set());
     expect(result.map((r) => r.objectId)).toEqual(["b"]);
+  });
+});
+
+function livenessRecord(
+  objectId: string,
+  value: "live" | "deleted",
+  overrides: Partial<FieldStateRecord> = {},
+): FieldStateRecord {
+  return {
+    key: `${objectId}:liveness`,
+    objectId,
+    field: "liveness",
+    lamportTimestamp: 1,
+    deviceId: "device-a",
+    operationId: "op-1",
+    operationType: value === "deleted" ? "delete" : "create",
+    value,
+    ...overrides,
+  };
+}
+
+describe("selectFieldStateGcCandidates (storage/db.ts's gcFieldStates)", () => {
+  const NOW = Date.parse("2026-09-15T00:00:00.000Z");
+  const THIRTY_ONE_DAYS_AGO = NOW - 31 * 24 * 60 * 60 * 1000;
+  const ONE_DAY_AGO = NOW - 24 * 60 * 60 * 1000;
+
+  it("includes an object whose liveness is deleted well past the cutoff", () => {
+    const records = [livenessRecord("obj-old", "deleted", { recordedAt: THIRTY_ONE_DAYS_AGO })];
+    expect(selectFieldStateGcCandidates(records, NOW - 30 * 24 * 60 * 60 * 1000)).toEqual(["obj-old"]);
+  });
+
+  it("excludes an object whose liveness was deleted recently (still within the retention window)", () => {
+    const records = [livenessRecord("obj-recent", "deleted", { recordedAt: ONE_DAY_AGO })];
+    expect(selectFieldStateGcCandidates(records, NOW - 30 * 24 * 60 * 60 * 1000)).toEqual([]);
+  });
+
+  it("never includes a still-live object regardless of age", () => {
+    const records = [livenessRecord("obj-live", "live", { recordedAt: THIRTY_ONE_DAYS_AGO })];
+    expect(selectFieldStateGcCandidates(records, NOW - 30 * 24 * 60 * 60 * 1000)).toEqual([]);
+  });
+
+  it("excludes a deleted record with no recordedAt (pre-existing, unknown age) rather than guessing", () => {
+    const records = [livenessRecord("obj-unknown-age", "deleted", { recordedAt: undefined })];
+    expect(selectFieldStateGcCandidates(records, NOW)).toEqual([]);
+  });
+
+  it("ignores non-liveness fields even if old", () => {
+    const records = [
+      { ...livenessRecord("obj-title", "deleted", { recordedAt: THIRTY_ONE_DAYS_AGO }), field: "title", value: "Some Title" },
+    ];
+    expect(selectFieldStateGcCandidates(records, NOW - 30 * 24 * 60 * 60 * 1000)).toEqual([]);
+  });
+
+  it("de-duplicates when somehow given multiple eligible rows for the same object", () => {
+    const records = [
+      livenessRecord("obj-dup", "deleted", { recordedAt: THIRTY_ONE_DAYS_AGO }),
+      livenessRecord("obj-dup", "deleted", { recordedAt: THIRTY_ONE_DAYS_AGO, operationId: "op-2" }),
+    ];
+    expect(selectFieldStateGcCandidates(records, NOW - 30 * 24 * 60 * 60 * 1000)).toEqual(["obj-dup"]);
   });
 });

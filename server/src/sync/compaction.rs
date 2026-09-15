@@ -345,14 +345,45 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
         .map(|c| c.id)
         .collect();
 
-    sqlx::query!(
-        "DELETE FROM sync_operations WHERE user_id = $1 AND server_cursor <= $2 AND NOT (id = ANY($3))",
-        user_id,
-        ack_boundary,
-        &survivor_ids
-    )
-    .execute(&mut *tx)
-    .await?;
+    // Chunked rather than one statement: an unchunked DELETE here can match
+    // tens of thousands of rows — not on an ordinary hourly pass (gated well
+    // below this scale by `MIN_NEW_OPERATIONS_TO_COMPACT` above), but on a
+    // first-ever compaction against a large pre-existing backlog, or an
+    // account that went uncompacted for a long time. Holding row locks and
+    // spiking WAL for the full duration of one giant statement is avoidable
+    // by looping a bounded DELETE instead — still inside this same
+    // transaction, since the snapshot-before-delete invariant this module is
+    // built around (see the module doc comment) requires the delete to
+    // commit atomically with the snapshot write above, not that it happen in
+    // a single statement.
+    //
+    // No ORDER BY needed on the inner LIMIT for correctness: `survivor_ids`
+    // rows never satisfy the WHERE clause, so they're never selected by any
+    // iteration (not merely pushed outside an unlucky LIMIT window) — every
+    // row the subquery does return this pass is one this pass actually
+    // deletes. That makes the matching set strictly finite and monotonically
+    // shrinking, so the loop is guaranteed to terminate once a pass deletes
+    // zero rows, regardless of how large `survivor_ids` is.
+    const DELETE_CHUNK_SIZE: i64 = 5_000;
+    loop {
+        let result = sqlx::query!(
+            "DELETE FROM sync_operations WHERE id IN ( \
+                SELECT id FROM sync_operations \
+                WHERE user_id = $1 AND server_cursor <= $2 AND NOT (id = ANY($3)) \
+                LIMIT $4 \
+             )",
+            user_id,
+            ack_boundary,
+            &survivor_ids,
+            DELETE_CHUNK_SIZE
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            break;
+        }
+    }
 
     tx.commit().await?;
     Ok(())

@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod database;
 pub mod devices;
 pub mod error;
+pub mod housekeeping;
 pub mod middleware;
 pub mod state;
 pub mod sync;
@@ -15,6 +16,7 @@ use std::net::SocketAddr;
 use axum::http::{header, HeaderValue, Method};
 use axum::routing::get;
 use axum::Router;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -52,6 +54,9 @@ pub fn app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
+        // Sync snapshots can be 20-60MB of JSON; negotiate gzip/br/etc. from
+        // the client's Accept-Encoding rather than shipping bodies raw.
+        .layer(CompressionLayer::new())
         .with_state(state)
 }
 

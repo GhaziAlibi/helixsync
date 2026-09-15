@@ -1,6 +1,11 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 import type { HistoryVisitPayload, LocalOperation, ObjectType } from "../sync/types";
-import { selectPendingTabRestores, selectRecentHistoryVisits, type PendingTabRestore } from "./selectors";
+import {
+  selectFieldStateGcCandidates,
+  selectPendingTabRestores,
+  selectRecentHistoryVisits,
+  type PendingTabRestore,
+} from "./selectors";
 
 export type PendingState = "LOCAL_QUEUED" | "UPLOAD_IN_FLIGHT";
 
@@ -104,6 +109,18 @@ export interface FieldStateRecord {
   operationId: string;
   operationType: string;
   value: unknown;
+  // Wall-clock time (Date.now()) this record was last written. This is
+  // NEVER read by any LWW arbitration logic (compareOrderingKey/
+  // resolveFieldInTx in sync/conflict.ts stay purely Lamport-ordered, per
+  // docs/protocol.md §8.1) — it exists solely so `gcFieldStates` below can
+  // tell how long a "liveness: deleted" record has stood without needing
+  // to (wrongly) infer age from lamportTimestamp or from operationId/
+  // objectId, whose UUIDv7 time bits are explicitly documented (see
+  // util/uuid.ts) as unsafe for anything conflict-resolution-adjacent.
+  // Optional because records written before this field existed have none
+  // — `gcFieldStates` treats that as "unknown age" and leaves them alone
+  // rather than guessing.
+  recordedAt?: number;
 }
 
 export interface HelixSyncDB extends DBSchema {
@@ -806,7 +823,11 @@ export async function getFieldStatesForObjects(
 }
 
 export async function putFieldState(record: Omit<FieldStateRecord, "key">): Promise<void> {
-  await (await getDb()).put("field_state", { ...record, key: fieldStateKey(record.objectId, record.field) });
+  await (await getDb()).put("field_state", {
+    ...record,
+    key: fieldStateKey(record.objectId, record.field),
+    recordedAt: Date.now(), // always stamped fresh here — see FieldStateRecord's doc comment
+  });
 }
 
 /** Batch counterpart to `putFieldState` — one transaction for the whole
@@ -817,8 +838,9 @@ export async function putFieldStatesBatch(records: Array<Omit<FieldStateRecord, 
   if (records.length === 0) return;
   const db = await getDb();
   const tx = db.transaction("field_state", "readwrite");
+  const recordedAt = Date.now(); // one timestamp for the whole batch, matching createdAt's per-batch stamping elsewhere in this file
   for (const record of records) {
-    await tx.store.put({ ...record, key: fieldStateKey(record.objectId, record.field) });
+    await tx.store.put({ ...record, key: fieldStateKey(record.objectId, record.field), recordedAt });
   }
   await tx.done;
 }
@@ -835,6 +857,64 @@ export async function deleteFieldStates(objectId: string): Promise<void> {
     await cursor.delete();
   }
   await tx.done;
+}
+
+// `field_state` is the LWW provenance store (sync/conflict.ts's
+// resolveFieldInTx): for every (objectId, field) pair it holds the
+// ordering key that last won, with NO time bound on how much later a
+// legitimately-ordered incoming operation for that same field can still
+// arrive and be correctly arbitrated against it (docs/protocol.md §8.1 is
+// purely logical/Lamport, not wall-clock). If a deleted object's
+// field_state were purged immediately, a late-arriving remote operation
+// for that object (e.g. from a device that was offline a long time) would
+// hit `resolveFieldInTx`'s `!current` branch and win unconditionally,
+// silently resurrecting something the user deleted — even if the delete
+// should have won per the real Lamport ordering.
+//
+// The server has the identical tension and resolves it with time-bounded
+// retention: a tombstone-creating operation's row is kept for
+// `tombstone_retention_secs` (default 30 days — server/src/config.rs,
+// enforced in server/src/sync/compaction.rs) past the delete before it's
+// eligible for permanent removal, on the theory that any legitimately
+// in-flight concurrent operation should have arrived by then. This mirrors
+// that exact value on the client: field_state for a deleted object is only
+// purged once at least this long has passed since the delete was recorded,
+// which should always be far longer than the server itself would still let
+// a genuinely concurrent operation through.
+const FIELD_STATE_GC_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, matching tombstone_retention_secs's default
+
+/**
+ * Purges `field_state` for every object whose "liveness" field has read
+ * "deleted" for at least `FIELD_STATE_GC_RETENTION_MS` — see the retention
+ * comment above for why this can never run immediately after a delete.
+ * Once an object clears that window, no further arbitration for *any* of
+ * its fields should be needed, so `deleteFieldStates` removes all of them,
+ * not just "liveness".
+ *
+ * "liveness" is the terminal marker written by bookmarks/index.ts (create/
+ * delete) and tabs/index.ts (window/tab/tabGroup create/close/delete) —
+ * historyVisit never writes a "liveness" field at all (visits are
+ * immutable and append-only, never LWW-merged; history/index.ts never
+ * calls putFieldState/resolveField), so it's naturally excluded here
+ * without needing a special case.
+ *
+ * The actual age filtering is `selectFieldStateGcCandidates` (storage/
+ * selectors.ts) — split out, like this module's other selectors, so it can
+ * be unit tested without a real IndexedDB. Loads the whole `field_state`
+ * store rather than scanning via an index: this only runs roughly once a
+ * day (background/index.ts's `runMaintenanceIfDue`) over a table that
+ * isn't large (one row per (object, field) pair, only for objects this
+ * device has ever seen), so a dedicated `recordedAt`/`value` index isn't
+ * worth paying its maintenance cost on every single field_state write.
+ */
+export async function gcFieldStates(): Promise<void> {
+  const db = await getDb();
+  const allRecords = await db.getAll("field_state");
+  const cutoffMs = Date.now() - FIELD_STATE_GC_RETENTION_MS;
+  const objectIds = selectFieldStateGcCandidates(allRecords, cutoffMs);
+  for (const objectId of objectIds) {
+    await deleteFieldStates(objectId);
+  }
 }
 
 /** Wipes all per-field provenance (docs/protocol.md §11 snapshot resync
