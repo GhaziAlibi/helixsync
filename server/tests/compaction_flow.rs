@@ -1081,3 +1081,89 @@ async fn concurrent_upload_is_not_blocked_by_compaction_delete_phase(pool: PgPoo
     assert_eq!(count_operations(&pool, user_id).await, 1);
     assert_eq!(count_snapshots(&pool, user_id).await, 1);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn prune_compacted_operations_tolerates_preexisting_temp_table_and_connection_reuse(pool: PgPool) {
+    let single_conn_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let state = state_for(single_conn_pool.clone());
+
+    let setup_server = server_for_state(state_for(pool.clone()));
+    register_and_login(&setup_server, "collision_test@example.com").await;
+    let (_device_id, token) = register_device(&setup_server, "collision_test@example.com", "TestDevice").await;
+    let user_id = user_id_for_email(&pool, "collision_test@example.com").await;
+
+    let object_id = Uuid::now_v7();
+    let op1 = bookmark_op(Uuid::now_v7(), object_id, 1, 1, "Bookmark 1");
+    let op2 = bookmark_op(Uuid::now_v7(), object_id, 2, 2, "Bookmark 2");
+    upload(&setup_server, &token, op1).await;
+    upload(&setup_server, &token, op2).await;
+
+    assert_eq!(count_operations(&pool, user_id).await, 2);
+
+    let op1_row_id: i64 = sqlx::query_scalar!(
+        "SELECT id FROM sync_operations WHERE user_id = $1 AND server_cursor = 1",
+        user_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+
+    // 1. Simulate an aborted/cancelled run that left the temporary table behind
+    // with a leftover survivor ID on this connection.
+    {
+        let mut conn = single_conn_pool.acquire().await.unwrap();
+        sqlx::query(
+            "CREATE TEMPORARY TABLE compaction_survivor_ids (id BIGINT PRIMARY KEY) ON COMMIT PRESERVE ROWS",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+
+        // Leftover survivor row: without TRUNCATE, op1 would not be pruned.
+        sqlx::query("INSERT INTO compaction_survivor_ids (id) VALUES ($1)")
+            .bind(op1_row_id)
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+
+    // Call prune_compacted_operations on the same connection.
+    // Thanks to CREATE TEMPORARY TABLE IF NOT EXISTS and TRUNCATE, this succeeds
+    // without SQLSTATE 42P07 and prunes op1 properly.
+    compaction::prune_compacted_operations(&state, user_id, 1)
+        .await
+        .expect("prune_compacted_operations must succeed when temporary table already exists");
+
+    assert_eq!(count_operations(&pool, user_id).await, 1);
+
+    // 2. Simulate running prune_compacted_operations a second time on the same connection
+    // where the table was again left behind without dropping (e.g. from an uncompleted run).
+    {
+        let mut conn = single_conn_pool.acquire().await.unwrap();
+        sqlx::query(
+            "CREATE TEMPORARY TABLE IF NOT EXISTS compaction_survivor_ids (id BIGINT PRIMARY KEY) ON COMMIT PRESERVE ROWS",
+        )
+        .execute(&mut *conn)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO compaction_survivor_ids (id) VALUES (999999)")
+            .execute(&mut *conn)
+            .await
+            .unwrap();
+    }
+
+    compaction::prune_compacted_operations(&state, user_id, 2)
+        .await
+        .expect("second call to prune_compacted_operations must succeed on same connection without dropping");
+
+    assert_eq!(count_operations(&pool, user_id).await, 0);
+
+    // 3. Running prune_compacted_operations once more after standard cleanup also succeeds
+    compaction::prune_compacted_operations(&state, user_id, 2)
+        .await
+        .expect("subsequent prune_compacted_operations call must succeed");
+}

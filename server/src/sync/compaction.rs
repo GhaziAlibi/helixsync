@@ -359,7 +359,7 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
 /// transactions rather than one, so no single transaction here ever holds
 /// locks for longer than one chunk's delete, and none of them touch
 /// `sync_stats` at all.
-async fn prune_compacted_operations(state: &AppState, user_id: Uuid, ack_boundary: i64) -> AppResult<()> {
+pub async fn prune_compacted_operations(state: &AppState, user_id: Uuid, ack_boundary: i64) -> AppResult<()> {
     // docs/protocol.md §9/§11: tombstone-creating operations additionally
     // wait out the configured retention window before their raw log row is
     // deleted. The tombstone's effect (`tombstones.active`, and the
@@ -467,9 +467,15 @@ async fn prune_compacted_operations(state: &AppState, user_id: Uuid, ack_boundar
     // connection, so it can never see a temp table a *previous* macro
     // invocation created — the exact same cross-connection-visibility issue
     // called out above, just at compile time instead of runtime. These
-    // three statements are simple enough that losing compile-time column
+    // statements are simple enough that losing compile-time column
     // verification isn't a meaningful cost.
-    sqlx::query("CREATE TEMPORARY TABLE compaction_survivor_ids (id BIGINT PRIMARY KEY) ON COMMIT PRESERVE ROWS")
+    sqlx::query(
+        "CREATE TEMPORARY TABLE IF NOT EXISTS compaction_survivor_ids (id BIGINT PRIMARY KEY) ON COMMIT PRESERVE ROWS",
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    sqlx::query("TRUNCATE compaction_survivor_ids")
         .execute(&mut *conn)
         .await?;
 
@@ -513,10 +519,9 @@ async fn prune_compacted_operations(state: &AppState, user_id: Uuid, ack_boundar
     .await;
 
     // Best-effort: the connection returning to the pool without this table
-    // dropped would only cause a (loud, immediate) "already exists" error
-    // the next time this same connection runs a prune pass, not silent
-    // corruption — but there's no reason to leave it behind when we can
-    // clean up now.
+    // dropped is tolerated on subsequent runs thanks to IF NOT EXISTS and
+    // TRUNCATE, but there's no reason to leave it behind when we can clean
+    // up now.
     let _ = sqlx::query("DROP TABLE IF EXISTS compaction_survivor_ids")
         .execute(&mut *conn)
         .await;

@@ -137,7 +137,7 @@ async function tabPayload(tab: chrome.tabs.Tab): Promise<TabPayload | undefined>
 // + one recordLocalFieldStatesBatch call. See bookmarks/index.ts's matching
 // section for the fuller rationale (same shared helper, same shape).
 
-type QueuedTabEvent =
+export type QueuedTabEvent =
   | { kind: "tabCreated"; tab: chrome.tabs.Tab }
   | { kind: "tabUpdated"; tabId: number; tab: chrome.tabs.Tab }
   | { kind: "tabActivated"; activeInfo: chrome.tabs.TabActiveInfo }
@@ -145,12 +145,34 @@ type QueuedTabEvent =
   | { kind: "groupUpdated"; group: chrome.tabGroups.TabGroup }
   | { kind: "groupRemoved"; group: chrome.tabGroups.TabGroup };
 
-interface StagedTabOp {
+export interface StagedTabOp {
   objectType: ObjectType;
   objectId: string;
   operationType: OperationType;
   payload: unknown;
   fields: Array<{ field: string; value: unknown }>;
+}
+
+// EXT-05: Trailing debounce for progressive document title changes during page
+// navigation. Web applications cycle through multiple title changes (loading,
+// site name, article title, notification badges) in quick succession; buffering
+// pure title updates prevents emitting redundant encrypted update operations.
+export const TAB_TITLE_DEBOUNCE_MS = 500;
+export const pendingTitleDebounce = new Map<number, ReturnType<typeof setTimeout>>();
+
+export function clearTitleDebounce(tabId: number): void {
+  const timer = pendingTitleDebounce.get(tabId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    pendingTitleDebounce.delete(tabId);
+  }
+}
+
+export function clearAllTitleDebounce(): void {
+  for (const timer of pendingTitleDebounce.values()) {
+    clearTimeout(timer);
+  }
+  pendingTitleDebounce.clear();
 }
 
 /** Per-flush overlay of field values staged earlier in the same batch but
@@ -241,6 +263,7 @@ async function stageTabActivated(
 }
 
 async function stageTabRemoved(tabId: number): Promise<StagedTabOp | null> {
+  clearTitleDebounce(tabId);
   const objectId = await lookupObjectId(TAB_TYPE, String(tabId));
   if (!objectId) return null;
   await forgetMapping(TAB_TYPE, String(tabId)); // immediate — see stageRemoved's note in bookmarks/index.ts
@@ -319,7 +342,35 @@ async function stageGroupRemoved(group: chrome.tabGroups.TabGroup): Promise<Stag
   };
 }
 
-async function flushTabEvents(events: QueuedTabEvent[]): Promise<void> {
+/** EXT-05: Coalesce multiple staged operations for the same `objectId` within a batch:
+ * - If multiple `update` operations for the same `objectId` are staged within the batch,
+ *   keep only the latest `update` operation.
+ * - If a `close` operation is staged for an `objectId`, discard any earlier `update`
+ *   operations for that `objectId` in the same batch.
+ */
+export function coalesceStagedOps(staged: StagedTabOp[]): StagedTabOp[] {
+  const result: StagedTabOp[] = [];
+  const discardEarlierUpdate = new Set<string>();
+
+  for (let i = staged.length - 1; i >= 0; i--) {
+    const op = staged[i];
+    if (op.operationType === "close") {
+      discardEarlierUpdate.add(op.objectId);
+      result.push(op);
+    } else if (op.operationType === "update") {
+      if (!discardEarlierUpdate.has(op.objectId)) {
+        discardEarlierUpdate.add(op.objectId);
+        result.push(op);
+      }
+    } else {
+      result.push(op);
+    }
+  }
+
+  return result.reverse();
+}
+
+export async function flushTabEvents(events: QueuedTabEvent[]): Promise<void> {
   const overlay = new Map<string, unknown>();
   const staged: StagedTabOp[] = [];
 
@@ -356,7 +407,13 @@ async function flushTabEvents(events: QueuedTabEvent[]): Promise<void> {
   }
   if (staged.length === 0) return;
 
-  const pending: PendingLocalOperation[] = staged.map((op) => ({
+  // EXT-05: Coalesce staged ops within the batch: keep only the latest
+  // "update" operation for a given objectId, and discard any earlier "update"
+  // operations if a "close" operation is staged for the same objectId.
+  const coalesced = coalesceStagedOps(staged);
+  if (coalesced.length === 0) return;
+
+  const pending: PendingLocalOperation[] = coalesced.map((op) => ({
     objectType: op.objectType,
     objectId: op.objectId,
     operationType: op.operationType,
@@ -369,7 +426,7 @@ async function flushTabEvents(events: QueuedTabEvent[]): Promise<void> {
 
   const fieldStateEntries: LocalFieldStateEntry[] = [];
   created.forEach(({ operation, deviceId }, idx) => {
-    const op = staged[idx];
+    const op = coalesced[idx];
     const key = opKey(operation.lamportTimestamp, deviceId, operation.operationId, op.operationType);
     for (const f of op.fields) {
       fieldStateEntries.push({ objectId: op.objectId, field: f.field, key, value: f.value });
@@ -387,13 +444,61 @@ async function flushTabEvents(events: QueuedTabEvent[]): Promise<void> {
   // written to pending_operations above, so they go out on the next regular
   // alarm/push like any other op; a batch with any non-"activate" op still
   // triggers the immediate sync as before.
-  const hasNonActivateOp = staged.some((op) => op.operationType !== "activate");
+  const hasNonActivateOp = coalesced.some((op) => op.operationType !== "activate");
   if (hasNonActivateOp) scheduleLocalSync();
 }
 
-const enqueueTabEvent = createMicroBatchQueue<QueuedTabEvent>(flushTabEvents);
+export const enqueueTabEvent = createMicroBatchQueue<QueuedTabEvent>(flushTabEvents);
+
+export function handleTabUpdated(
+  tabId: number,
+  changeInfo: chrome.tabs.TabChangeInfo,
+  tab: chrome.tabs.Tab,
+  enqueue: (event: QueuedTabEvent) => void = enqueueTabEvent,
+): void {
+  if (
+    changeInfo.url === undefined &&
+    changeInfo.title === undefined &&
+    changeInfo.pinned === undefined &&
+    changeInfo.groupId === undefined
+  ) {
+    return;
+  }
+  if (guard.isSuppressed()) return;
+
+  const isPureTitle =
+    changeInfo.title !== undefined &&
+    changeInfo.url === undefined &&
+    changeInfo.pinned === undefined &&
+    changeInfo.groupId === undefined;
+
+  clearTitleDebounce(tabId);
+
+  if (isPureTitle) {
+    const timer = setTimeout(() => {
+      pendingTitleDebounce.delete(tabId);
+      enqueue({ kind: "tabUpdated", tabId, tab });
+    }, TAB_TITLE_DEBOUNCE_MS);
+    pendingTitleDebounce.set(tabId, timer);
+  } else {
+    enqueue({ kind: "tabUpdated", tabId, tab });
+  }
+}
+
+export function handleTabRemoved(
+  tabId: number,
+  enqueue: (event: QueuedTabEvent) => void = enqueueTabEvent,
+): void {
+  clearTitleDebounce(tabId);
+  enqueue({ kind: "tabRemoved", tabId });
+}
 
 let captureRegistered = false;
+
+export function resetCaptureStateForTesting(): void {
+  captureRegistered = false;
+  clearAllTitleDebounce();
+}
 
 export function registerCapture(): void {
   // See the matching guard in bookmarks/index.ts::registerCapture — called
@@ -430,23 +535,18 @@ export function registerCapture(): void {
   // handler, each paying ~6 IndexedDB transactions (mapping lookup,
   // sequence, lamport, encrypt, enqueue, field-state) for what was usually
   // a byte-identical payload.
+  //
+  // EXT-05: Web apps progressively update document.title during navigation.
+  // We apply a per-tab trailing debounce (TAB_TITLE_DEBOUNCE_MS) for pure title
+  // updates to prevent intermediate titles from triggering redundant operations.
   chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (
-      changeInfo.url === undefined &&
-      changeInfo.title === undefined &&
-      changeInfo.pinned === undefined &&
-      changeInfo.groupId === undefined
-    ) {
-      return;
-    }
-    if (guard.isSuppressed()) return;
-    enqueueTabEvent({ kind: "tabUpdated", tabId, tab });
+    handleTabUpdated(tabId, changeInfo, tab);
   });
   chrome.tabs.onActivated.addListener((info) => {
     enqueueTabEvent({ kind: "tabActivated", activeInfo: info });
   });
   chrome.tabs.onRemoved.addListener((tabId) => {
-    enqueueTabEvent({ kind: "tabRemoved", tabId });
+    handleTabRemoved(tabId);
   });
 
   if (tabGroupsSupported) {

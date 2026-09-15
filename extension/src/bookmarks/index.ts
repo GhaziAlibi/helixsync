@@ -87,51 +87,6 @@ async function chromiumIdsFor(objectIds: string[]): Promise<Map<string, string>>
   return result;
 }
 
-async function positionOf(objectId: string): Promise<string | undefined> {
-  const state = await getFieldState(objectId, "move");
-  return (state?.value as { position?: string } | undefined)?.position;
-}
-
-async function computePosition(parentChromiumId: string, index: number): Promise<string> {
-  const siblings = await chrome.bookmarks.getChildren(parentChromiumId);
-  const beforeId = siblings[index - 1]?.id;
-  const afterId = siblings[index + 1]?.id;
-  const lo = beforeId ? ((await positionOf(await objectIdFor(beforeId))) ?? null) : null;
-  const hi = afterId ? ((await positionOf(await objectIdFor(afterId))) ?? null) : null;
-  return keyBetween(lo, hi);
-}
-
-function opKey(lamportTimestamp: number, deviceId: string, operationId: string, operationType: OperationType) {
-  return { lamportTimestamp, deviceId, operationId, operationType };
-}
-
-// --- Local capture: browser event -> operation --------------------------
-//
-// EXT-4: a burst of chrome.bookmarks events (e.g. dragging a 100-child
-// folder, which fires one onMoved per child) used to pay createLocalOperation
-// + recordLocalFieldState's full WebCrypto/lamport/IndexedDB overhead once
-// per event. Listeners below now do only the synchronous guard check (see
-// the module-level comment on `guard` — this MUST stay synchronous, at
-// event-fire time, or the suppression window closes before it's checked)
-// and push the rest of the work onto a shared micro-batch queue
-// (sync/micro-batch.ts); `flushBookmarkEvents` then turns the whole queue
-// into one createLocalOperationsBatch + one recordLocalFieldStatesBatch
-// call, the same batch primitives EXT-1's backfill uses.
-
-type QueuedBookmarkEvent =
-  | { kind: "created"; id: string; node: chrome.bookmarks.BookmarkTreeNode }
-  | { kind: "removed"; id: string; removeInfo: chrome.bookmarks.BookmarkRemoveInfo }
-  | { kind: "changed"; id: string; changeInfo: chrome.bookmarks.BookmarkChangeInfo }
-  | { kind: "moved"; id: string; moveInfo: chrome.bookmarks.BookmarkMoveInfo };
-
-interface StagedBookmarkOp {
-  objectType: ObjectType;
-  objectId: string;
-  operationType: OperationType;
-  payload: unknown;
-  fields: Array<{ field: string; value: unknown }>;
-}
-
 /** Per-flush overlay of field values staged earlier in the *same* batch but
  * not yet committed to IndexedDB (the actual write happens once, after the
  * whole queue is processed — see `flushBookmarkEvents`). Every
@@ -153,20 +108,78 @@ async function overlayOrFieldState(
   return (await getFieldState(objectId, field))?.value;
 }
 
+export async function positionOf(objectId: string, overlay?: Map<string, unknown>): Promise<string | undefined> {
+  if (overlay) {
+    const state = (await overlayOrFieldState(overlay, objectId, "move")) as { position?: string } | undefined;
+    if (state?.position !== undefined) return state.position;
+  }
+  const state = await getFieldState(objectId, "move");
+  return (state?.value as { position?: string } | undefined)?.position;
+}
+
+export async function computePosition(
+  parentChromiumId: string,
+  index: number,
+  overlay?: Map<string, unknown>,
+  siblingCache?: Map<string, chrome.bookmarks.BookmarkTreeNode[]>,
+): Promise<string> {
+  let siblings = siblingCache?.get(parentChromiumId);
+  if (!siblings) {
+    siblings = await chrome.bookmarks.getChildren(parentChromiumId);
+    siblingCache?.set(parentChromiumId, siblings);
+  }
+  const beforeId = siblings[index - 1]?.id;
+  const afterId = siblings[index + 1]?.id;
+  const lo = beforeId ? ((await positionOf(await objectIdFor(beforeId), overlay)) ?? null) : null;
+  const hi = afterId ? ((await positionOf(await objectIdFor(afterId), overlay)) ?? null) : null;
+  return keyBetween(lo, hi);
+}
+
+function opKey(lamportTimestamp: number, deviceId: string, operationId: string, operationType: OperationType) {
+  return { lamportTimestamp, deviceId, operationId, operationType };
+}
+
+// --- Local capture: browser event -> operation --------------------------
+//
+// EXT-4: a burst of chrome.bookmarks events (e.g. dragging a 100-child
+// folder, which fires one onMoved per child) used to pay createLocalOperation
+// + recordLocalFieldState's full WebCrypto/lamport/IndexedDB overhead once
+// per event. Listeners below now do only the synchronous guard check (see
+// the module-level comment on `guard` — this MUST stay synchronous, at
+// event-fire time, or the suppression window closes before it's checked)
+// and push the rest of the work onto a shared micro-batch queue
+// (sync/micro-batch.ts); `flushBookmarkEvents` then turns the whole queue
+// into one createLocalOperationsBatch + one recordLocalFieldStatesBatch
+// call, the same batch primitives EXT-1's backfill uses.
+
+export type QueuedBookmarkEvent =
+  | { kind: "created"; id: string; node: chrome.bookmarks.BookmarkTreeNode }
+  | { kind: "removed"; id: string; removeInfo: chrome.bookmarks.BookmarkRemoveInfo }
+  | { kind: "changed"; id: string; changeInfo: chrome.bookmarks.BookmarkChangeInfo }
+  | { kind: "moved"; id: string; moveInfo: chrome.bookmarks.BookmarkMoveInfo };
+
+interface StagedBookmarkOp {
+  objectType: ObjectType;
+  objectId: string;
+  operationType: OperationType;
+  payload: unknown;
+  fields: Array<{ field: string; value: unknown }>;
+}
+
 async function stageCreated(
   id: string,
   node: chrome.bookmarks.BookmarkTreeNode,
   overlay: Map<string, unknown>,
+  siblingCache?: Map<string, chrome.bookmarks.BookmarkTreeNode[]>,
 ): Promise<StagedBookmarkOp> {
   const objectId = await getOrCreateObjectId(MAP_TYPE, id);
   const objectType: ObjectType = node.url ? "bookmark" : "bookmarkFolder";
   const parentObjectId = node.parentId ? await objectIdFor(node.parentId) : null;
-  // computePosition still hits chrome.bookmarks.getChildren + IndexedDB
-  // live, per event — necessary for live capture (no pre-fetched tree like
-  // EXT-1's backfill had) and not the bottleneck this finding targets, so
-  // left as-is rather than force-batched (see EXT-4 task notes).
+  // EXT-03: computePosition reuses siblingCache across the batch and checks
+  // overlay when resolving sibling positions so sequential inserts don't
+  // degrade position keys or re-query Chrome IPC.
   const position = node.parentId
-    ? await computePosition(node.parentId, node.index ?? 0)
+    ? await computePosition(node.parentId, node.index ?? 0, overlay, siblingCache)
     : keyBetween(null, null);
 
   const payload: BookmarkPayload = {
@@ -256,6 +269,7 @@ async function stageMoved(
   id: string,
   moveInfo: chrome.bookmarks.BookmarkMoveInfo,
   overlay: Map<string, unknown>,
+  siblingCache?: Map<string, chrome.bookmarks.BookmarkTreeNode[]>,
 ): Promise<StagedBookmarkOp | null> {
   const objectId = await lookupObjectId(MAP_TYPE, id);
   if (!objectId) return null;
@@ -263,7 +277,7 @@ async function stageMoved(
   const objectType: ObjectType = node.url ? "bookmark" : "bookmarkFolder";
 
   const parentObjectId = await objectIdFor(moveInfo.parentId);
-  const position = await computePosition(moveInfo.parentId, moveInfo.index);
+  const position = await computePosition(moveInfo.parentId, moveInfo.index, overlay, siblingCache);
   const payload = { parent: parentObjectId, position };
 
   // Defense in depth alongside the guard above (see stageChanged) — reads
@@ -286,8 +300,9 @@ async function stageMoved(
   };
 }
 
-async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promise<void> {
+export async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promise<void> {
   const overlay = new Map<string, unknown>();
+  const siblingCache = new Map<string, chrome.bookmarks.BookmarkTreeNode[]>();
   const staged: StagedBookmarkOp[] = [];
 
   for (const event of events) {
@@ -295,7 +310,7 @@ async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promise<void>
       let op: StagedBookmarkOp | null;
       switch (event.kind) {
         case "created":
-          op = await stageCreated(event.id, event.node, overlay);
+          op = await stageCreated(event.id, event.node, overlay, siblingCache);
           break;
         case "removed":
           op = await stageRemoved(event.id, event.removeInfo);
@@ -304,7 +319,7 @@ async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promise<void>
           op = await stageChanged(event.id, event.changeInfo, overlay);
           break;
         case "moved":
-          op = await stageMoved(event.id, event.moveInfo, overlay);
+          op = await stageMoved(event.id, event.moveInfo, overlay, siblingCache);
           break;
       }
       if (op) staged.push(op);

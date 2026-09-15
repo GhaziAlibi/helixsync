@@ -11,7 +11,10 @@ use crate::auth::extractors::CsrfProtectedUser;
 use crate::crypto::{generate_opaque_token, hash_token, verify_password_async};
 use crate::error::{AppError, AppResult};
 use crate::middleware::client_ip::client_ip;
-use crate::middleware::rate_limit::{enforce, DEVICE_REGISTER_LIMIT, TOKEN_REFRESH_IP_LIMIT, TOKEN_REFRESH_LIMIT};
+use crate::middleware::rate_limit::{
+    enforce, DEVICE_REGISTER_LIMIT, TOKEN_REFRESH_AUTHENTICATED_LIMIT, TOKEN_REFRESH_IP_LIMIT,
+    TOKEN_REFRESH_LIMIT,
+};
 use crate::state::AppState;
 
 use super::model::DevicePublic;
@@ -183,8 +186,8 @@ struct RefreshResponse {
 ///   actual credential being presented (so one stolen/guessed token can't
 ///   be hammered regardless of what IP it's hammered from).
 /// - Below, after `cred` is looked up and confirmed not device-revoked but
-///   *before* it's revoked/rotated, the same `TOKEN_REFRESH_LIMIT` is
-///   enforced again, this time keyed by `cred.device_id` — the actual,
+///   *before* it's revoked/rotated, `TOKEN_REFRESH_AUTHENTICATED_LIMIT` is
+///   enforced, this time keyed by `cred.device_id` — the actual,
 ///   rotation-invariant identity being refreshed. `device_id` never changes
 ///   across rotations, so this is what actually bounds a rapid
 ///   successful-refresh loop against one real device's credentials,
@@ -221,7 +224,7 @@ async fn refresh_credentials(
         return Err(AppError::Unauthorized);
     }
 
-    enforce(&state.rate_limiter, TOKEN_REFRESH_LIMIT, &cred.device_id.to_string())?;
+    enforce(&state.rate_limiter, TOKEN_REFRESH_AUTHENTICATED_LIMIT, &cred.device_id.to_string())?;
 
     sqlx::query!(
         "UPDATE device_credentials SET revoked_at = now(), last_used_at = now() WHERE id = $1",

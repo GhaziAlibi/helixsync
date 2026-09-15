@@ -82,6 +82,9 @@ export async function refreshAccessToken(serverUrl: string): Promise<string> {
       });
 
       if (!res.ok) {
+        if (res.status === 429 || res.status >= 500) {
+          throw await buildApiError(res, `refresh failed with status ${res.status}`);
+        }
         throw new ReauthRequiredError(`refresh failed with status ${res.status}`);
       }
 

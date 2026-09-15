@@ -498,4 +498,25 @@ mod tests {
         assert!(limiter.check(RateLimitPartition::Authenticated, "test", "new-authenticated-key", 1000, window));
         assert!(limiter.authenticated_windows.len() == 1);
     }
+
+    #[test]
+    fn token_refresh_authenticated_limit_uses_authenticated_partition() {
+        let limiter = RateLimiter::new();
+        assert_eq!(TOKEN_REFRESH_AUTHENTICATED_LIMIT.partition, RateLimitPartition::Authenticated);
+        assert_eq!(TOKEN_REFRESH_AUTHENTICATED_LIMIT.bucket, "token_refresh");
+
+        // When untrusted partition is saturated, TOKEN_REFRESH_AUTHENTICATED_LIMIT is still accepted
+        for i in 0..MAX_UNTRUSTED_ENTRIES {
+            let key = format!("filler-{i}");
+            enforce(&limiter, TOKEN_REFRESH_LIMIT, &key).unwrap();
+        }
+        assert!(limiter.untrusted_windows.len() >= MAX_UNTRUSTED_ENTRIES);
+
+        // A new untrusted key is rejected
+        assert!(enforce(&limiter, TOKEN_REFRESH_LIMIT, "new-token-hash").is_err());
+
+        // An authenticated device refresh check succeeds
+        assert!(enforce(&limiter, TOKEN_REFRESH_AUTHENTICATED_LIMIT, "device-uuid-123").is_ok());
+        assert!(limiter.authenticated_windows.contains_key(&("token_refresh", "device-uuid-123".to_string())));
+    }
 }

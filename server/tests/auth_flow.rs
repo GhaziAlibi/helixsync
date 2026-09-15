@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use axum_test::{TestServer, TestServerConfig, Transport};
 use helixsync_server::config::Config;
-use helixsync_server::middleware::rate_limit::RateLimiter;
+use helixsync_server::middleware::rate_limit::{
+    RateLimitPartition, RateLimiter, TOKEN_REFRESH_IP_LIMIT, TOKEN_REFRESH_LIMIT,
+};
 use helixsync_server::state::AppState;
 use helixsync_server::websocket::ConnectionRegistry;
 use serde_json::json;
@@ -152,7 +154,7 @@ async fn register_device(server: &TestServer, email: &str, name: &str) -> (Strin
 /// matter how many, since a hash-keyed bucket alone can never fire against
 /// distinct, never-repeated tokens. With the fix, the device-id-keyed
 /// bucket (rotation-invariant) still accumulates across calls and must
-/// trip once `TOKEN_REFRESH_LIMIT`'s 30/60s limit is exceeded.
+/// trip once `TOKEN_REFRESH_AUTHENTICATED_LIMIT`'s 30/60s limit is exceeded.
 #[sqlx::test(migrations = "./migrations")]
 async fn rapid_token_rotation_is_rate_limited_by_device_not_by_hash(pool: PgPool) {
     let mut config = test_config();
@@ -225,3 +227,85 @@ async fn refresh_credentials_is_rate_limited_by_ip_even_with_random_tokens(pool:
          from the same IP must be tripped by the IP-level rate limit"
     );
 }
+
+/// SRV-01 regression: `/api/v1/devices/credentials/refresh` validates the
+/// device identity after looking up the credential in the database and must
+/// enforce rate limiting under `TOKEN_REFRESH_AUTHENTICATED_LIMIT`
+/// (in `RateLimitPartition::Authenticated`). When an attacker floods the
+/// untrusted partition to capacity (25,000 entries), an authenticated
+/// device must still be able to refresh its credentials.
+#[sqlx::test(migrations = "./migrations")]
+async fn saturated_untrusted_partition_does_not_block_authenticated_device_refresh(pool: PgPool) {
+    let mut config = test_config();
+    config.behind_proxy = true;
+    let rate_limiter = Arc::new(RateLimiter::new());
+    let state = AppState {
+        db: pool,
+        config: Arc::new(config),
+        rate_limiter: Arc::clone(&rate_limiter),
+        ws_registry: Arc::new(ConnectionRegistry::new()),
+        last_seen_cache: Arc::new(dashmap::DashMap::new()),
+        device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+    };
+    let test_server_config = TestServerConfig {
+        transport: Some(Transport::HttpRandomPort),
+        save_cookies: true,
+        ..Default::default()
+    };
+    let make_service = helixsync_server::app(state)
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let server = TestServer::new_with_config(make_service, test_server_config).unwrap();
+
+    let register_res = server
+        .post("/api/v1/auth/register")
+        .json(&json!({ "email": "jack@example.com", "password": "correct horse battery staple" }))
+        .await;
+    register_res.assert_status_ok();
+
+    let (_device_id, refresh_token) =
+        register_device(&server, "jack@example.com", "Laptop").await;
+
+    let client_ip = "198.51.100.42";
+    let token_hash = helixsync_server::crypto::hash_token(&refresh_token);
+
+    // Warm the untrusted partition for the IP and token hash before saturating it,
+    // simulating an already active connection/token.
+    helixsync_server::middleware::rate_limit::enforce(
+        &rate_limiter,
+        TOKEN_REFRESH_IP_LIMIT,
+        client_ip,
+    )
+    .unwrap();
+    helixsync_server::middleware::rate_limit::enforce(
+        &rate_limiter,
+        TOKEN_REFRESH_LIMIT,
+        &token_hash,
+    )
+    .unwrap();
+
+    // Now saturate the untrusted partition to capacity (25,000 entries)
+    let window = std::time::Duration::from_secs(60);
+    for i in 0..25_000 {
+        rate_limiter.check(
+            RateLimitPartition::Untrusted,
+            "flood",
+            &format!("flood-{i}"),
+            1000,
+            window,
+        );
+    }
+
+    // Attempting a refresh with valid credentials must succeed because
+    // cred.device_id is checked in the Authenticated partition.
+    let res = server
+        .post("/api/v1/devices/credentials/refresh")
+        .add_header("x-forwarded-for", client_ip)
+        .json(&json!({ "refreshToken": refresh_token }))
+        .await;
+
+    res.assert_status_ok();
+    let body: serde_json::Value = res.json();
+    assert!(body["accessToken"].is_string());
+    assert!(body["refreshToken"].is_string());
+}
+

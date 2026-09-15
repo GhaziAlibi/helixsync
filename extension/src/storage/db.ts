@@ -1,5 +1,6 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 import type { HistoryVisitPayload, LocalOperation, ObjectType } from "../sync/types";
+import { yieldToEventLoop } from "../util/yield";
 import {
   isPendingTabRestore,
   selectFieldStateGcCandidates,
@@ -178,7 +179,7 @@ export interface HelixSyncDB extends DBSchema {
     indexes: {
       "by-type": ObjectType;
       "by-type-updated": [ObjectType, string];
-      "by-type-deleted": [ObjectType, boolean];
+      "by-type-deleted": [ObjectType, any];
     };
   };
   deferred_materializations: {
@@ -818,6 +819,17 @@ export async function getRemoteObjectsByType(objectType: ObjectType): Promise<Re
   return (await getDb()).getAllFromIndex("remote_objects", "by-type", objectType);
 }
 
+/** Returns non-deleted remote objects of the given type, querying the compound
+ * `by-type-deleted` index to bypass tombstones at the IndexedDB level rather
+ * than loading and deserializing them into memory. */
+export async function getActiveRemoteObjectsByType(objectType: ObjectType): Promise<RemoteObjectRecord[]> {
+  return (await getDb()).getAllFromIndex(
+    "remote_objects",
+    "by-type-deleted",
+    IDBKeyRange.only([objectType, false]),
+  );
+}
+
 /** Walks the `by-type-updated` index newest-first, bounded to `maxCount`
  * rows, instead of loading every "historyVisit" row in the store (which —
  * unlike bookmarks/tabs — never shrinks, since visits are never
@@ -889,11 +901,14 @@ export async function pruneRemoteObjectsByType(objectType: ObjectType, maxCount:
 }
 
 /** Remote tabs tracked for display but not yet restored as a real local
- * browser tab — see `selectPendingTabRestores` for the filtering rule. */
+ * browser tab — see `selectPendingTabRestores` for the filtering rule.
+ * Uses `getActiveRemoteObjectsByType("tab")` to query the compound
+ * `by-type-deleted` index with `["tab", false]`, bypassing tombstones at the
+ * IndexedDB level instead of loading all closed tab tombstones into memory. */
 export async function getPendingTabRestores(): Promise<PendingTabRestore[]> {
   const db = await getDb();
   const [records, tabMappings] = await Promise.all([
-    getRemoteObjectsByType("tab"),
+    getActiveRemoteObjectsByType("tab"),
     db.getAllFromIndex("object_mappings", "by-type", "tab"),
   ]);
   const materializedObjectIds = new Set(tabMappings.map((m) => m.objectId));
@@ -902,17 +917,13 @@ export async function getPendingTabRestores(): Promise<PendingTabRestore[]> {
 
 /** Same count as `(await getPendingTabRestores()).length`, for callers that
  * only need the number of pending tab restores (`updateBadge`,
- * background/index.ts) — not the records themselves. `getPendingTabRestores`
- * gets there via `getRemoteObjectsByType`'s `getAllFromIndex`, which
- * deserializes and materializes *every* "tab" `remote_objects` row (payload
- * included) into one array purely to read `.length` off the end result;
- * on an account with a lot of synced tabs, `updateBadge` re-pays that full
- * cost every sync cycle and every WebSocket push just to set the toolbar
- * badge text. This instead walks only the live-tab portion of the
- * `by-type-deleted` index via a cursor, applying `isPendingTabRestore` (the
- * exact same per-record predicate `selectPendingTabRestores` filters with)
- * one row at a time — so it skips retained tombstones and never holds more
- * than one record's deserialized payload in memory at once. */
+ * background/index.ts) — not the records themselves. Both this and
+ * `getPendingTabRestores` query only the live-tab portion of the
+ * `by-type-deleted` index to skip retained tombstones at the storage layer;
+ * this count variant walks a cursor applying `isPendingTabRestore` one row
+ * at a time so it never holds more than one record's deserialized payload
+ * in memory at once (whereas `getPendingTabRestores` materializes the array
+ * of live records for the UI to render). */
 export async function countPendingTabRestores(): Promise<number> {
   const db = await getDb();
   const [tabMappings, cursor] = await Promise.all([
@@ -1055,21 +1066,30 @@ export async function gcFieldStates(): Promise<void> {
   const db = await getDb();
   const cutoffMs = Date.now() - FIELD_STATE_GC_RETENTION_MS;
 
-  // Scan phase: bounded cursor walk, `selectFieldStateGcCandidates` called
-  // per chunk rather than once over the whole store.
+  // Scan phase: bounded cursor walk in chunked read transactions, yielding
+  // to the event loop between chunks so large stores don't monopolize the thread.
   const objectIds = new Set<string>();
-  let scanCursor = await db.transaction("field_state").store.openCursor();
-  let scanChunk: FieldStateRecord[] = [];
-  while (scanCursor) {
-    scanChunk.push(scanCursor.value);
-    if (scanChunk.length >= MAINTENANCE_DELETE_CHUNK) {
-      for (const id of selectFieldStateGcCandidates(scanChunk, cutoffMs)) objectIds.add(id);
-      scanChunk = [];
+  let lastSeenKey: string | undefined;
+  for (;;) {
+    const tx = db.transaction("field_state", "readonly");
+    const range = lastSeenKey !== undefined ? IDBKeyRange.lowerBound(lastSeenKey, true) : undefined;
+    let scanCursor = await tx.store.openCursor(range);
+    const scanChunk: FieldStateRecord[] = [];
+    while (scanCursor && scanChunk.length < MAINTENANCE_DELETE_CHUNK) {
+      scanChunk.push(scanCursor.value);
+      lastSeenKey = scanCursor.value.key;
+      scanCursor = await scanCursor.continue();
     }
-    scanCursor = await scanCursor.continue();
-  }
-  if (scanChunk.length > 0) {
-    for (const id of selectFieldStateGcCandidates(scanChunk, cutoffMs)) objectIds.add(id);
+    await tx.done;
+
+    for (const id of selectFieldStateGcCandidates(scanChunk, cutoffMs)) {
+      objectIds.add(id);
+    }
+
+    if (scanChunk.length < MAINTENANCE_DELETE_CHUNK) {
+      break;
+    }
+    await yieldToEventLoop();
   }
   if (objectIds.size === 0) return;
 
@@ -1090,6 +1110,7 @@ export async function gcFieldStates(): Promise<void> {
     }
     await tx.done;
     deleteBatch = [];
+    await yieldToEventLoop();
   };
   for (const objectId of objectIds) {
     deleteBatch.push(objectId);

@@ -172,3 +172,109 @@ describe("fetchSettings caching (EXT-5, review.md)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("refreshAccessToken (EXT-01)", () => {
+  it("throws ApiError with status 429 and parses Retry-After header without throwing ReauthRequiredError", async () => {
+    const { refreshAccessToken, ApiError, ReauthRequiredError } = await import("./client");
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: "RATE_LIMITED", message: "Too many requests" }), {
+        status: 429,
+        headers: {
+          "Content-Type": "application/json",
+          "Retry-After": "45",
+        },
+      })
+    );
+
+    let error: unknown;
+    try {
+      await refreshAccessToken("https://example.test");
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).not.toBeInstanceOf(ReauthRequiredError);
+    const apiErr = error as InstanceType<typeof ApiError>;
+    expect(apiErr.status).toBe(429);
+    expect(apiErr.code).toBe("RATE_LIMITED");
+    expect(apiErr.message).toBe("Too many requests");
+    expect(apiErr.retryAfterSeconds).toBe(45);
+  });
+
+  it("throws ApiError with status 429 when Retry-After is absent", async () => {
+    const { refreshAccessToken, ApiError, ReauthRequiredError } = await import("./client");
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({}), {
+        status: 429,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+
+    let error: unknown;
+    try {
+      await refreshAccessToken("https://example.test");
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).not.toBeInstanceOf(ReauthRequiredError);
+    const apiErr = error as InstanceType<typeof ApiError>;
+    expect(apiErr.status).toBe(429);
+    expect(apiErr.retryAfterSeconds).toBeUndefined();
+    expect(apiErr.message).toBe("refresh failed with status 429");
+  });
+
+  it.each([500, 503])(
+    "throws ApiError with status %i on transient server errors without throwing ReauthRequiredError",
+    async (status) => {
+      const { refreshAccessToken, ApiError, ReauthRequiredError } = await import("./client");
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: `server down with ${status}` }), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+
+      let error: unknown;
+      try {
+        await refreshAccessToken("https://example.test");
+      } catch (err) {
+        error = err;
+      }
+
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error).not.toBeInstanceOf(ReauthRequiredError);
+      const apiErr = error as InstanceType<typeof ApiError>;
+      expect(apiErr.status).toBe(status);
+      expect(apiErr.message).toBe(`server down with ${status}`);
+    }
+  );
+
+  it.each([401, 403])(
+    "throws ReauthRequiredError on HTTP %i authentication failure",
+    async (status) => {
+      const { refreshAccessToken, ApiError, ReauthRequiredError } = await import("./client");
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: "UNAUTHORIZED", message: "Token revoked" }), {
+          status,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+
+      let error: unknown;
+      try {
+        await refreshAccessToken("https://example.test");
+      } catch (err) {
+        error = err;
+      }
+
+      expect(error).toBeInstanceOf(ReauthRequiredError);
+      expect(error).not.toBeInstanceOf(ApiError);
+      const reauthErr = error as InstanceType<typeof ReauthRequiredError>;
+      expect(reauthErr.message).toBe(`refresh failed with status ${status}`);
+    }
+  );
+});
+

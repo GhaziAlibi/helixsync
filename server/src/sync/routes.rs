@@ -1394,25 +1394,21 @@ async fn stats(
 
     enforce(&state.rate_limiter, SYNC_STATS_LIMIT, &user.user_id.to_string())?;
 
-    let mut tx = state.db.begin().await?;
-
     let row = sqlx::query!(
         "SELECT bookmark_count, history_visit_count, tab_count FROM sync_stats WHERE user_id = $1",
         user.user_id
     )
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&state.db)
     .await?;
 
     let stats = match row {
-        Some(r) => {
-            tx.commit().await?;
-            SyncStats {
-                bookmarks: r.bookmark_count as i64,
-                history_visits: r.history_visit_count as i64,
-                tabs: r.tab_count as i64,
-            }
-        }
+        Some(r) => SyncStats {
+            bookmarks: r.bookmark_count as i64,
+            history_visits: r.history_visit_count as i64,
+            tabs: r.tab_count as i64,
+        },
         None => {
+            let mut tx = state.db.begin().await?;
             // Lazy backfill path — see doc comment above. Unchanged from
             // the original always-on computation, plus the trailing
             // `INSERT ... ON CONFLICT DO NOTHING` that makes this a
