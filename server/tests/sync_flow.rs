@@ -45,6 +45,7 @@ fn state_for_config(pool: PgPool, config: Config) -> AppState {
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
         device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
     }
 }
 
@@ -474,6 +475,30 @@ async fn batch_upload_returns_mixed_accepted_duplicate_and_rejected(pool: PgPool
     assert_eq!(rejected[0]["reason"], "unknown_object_type");
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn batch_upload_rejects_payload_too_large(pool: PgPool) {
+    let server = server_for(pool);
+    register_and_login(&server, "oversize@example.com").await;
+    let (_device_id, access_token) = register_device(&server, "oversize@example.com", "Laptop").await;
+
+    let mut oversize_op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
+    // MAX_PAYLOAD_BYTES is 256 * 1024 = 262144 bytes.
+    let big_string = "a".repeat(256 * 1024 + 1);
+    oversize_op["payload"] = json!({ "content": big_string });
+
+    let res = server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&access_token)
+        .json(&json!({ "operations": [oversize_op] }))
+        .await;
+    res.assert_status_ok();
+    let body: serde_json::Value = res.json();
+    assert_eq!(body["accepted"].as_array().unwrap().len(), 0);
+    let rejected = body["rejected"].as_array().unwrap();
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0]["reason"], "payload_too_large");
+}
+
 fn history_visit_op(op_id: Uuid, object_id: Uuid, seq: i64, url: &str) -> serde_json::Value {
     json!({
         "operationId": op_id,
@@ -688,6 +713,7 @@ async fn sync_stats_rate_limit_is_independent_per_device(pool: PgPool) {
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
         device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
     };
     let server = server_for_state(state);
     register_and_login(&server, "priya-two-devices-stats@example.com").await;

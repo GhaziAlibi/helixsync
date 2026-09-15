@@ -5,11 +5,13 @@ use sqlx::PgPool;
 
 use crate::config::Config;
 
-/// How long a request waits for a free connection before giving up. Short
-/// and fixed (rather than sqlx's 30s default) so pool contention under load
-/// surfaces as a fast, explicit error instead of a request hanging near — or
-/// past — a reverse proxy's own timeout.
-const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a request waits for a free connection before giving up.
+/// Previously set to 3s, which was too aggressive under burst traffic and
+/// concurrent background compaction sweeps (e.g. snapshot downloads and multi-device
+/// sync batches), causing transient checkout timeouts and 500 errors. 15s provides
+/// sufficient resilience to ride out temporary pool contention while still failing fast
+/// well before reverse proxy timeouts (typically 30-60s).
+const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Recycle connections that have sat idle this long, so the pool shrinks
 /// back down after a burst of background work instead of holding open

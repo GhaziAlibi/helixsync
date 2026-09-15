@@ -67,12 +67,14 @@ pub async fn create_session(
 
 pub async fn revoke_session(state: &AppState, raw_token: &str) -> anyhow::Result<()> {
     let session_hash = hash_token(raw_token);
+    state.web_session_cache.remove(&session_hash);
     sqlx::query!(
         "UPDATE web_sessions SET revoked_at = now() WHERE session_hash = $1",
         session_hash
     )
     .execute(&state.db)
     .await?;
+    state.web_session_cache.remove(&session_hash);
     Ok(())
 }
 

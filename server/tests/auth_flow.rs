@@ -42,6 +42,7 @@ fn server_for_config(pool: PgPool, config: Config) -> TestServer {
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
         device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
     };
     let test_server_config = TestServerConfig {
         transport: Some(Transport::HttpRandomPort),
@@ -246,6 +247,7 @@ async fn saturated_untrusted_partition_does_not_block_authenticated_device_refre
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
         device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
     };
     let test_server_config = TestServerConfig {
         transport: Some(Transport::HttpRandomPort),
@@ -308,4 +310,152 @@ async fn saturated_untrusted_partition_does_not_block_authenticated_device_refre
     assert!(body["accessToken"].is_string());
     assert!(body["refreshToken"].is_string());
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn web_session_is_cached_and_invalidated_on_revocation(pool: PgPool) {
+    let state = AppState {
+        db: pool,
+        config: Arc::new(test_config()),
+        rate_limiter: Arc::new(RateLimiter::new()),
+        ws_registry: Arc::new(ConnectionRegistry::new()),
+        last_seen_cache: Arc::new(dashmap::DashMap::new()),
+        device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
+    };
+    let web_session_cache = Arc::clone(&state.web_session_cache);
+    let test_server_config = TestServerConfig {
+        transport: Some(Transport::HttpRandomPort),
+        save_cookies: true,
+        ..Default::default()
+    };
+    let make_service = helixsync_server::app(state)
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let server = TestServer::new_with_config(make_service, test_server_config).unwrap();
+
+    let register_res = server
+        .post("/api/v1/auth/register")
+        .json(&json!({ "email": "session-cache-test@example.com", "password": "correct horse battery staple" }))
+        .await;
+    register_res.assert_status_ok();
+    let body: serde_json::Value = register_res.json();
+    let csrf = body["csrfToken"].as_str().unwrap().to_string();
+
+    // Cache should be empty initially before /me is called
+    assert_eq!(web_session_cache.len(), 0);
+
+    // First request extracts AuthenticatedUser, hits DB, populates cache
+    let me_res = server.get("/api/v1/auth/me").await;
+    me_res.assert_status_ok();
+    assert_eq!(web_session_cache.len(), 1);
+
+    // Second request hits cache
+    let me_res2 = server.get("/api/v1/auth/me").await;
+    me_res2.assert_status_ok();
+    assert_eq!(web_session_cache.len(), 1);
+
+    // List sessions to find the current session ID
+    let sessions_res = server.get("/api/v1/auth/sessions").await;
+    sessions_res.assert_status_ok();
+    let sessions: Vec<serde_json::Value> = sessions_res.json();
+    assert_eq!(sessions.len(), 1);
+    let session_id = sessions[0]["id"].as_str().unwrap();
+
+    // Revoke the session via POST /api/v1/auth/sessions/:id/revoke
+    let revoke_res = server
+        .post(&format!("/api/v1/auth/sessions/{}/revoke", session_id))
+        .add_header("x-csrf-token", &csrf)
+        .await;
+    revoke_res.assert_status_ok();
+
+    // Cache entry must be immediately evicted
+    assert_eq!(web_session_cache.len(), 0);
+
+    // Next request to /me must fail with 401 Unauthorized
+    let me_after_revoke = server.get("/api/v1/auth/me").await;
+    me_after_revoke.assert_status_unauthorized();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn logout_immediately_evicts_from_web_session_cache(pool: PgPool) {
+    let state = AppState {
+        db: pool,
+        config: Arc::new(test_config()),
+        rate_limiter: Arc::new(RateLimiter::new()),
+        ws_registry: Arc::new(ConnectionRegistry::new()),
+        last_seen_cache: Arc::new(dashmap::DashMap::new()),
+        device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
+    };
+    let web_session_cache = Arc::clone(&state.web_session_cache);
+    let test_server_config = TestServerConfig {
+        transport: Some(Transport::HttpRandomPort),
+        save_cookies: true,
+        ..Default::default()
+    };
+    let make_service = helixsync_server::app(state)
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let server = TestServer::new_with_config(make_service, test_server_config).unwrap();
+
+    let register_res = server
+        .post("/api/v1/auth/register")
+        .json(&json!({ "email": "logout-cache@example.com", "password": "correct horse battery staple" }))
+        .await;
+    register_res.assert_status_ok();
+
+    let me_res = server.get("/api/v1/auth/me").await;
+    me_res.assert_status_ok();
+    assert_eq!(web_session_cache.len(), 1);
+
+    let logout_res = server.post("/api/v1/auth/logout").await;
+    logout_res.assert_status(axum::http::StatusCode::NO_CONTENT);
+
+    // Cache entry must be removed immediately
+    assert_eq!(web_session_cache.len(), 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn expired_cache_entry_revalidates_against_database(pool: PgPool) {
+    let state = AppState {
+        db: pool,
+        config: Arc::new(test_config()),
+        rate_limiter: Arc::new(RateLimiter::new()),
+        ws_registry: Arc::new(ConnectionRegistry::new()),
+        last_seen_cache: Arc::new(dashmap::DashMap::new()),
+        device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
+    };
+    let web_session_cache = Arc::clone(&state.web_session_cache);
+    let test_server_config = TestServerConfig {
+        transport: Some(Transport::HttpRandomPort),
+        save_cookies: true,
+        ..Default::default()
+    };
+    let make_service = helixsync_server::app(state)
+        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let server = TestServer::new_with_config(make_service, test_server_config).unwrap();
+
+    let register_res = server
+        .post("/api/v1/auth/register")
+        .json(&json!({ "email": "ttl-revalidate@example.com", "password": "correct horse battery staple" }))
+        .await;
+    register_res.assert_status_ok();
+
+    let me_res = server.get("/api/v1/auth/me").await;
+    me_res.assert_status_ok();
+    assert_eq!(web_session_cache.len(), 1);
+
+    // Mutate the cached entry to have a timestamp in the past (> 30s ago)
+    for mut entry in web_session_cache.iter_mut() {
+        entry.value_mut().0 = std::time::Instant::now() - std::time::Duration::from_secs(35);
+    }
+
+    // A request should succeed by revalidating against DB and refreshing the timestamp
+    let me_res2 = server.get("/api/v1/auth/me").await;
+    me_res2.assert_status_ok();
+
+    for entry in web_session_cache.iter() {
+        assert!(entry.value().0.elapsed() < std::time::Duration::from_secs(5));
+    }
+}
+
 

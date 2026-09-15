@@ -39,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
         device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
     };
 
     helixsync_server::sync::compaction::spawn(state.clone());

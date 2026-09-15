@@ -50,4 +50,14 @@ pub struct AppState {
     /// number of distinct devices, not by request volume — so it needs no
     /// sweeper either.
     pub device_revocation_cache: Arc<DashMap<Uuid, (std::time::Instant, bool)>>,
+    /// Per-session `(cached_at, user_id, email)` for the web session validation
+    /// check in `auth::extractors::AuthenticatedUser::from_request_parts` (keyed
+    /// by `session_hash`). Without this cache, dashboard requests and polling
+    /// endpoints like `/api/v1/sync/stats` or `/api/v1/sync/settings` pay a DB
+    /// query and connection pool checkout on every request.
+    ///
+    /// Like `device_revocation_cache`, entries are read with a short TTL
+    /// (`auth::extractors::WEB_SESSION_CACHE_TTL`), and session revocation or
+    /// logout immediately evicts the entry from the cache.
+    pub web_session_cache: Arc<DashMap<String, (std::time::Instant, Uuid, String)>>,
 }

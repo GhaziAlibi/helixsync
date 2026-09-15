@@ -10,6 +10,16 @@
 // backlog between sweeps and an unchunked DELETE over that many rows would
 // hold row-exclusive locks and spike WAL for the full duration of one giant
 // statement.
+//
+// The subqueries explicitly order by timestamp ASC (`expires_at` / `created_at`)
+// so PostgreSQL's planner is compelled to use the timestamp B-tree indexes
+// (`idx_device_credentials_expires_at`, `idx_web_sessions_expires_at`, and
+// `idx_audit_logs_created_at`) rather than falling back to sequential scans or
+// PK index scans (mirroring the query-plan guarantees in `sync::compaction`).
+// Loops break early if fewer than `DELETE_CHUNK_SIZE` rows were affected to avoid
+// an extra wasted round-trip query. Each sweep caps total deletions at
+// `MAX_PRUNED_PER_PASS` and sleeps `PRUNE_COOPERATIVE_DELAY` between chunks
+// to yield cooperatively to Tokio and prevent WAL/I/O spikes.
 use std::time::Duration;
 
 use chrono::Utc;
@@ -20,9 +30,17 @@ use crate::state::AppState;
 /// Max rows removed per DELETE statement in each housekeeping sweep. Kept
 /// small enough that no single statement holds row-exclusive locks or
 /// spikes WAL for long, regardless of how large the backlog is — mirrors
-/// `sync::compaction::compact_user_sync_operations_chunked`'s
-/// `DELETE_CHUNK_SIZE`.
-const DELETE_CHUNK_SIZE: i64 = 5_000;
+/// `sync::compaction::DELETE_CHUNK_SIZE`.
+pub const DELETE_CHUNK_SIZE: i64 = 5_000;
+
+/// Sensible upper bound on total rows deleted per housekeeping pass per table (PERF-06).
+/// Caps the deletion loop so an enormous backlog does not monopolize database
+/// resources in a single pass (any remainder will be picked up on the next pass).
+pub const MAX_PRUNED_PER_PASS: i64 = 50_000;
+
+/// Cooperative delay between chunk deletions (PERF-06) to yield to Tokio so concurrent
+/// tasks can acquire connections and Postgres write load is amortized.
+pub const PRUNE_COOPERATIVE_DELAY: Duration = Duration::from_millis(10);
 
 /// Spawns the periodic housekeeping task for the lifetime of the process.
 /// Call once from `main.rs` after `AppState` is constructed.
@@ -67,17 +85,27 @@ async fn delete_expired_device_credentials(state: &AppState) -> AppResult<()> {
     loop {
         let result = sqlx::query!(
             "DELETE FROM device_credentials WHERE id IN ( \
-                SELECT id FROM device_credentials WHERE expires_at < $1 LIMIT $2 \
+                SELECT id FROM device_credentials WHERE expires_at < $1 ORDER BY expires_at ASC LIMIT $2 \
              )",
             cutoff,
             DELETE_CHUNK_SIZE
         )
         .execute(&state.db)
         .await?;
-        total_rows += result.rows_affected();
-        if result.rows_affected() == 0 {
+        let rows_affected = result.rows_affected();
+        total_rows += rows_affected;
+        if rows_affected < DELETE_CHUNK_SIZE as u64 {
             break;
         }
+        if total_rows >= MAX_PRUNED_PER_PASS as u64 {
+            tracing::info!(
+                total_pruned = total_rows,
+                max = MAX_PRUNED_PER_PASS,
+                "housekeeping: device_credentials prune hit per-pass deletion limit; remaining rows deferred to next pass"
+            );
+            break;
+        }
+        tokio::time::sleep(PRUNE_COOPERATIVE_DELAY).await;
     }
     tracing::debug!(rows = total_rows, "housekeeping: pruned device_credentials");
     Ok(())
@@ -92,17 +120,27 @@ async fn delete_expired_web_sessions(state: &AppState) -> AppResult<()> {
     loop {
         let result = sqlx::query!(
             "DELETE FROM web_sessions WHERE id IN ( \
-                SELECT id FROM web_sessions WHERE expires_at < $1 LIMIT $2 \
+                SELECT id FROM web_sessions WHERE expires_at < $1 ORDER BY expires_at ASC LIMIT $2 \
              )",
             now,
             DELETE_CHUNK_SIZE
         )
         .execute(&state.db)
         .await?;
-        total_rows += result.rows_affected();
-        if result.rows_affected() == 0 {
+        let rows_affected = result.rows_affected();
+        total_rows += rows_affected;
+        if rows_affected < DELETE_CHUNK_SIZE as u64 {
             break;
         }
+        if total_rows >= MAX_PRUNED_PER_PASS as u64 {
+            tracing::info!(
+                total_pruned = total_rows,
+                max = MAX_PRUNED_PER_PASS,
+                "housekeeping: web_sessions prune hit per-pass deletion limit; remaining rows deferred to next pass"
+            );
+            break;
+        }
+        tokio::time::sleep(PRUNE_COOPERATIVE_DELAY).await;
     }
     tracing::debug!(rows = total_rows, "housekeeping: pruned web_sessions");
     Ok(())
@@ -114,17 +152,27 @@ async fn delete_old_audit_logs(state: &AppState) -> AppResult<()> {
     loop {
         let result = sqlx::query!(
             "DELETE FROM audit_logs WHERE id IN ( \
-                SELECT id FROM audit_logs WHERE created_at < $1 LIMIT $2 \
+                SELECT id FROM audit_logs WHERE created_at < $1 ORDER BY created_at ASC LIMIT $2 \
              )",
             cutoff,
             DELETE_CHUNK_SIZE
         )
         .execute(&state.db)
         .await?;
-        total_rows += result.rows_affected();
-        if result.rows_affected() == 0 {
+        let rows_affected = result.rows_affected();
+        total_rows += rows_affected;
+        if rows_affected < DELETE_CHUNK_SIZE as u64 {
             break;
         }
+        if total_rows >= MAX_PRUNED_PER_PASS as u64 {
+            tracing::info!(
+                total_pruned = total_rows,
+                max = MAX_PRUNED_PER_PASS,
+                "housekeeping: audit_logs prune hit per-pass deletion limit; remaining rows deferred to next pass"
+            );
+            break;
+        }
+        tokio::time::sleep(PRUNE_COOPERATIVE_DELAY).await;
     }
     tracing::debug!(rows = total_rows, "housekeeping: pruned audit_logs");
     Ok(())

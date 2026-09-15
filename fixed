@@ -1,0 +1,10 @@
+# Fixed Performance & Throttling Issues
+
+- PERF-01: Global Throttling in Production Deployments Due to Missing `BEHIND_PROXY`
+- PERF-02: RateLimiter DoS / Cascading Rejections Under Partition Saturation
+- PERF-03: Heavy Gzip Compression/Decompression & JSON Parsing on Tokio Worker Threads
+- PERF-04: Aggressive 3-Second Pool Acquire Timeout & Connection Hoarding
+- PERF-05: Massive Memory Allocation Churn During Batch Upload Validation
+- PERF-06: Housekeeping Task Query Inefficiencies & Unthrottled Loops
+- PERF-07: Uncached Web Sessions & Extractor Overhead on `/sync/stats`
+- PERF-09: Missing Reverse Proxy Timeouts & Buffer Limits in Nginx

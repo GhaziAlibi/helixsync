@@ -45,6 +45,7 @@ fn state_for(pool: PgPool) -> AppState {
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
         device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
     }
 }
 
@@ -137,6 +138,7 @@ async fn prunes_device_credentials_past_their_retention_grace_period(pool: PgPoo
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
         device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
     };
 
     let user_id = create_user(&pool, "cred-user@example.com").await;
@@ -185,6 +187,7 @@ async fn prunes_audit_logs_past_retention_window(pool: PgPool) {
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
         device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
     };
 
     let user_id = create_user(&pool, "audit-user@example.com").await;
@@ -221,3 +224,147 @@ async fn one_table_failing_does_not_block_the_others(pool: PgPool) {
     assert!(!web_session_exists(&pool, old_session).await);
     assert!(!audit_log_exists(&pool, old_log).await);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn housekeeping_respects_per_pass_cap_and_orders_oldest_first(pool: PgPool) {
+    let state = state_for(pool.clone());
+    let user_id = create_user(&pool, "cap-user@example.com").await;
+
+    // Insert 50,000 older expired sessions (expired 10 days ago)
+    const CAP: i64 = housekeeping::MAX_PRUNED_PER_PASS;
+    const EXTRA: i64 = 1_000;
+
+    sqlx::query(
+        "INSERT INTO web_sessions (user_id, session_hash, expires_at) \
+         SELECT $1, ('old_' || seq)::bytea, now() - INTERVAL '10 days' \
+         FROM generate_series(1, $2::bigint) AS seq",
+    )
+    .bind(user_id)
+    .bind(CAP)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Insert 1,000 newer expired sessions (expired 1 day ago)
+    sqlx::query(
+        "INSERT INTO web_sessions (user_id, session_hash, expires_at) \
+         SELECT $1, ('new_' || seq)::bytea, now() - INTERVAL '1 day' \
+         FROM generate_series(1, $2::bigint) AS seq",
+    )
+    .bind(user_id)
+    .bind(EXTRA)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let total_before: i64 = sqlx::query_scalar!(
+        "SELECT count(*) FROM web_sessions WHERE user_id = $1",
+        user_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(total_before, CAP + EXTRA);
+
+    // Pass 1: Should cap at MAX_PRUNED_PER_PASS (50,000).
+    // Because of ORDER BY expires_at ASC, all 50,000 old sessions should be deleted,
+    // leaving all 1,000 newer sessions intact.
+    housekeeping::run_once(&state).await;
+
+    let remaining_pass1: i64 = sqlx::query_scalar!(
+        "SELECT count(*) FROM web_sessions WHERE user_id = $1",
+        user_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(remaining_pass1, EXTRA, "pass 1 must prune exactly MAX_PRUNED_PER_PASS");
+
+    let old_remaining: i64 = sqlx::query_scalar!(
+        "SELECT count(*) FROM web_sessions WHERE user_id = $1 AND expires_at < now() - INTERVAL '5 days'",
+        user_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(old_remaining, 0, "all older sessions must have been pruned first by ORDER BY expires_at ASC");
+
+    // Pass 2: Prunes the remaining 1,000 sessions and terminates cleanly
+    housekeeping::run_once(&state).await;
+
+    let remaining_pass2: i64 = sqlx::query_scalar!(
+        "SELECT count(*) FROM web_sessions WHERE user_id = $1",
+        user_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(remaining_pass2, 0, "pass 2 prunes remaining sessions");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn housekeeping_cooperative_yield_allows_concurrent_pool_queries(pool: PgPool) {
+    let mut config = test_config();
+    config.audit_log_retention_secs = 60 * 60 * 24 * 90; // 90 days
+    let state = AppState {
+        db: pool.clone(),
+        config: Arc::new(config),
+        rate_limiter: Arc::new(RateLimiter::new()),
+        ws_registry: Arc::new(ConnectionRegistry::new()),
+        last_seen_cache: Arc::new(dashmap::DashMap::new()),
+        device_revocation_cache: Arc::new(dashmap::DashMap::new()),
+        web_session_cache: Arc::new(dashmap::DashMap::new()),
+    };
+    let user_id = create_user(&pool, "yield-user@example.com").await;
+
+    // Insert 15,000 expired audit logs (3 chunks of 5,000) so the deletion loop
+    // executes multiple chunks and yields cooperatively via PRUNE_COOPERATIVE_DELAY.
+    const LOG_COUNT: i64 = housekeeping::DELETE_CHUNK_SIZE * 3;
+    sqlx::query(
+        "INSERT INTO audit_logs (user_id, event_type, created_at) \
+         SELECT $1, 'login', now() - INTERVAL '100 days' \
+         FROM generate_series(1, $2::bigint) AS seq",
+    )
+    .bind(user_id)
+    .bind(LOG_COUNT)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let probe_pool = pool.clone();
+    let probe_task = tokio::spawn(async move {
+        // Sleep briefly to let housekeeping start deleting chunks
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let mut conn = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            probe_pool.acquire(),
+        )
+        .await
+        .expect("connection acquire should not time out")
+        .expect("connection acquire should succeed");
+
+        let val: i32 = sqlx::query_scalar("SELECT 1")
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+        assert_eq!(val, 1);
+    });
+
+    housekeeping::run_once(&state).await;
+    probe_task.await.unwrap();
+
+    let remaining: i64 = sqlx::query_scalar!(
+        "SELECT count(*) FROM audit_logs WHERE user_id = $1",
+        user_id
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(remaining, 0, "all 3 chunks should be pruned");
+}
+

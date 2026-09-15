@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -34,6 +34,10 @@ pub struct RateLimiter {
     /// capacity reserved for keys derived from a verified user or device.
     untrusted_windows: DashMap<(&'static str, String), TokenBucket>,
     authenticated_windows: DashMap<(&'static str, String), TokenBucket>,
+    /// Per-bucket entry counts to enforce fair-share allocation and prevent
+    /// cross-bucket starvation under partition saturation (PERF-02).
+    untrusted_bucket_counts: DashMap<&'static str, AtomicUsize>,
+    authenticated_bucket_counts: DashMap<&'static str, AtomicUsize>,
     /// Wall-clock start point `last_emergency_sweep_nanos` is measured from
     /// (an `AtomicU64` can't hold an `Instant` directly).
     created_at: Instant,
@@ -59,6 +63,11 @@ pub struct RateLimiter {
 /// capacity.
 const MAX_UNTRUSTED_ENTRIES: usize = 25_000;
 const MAX_AUTHENTICATED_ENTRIES: usize = 25_000;
+/// Maximum entries any single bucket may occupy when the partition is at
+/// capacity. Ensures no single untrusted bucket (such as unverified token hashes
+/// at `/credentials/refresh`) can monopolize the partition and starve other
+/// buckets (such as `login`, `register`, `websocket_handshake`) (PERF-02).
+pub const MAX_ENTRIES_PER_BUCKET: usize = 5_000;
 
 /// The trust level of the identity used as a rate-limit key. A route can use
 /// both: refresh is first limited by a presented token and then by a verified
@@ -82,10 +91,81 @@ impl RateLimiter {
         Self {
             untrusted_windows: DashMap::new(),
             authenticated_windows: DashMap::new(),
+            untrusted_bucket_counts: DashMap::new(),
+            authenticated_bucket_counts: DashMap::new(),
             created_at: Instant::now(),
             last_untrusted_emergency_sweep_nanos: AtomicU64::new(0),
             last_authenticated_emergency_sweep_nanos: AtomicU64::new(0),
         }
+    }
+
+    fn bucket_counts(&self, partition: RateLimitPartition) -> &DashMap<&'static str, AtomicUsize> {
+        match partition {
+            RateLimitPartition::Untrusted => &self.untrusted_bucket_counts,
+            RateLimitPartition::Authenticated => &self.authenticated_bucket_counts,
+        }
+    }
+
+    fn get_bucket_count(&self, partition: RateLimitPartition, bucket: &'static str) -> usize {
+        self.bucket_counts(partition)
+            .get(bucket)
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(0)
+    }
+
+    fn increment_bucket_count(&self, partition: RateLimitPartition, bucket: &'static str) {
+        self.bucket_counts(partition)
+            .entry(bucket)
+            .or_insert_with(|| AtomicUsize::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn decrement_bucket_count(&self, partition: RateLimitPartition, bucket: &'static str) {
+        if let Some(counter) = self.bucket_counts(partition).get(bucket) {
+            let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |val| {
+                Some(val.saturating_sub(1))
+            });
+        }
+    }
+
+    /// Reclaims an expired entry or an entry from a bucket that has reached or
+    /// exceeded its allocation, without holding write locks across all shards (PERF-02).
+    fn evict_one_entry(&self, partition: RateLimitPartition, exempt_bucket: &'static str) -> bool {
+        let windows = match partition {
+            RateLimitPartition::Untrusted => &self.untrusted_windows,
+            RateLimitPartition::Authenticated => &self.authenticated_windows,
+        };
+        let now = Instant::now();
+        let candidate = {
+            let mut expired = None;
+            let mut monopolizer = None;
+            let mut checked = 0;
+            for entry in windows.iter() {
+                let (b, _) = entry.key();
+                if now.duration_since(entry.value().last_refill) >= entry.value().window {
+                    expired = Some(entry.key().clone());
+                    break;
+                }
+                if monopolizer.is_none()
+                    && *b != exempt_bucket
+                    && self.get_bucket_count(partition, b) >= MAX_ENTRIES_PER_BUCKET
+                {
+                    monopolizer = Some(entry.key().clone());
+                }
+                checked += 1;
+                if monopolizer.is_some() && checked >= 32 {
+                    break;
+                }
+            }
+            expired.or(monopolizer)
+        };
+        if let Some(key) = candidate {
+            if let Some((k, _)) = windows.remove(&key) {
+                self.decrement_bucket_count(partition, k.0);
+                return true;
+            }
+        }
+        false
     }
 
     /// Runs `sweep()` if (and only if) no other caller has done so within
@@ -162,22 +242,38 @@ impl RateLimiter {
         let map_key = (bucket, key.to_string());
 
         if !windows.contains_key(&map_key) && windows.len() >= capacity {
-            self.maybe_emergency_sweep(partition);
-            if windows.len() >= capacity {
-                // Genuinely full of active entries — reject rather than
-                // grow past the cap. Reuse `window` as the retry hint since
-                // that's roughly how long it'll take for other entries in
-                // this bucket to age out and free up room.
-                return Err(window);
+            let bucket_count = self.get_bucket_count(partition, bucket);
+            if bucket_count >= MAX_ENTRIES_PER_BUCKET {
+                self.maybe_emergency_sweep(partition);
+                let count_after = self.get_bucket_count(partition, bucket);
+                if count_after >= MAX_ENTRIES_PER_BUCKET || windows.len() >= capacity {
+                    // Saturated bucket exceeded its allocation — reject to ensure
+                    // headroom remains for other buckets (PERF-02).
+                    return Err(window);
+                }
+            } else {
+                // This bucket has not exceeded its fair-share allocation. Reclaim an
+                // expired entry or an entry from a monopolizing bucket to maintain capacity.
+                self.evict_one_entry(partition, bucket);
             }
         }
 
         let now = Instant::now();
-        let mut entry = windows.entry(map_key).or_insert_with(|| TokenBucket {
-            last_refill: now,
-            tokens: limit as f64,
-            window,
-        });
+        let (mut entry, is_new) = match windows.entry(map_key) {
+            dashmap::mapref::entry::Entry::Occupied(occ) => (occ.into_ref(), false),
+            dashmap::mapref::entry::Entry::Vacant(vac) => {
+                let entry = vac.insert(TokenBucket {
+                    last_refill: now,
+                    tokens: limit as f64,
+                    window,
+                });
+                (entry, true)
+            }
+        };
+
+        if is_new {
+            self.increment_bucket_count(partition, bucket);
+        }
 
         let rate = limit as f64 / window.as_secs_f64(); // tokens/sec
         let elapsed = now.duration_since(entry.last_refill);
@@ -210,8 +306,13 @@ impl RateLimiter {
             RateLimitPartition::Untrusted => &self.untrusted_windows,
             RateLimitPartition::Authenticated => &self.authenticated_windows,
         };
-        windows
-            .retain(|_, bucket| now.duration_since(bucket.last_refill) < bucket.window);
+        windows.retain(|(b, _), bucket| {
+            let keep = now.duration_since(bucket.last_refill) < bucket.window;
+            if !keep {
+                self.decrement_bucket_count(partition, b);
+            }
+            keep
+        });
     }
 
     fn sweep(&self) {
@@ -519,4 +620,55 @@ mod tests {
         assert!(enforce(&limiter, TOKEN_REFRESH_AUTHENTICATED_LIMIT, "device-uuid-123").is_ok());
         assert!(limiter.authenticated_windows.contains_key(&("token_refresh", "device-uuid-123".to_string())));
     }
+
+    #[test]
+    fn saturating_one_untrusted_bucket_does_not_block_other_untrusted_buckets() {
+        let limiter = RateLimiter::new();
+
+        // Flood the untrusted partition via token_refresh up to capacity
+        for i in 0..MAX_UNTRUSTED_ENTRIES {
+            let key = format!("token-{i}");
+            assert!(enforce(&limiter, TOKEN_REFRESH_LIMIT, &key).is_ok());
+        }
+        assert!(limiter.untrusted_windows.len() >= MAX_UNTRUSTED_ENTRIES);
+
+        // A further key for token_refresh must be rejected (it exceeded its allocation)
+        assert!(enforce(&limiter, TOKEN_REFRESH_LIMIT, "new-token-hash").is_err());
+
+        // But legitimate requests for other untrusted buckets MUST NOT be starved (PERF-02):
+        // 1. New login attempt
+        assert!(enforce(&limiter, LOGIN_LIMIT, "192.168.1.1").is_ok());
+
+        // 2. New registration attempt
+        assert!(enforce(&limiter, REGISTER_LIMIT, "192.168.1.2").is_ok());
+
+        // 3. New device registration
+        assert!(enforce(&limiter, DEVICE_REGISTER_LIMIT, "192.168.1.3").is_ok());
+
+        // 4. New websocket handshake
+        assert!(enforce(&limiter, WEBSOCKET_HANDSHAKE_LIMIT, "192.168.1.4").is_ok());
+
+        // Partition capacity must remain strictly bounded
+        assert!(limiter.untrusted_windows.len() <= MAX_UNTRUSTED_ENTRIES);
+    }
+
+    #[test]
+    fn expired_entries_are_reclaimed_when_at_capacity() {
+        let limiter = RateLimiter::new();
+        let short_window = Duration::from_millis(40);
+
+        // Fill a bucket up to MAX_ENTRIES_PER_BUCKET
+        for i in 0..MAX_ENTRIES_PER_BUCKET {
+            let key = format!("key-{i}");
+            assert!(limiter.check(RateLimitPartition::Untrusted, "temp", &key, 10, short_window));
+        }
+
+        // Wait for entries to expire
+        std::thread::sleep(Duration::from_millis(50));
+
+        // When a new key comes in, expired entries should be swept/reclaimed cleanly
+        // and allow the new key through
+        assert!(limiter.check(RateLimitPartition::Untrusted, "temp", "after-expiry", 10, short_window));
+    }
 }
+

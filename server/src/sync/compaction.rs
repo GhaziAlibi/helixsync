@@ -29,7 +29,7 @@ use crate::error::AppResult;
 use crate::state::AppState;
 
 use super::routes::{
-    compress_snapshot_data, compute_objects, filter_tombstoned, history_retention_cutoff,
+    compress_snapshot_data_async, compute_objects, filter_tombstoned, history_retention_cutoff,
 };
 use super::vocabulary;
 
@@ -233,7 +233,7 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
         // raw row is swept up by the unconditional historyVisit deletion
         // below (never a terminal operation, so always eligible once past
         // `ack_boundary`).
-        let history_cutoff = history_retention_cutoff(&mut tx, user_id).await?;
+        let history_cutoff = history_retention_cutoff(&mut *tx, user_id).await?;
         let (_, objects_map) = compute_objects(&mut tx, user_id, Some(ack_boundary), history_cutoff).await?;
 
         let tombstone_ids: HashSet<(String, Uuid)> = sqlx::query!(
@@ -247,16 +247,6 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
         .collect();
 
         let objects = filter_tombstoned(objects_map, &tombstone_ids);
-        let data = compress_snapshot_data(&objects)?;
-
-        sqlx::query!(
-            "INSERT INTO sync_snapshots (user_id, snapshot_cursor, encryption_version, data) VALUES ($1, $2, 0, $3)",
-            user_id,
-            ack_boundary,
-            data
-        )
-        .execute(&mut *tx)
-        .await?;
 
         // Authoritative `sync_stats` reconciliation (see
         // migrations/0007_sync_stats.sql for the full three-part design):
@@ -285,6 +275,17 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
                 _ => {}
             }
         }
+
+        let data = compress_snapshot_data_async(objects).await?;
+
+        sqlx::query!(
+            "INSERT INTO sync_snapshots (user_id, snapshot_cursor, encryption_version, data) VALUES ($1, $2, 0, $3)",
+            user_id,
+            ack_boundary,
+            data
+        )
+        .execute(&mut *tx)
+        .await?;
 
         sqlx::query!(
             r#"

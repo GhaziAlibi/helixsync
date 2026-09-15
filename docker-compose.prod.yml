@@ -45,6 +45,13 @@ services:
       BIND_ADDR: 0.0.0.0:8080
       JWT_SIGNING_KEY: ${JWT_SIGNING_KEY}
       REQUIRE_ENCRYPTION: ${REQUIRE_ENCRYPTION:-true}
+      # Always true here: per the comment below, `server` has no published
+      # port and is only ever reached through `web`'s nginx, which sets
+      # X-Real-IP/X-Forwarded-For (web/nginx.conf). This tells the rate
+      # limiter (server/src/middleware/client_ip.rs) to trust those headers
+      # for the real client IP instead of the raw connection address, which
+      # in this topology is always nginx's own container IP.
+      BEHIND_PROXY: "true"
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
       ACCESS_TOKEN_TTL_SECS: ${ACCESS_TOKEN_TTL_SECS:-900}
       REFRESH_TOKEN_TTL_SECS: ${REFRESH_TOKEN_TTL_SECS:-2592000}

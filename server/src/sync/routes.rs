@@ -146,6 +146,30 @@ enum Decision<'a> {
     Accept(&'a OperationIn),
 }
 
+/// A zero-allocation byte counter sink implementing [`std::io::Write`].
+/// Used to calculate serialized payload byte size without heap allocation churn (PERF-05).
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    #[inline]
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.0 += buf.len();
+        Ok(())
+    }
+
+    #[inline]
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Validates and persists an entire upload batch in one transaction instead
 /// of one transaction per operation. The old code (see git history) ran
 /// every check — dedup, the advisory lock, the device-sequence check, the
@@ -299,7 +323,10 @@ async fn process_batch(
             decisions.push(Decision::Rejected("encryption_required"));
             continue;
         }
-        let payload_size = serde_json::to_vec(&op.payload).map(|v| v.len()).unwrap_or(0);
+        let mut counter = ByteCounter(0);
+        let payload_size = serde_json::to_writer(&mut counter, &op.payload)
+            .map(|()| counter.0)
+            .unwrap_or(0);
         if payload_size > MAX_PAYLOAD_BYTES {
             decisions.push(Decision::Rejected("payload_too_large"));
             continue;
@@ -987,15 +1014,18 @@ async fn fold_new_rows_into_objects(
 /// type, so it can never reappear in `new_rows` to be re-filtered) still
 /// converge to the configured retention window on every future call,
 /// instead of remaining embedded in every snapshot forever.
-pub(super) async fn history_retention_cutoff(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+pub(super) async fn history_retention_cutoff<'e, E>(
+    executor: E,
     user_id: Uuid,
-) -> AppResult<Option<DateTime<Utc>>> {
+) -> AppResult<Option<DateTime<Utc>>>
+where
+    E: sqlx::PgExecutor<'e>,
+{
     let retention: Option<String> = sqlx::query_scalar!(
         "SELECT history_retention FROM user_settings WHERE user_id = $1",
         user_id
     )
-    .fetch_optional(&mut **tx)
+    .fetch_optional(executor)
     .await?;
 
     let days: i64 = match retention.as_deref() {
@@ -1025,6 +1055,16 @@ pub(super) fn compress_snapshot_data(objects: &[SnapshotObject]) -> AppResult<Ve
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     encoder.write_all(&json).map_err(anyhow::Error::from)?;
     Ok(encoder.finish().map_err(anyhow::Error::from)?)
+}
+
+/// Offloads heavy snapshot compression to a worker thread via `tokio::task::spawn_blocking`
+/// to avoid stalling the Tokio reactor (PERF-03).
+pub(super) async fn compress_snapshot_data_async(
+    objects: Vec<SnapshotObject>,
+) -> AppResult<Vec<u8>> {
+    tokio::task::spawn_blocking(move || compress_snapshot_data(&objects))
+        .await
+        .map_err(|e| anyhow::anyhow!("snapshot compression task failed: {e}"))?
 }
 
 /// Inverse of [`compress_snapshot_data`]. Must handle two on-disk formats
@@ -1080,6 +1120,16 @@ pub(super) fn decompress_snapshot_data(bytes: &[u8]) -> AppResult<Vec<SnapshotOb
     Ok(parsed)
 }
 
+/// Offloads heavy snapshot decompression and JSON parsing to a worker thread via
+/// `tokio::task::spawn_blocking` to avoid stalling the Tokio reactor (PERF-03).
+pub(super) async fn decompress_snapshot_data_async(
+    bytes: Vec<u8>,
+) -> AppResult<Vec<SnapshotObject>> {
+    tokio::task::spawn_blocking(move || decompress_snapshot_data(&bytes))
+        .await
+        .map_err(|e| anyhow::anyhow!("snapshot decompression task failed: {e}"))?
+}
+
 #[cfg(test)]
 mod decompress_snapshot_data_tests {
     use super::*;
@@ -1107,6 +1157,19 @@ mod decompress_snapshot_data_tests {
         assert_eq!(decompressed[0].object_type, "note");
     }
 
+    #[tokio::test]
+    async fn round_trips_async() {
+        let objects = sample_objects(50);
+        let compressed = compress_snapshot_data_async(objects.clone())
+            .await
+            .expect("async compression should succeed");
+        let decompressed = decompress_snapshot_data_async(compressed)
+            .await
+            .expect("async decompression should succeed");
+        assert_eq!(decompressed.len(), objects.len());
+        assert_eq!(decompressed[0].object_type, "note");
+    }
+
     #[test]
     fn rejects_a_payload_that_decompresses_past_the_cap() {
         // A gzip stream of highly repetitive bytes compresses to a tiny
@@ -1126,6 +1189,42 @@ mod decompress_snapshot_data_tests {
             result.is_err(),
             "decompressing past the cap should be rejected, not silently truncated"
         );
+    }
+}
+
+#[cfg(test)]
+mod byte_counter_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn counts_bytes_written() {
+        let mut counter = ByteCounter(0);
+        assert_eq!(counter.write(b"hello").unwrap(), 5);
+        assert_eq!(counter.0, 5);
+        counter.write_all(b" world").unwrap();
+        assert_eq!(counter.0, 11);
+        assert!(counter.flush().is_ok());
+    }
+
+    #[test]
+    fn matches_serde_json_to_vec_length() {
+        let test_payload = serde_json::json!({
+            "title": "Example Bookmark",
+            "url": "https://example.com/some/long/path?param=1&other=abc#section",
+            "nested": {
+                "tags": ["alpha", "beta", "gamma"],
+                "count": 42,
+                "flag": true,
+                "empty": null
+            }
+        });
+
+        let vec_len = serde_json::to_vec(&test_payload).unwrap().len();
+
+        let mut counter = ByteCounter(0);
+        serde_json::to_writer(&mut counter, &test_payload).unwrap();
+        assert_eq!(counter.0, vec_len);
     }
 }
 
@@ -1175,7 +1274,7 @@ pub(super) async fn compute_objects(
 
     let (base_cursor, mut objects): (i64, HashMap<(String, Uuid), SnapshotObject>) = match base_row {
         Some((cursor, data)) => {
-            let parsed: Vec<SnapshotObject> = decompress_snapshot_data(&data)?;
+            let parsed: Vec<SnapshotObject> = decompress_snapshot_data_async(data).await?;
             let map = parsed
                 .into_iter()
                 .filter(|o| history_cutoff.map_or(true, |c| o.object_type != "historyVisit" || o.created_at >= c))
@@ -1307,21 +1406,25 @@ async fn snapshot(
 
     crate::devices::touch_last_seen_background(&state, device.device_id);
 
-    let mut tx = state.db.begin().await?;
+    // Read the user's history retention setting directly off the pool before
+    // acquiring a transaction so connection checkout isn't held open during settings lookup (PERF-04).
+    let history_cutoff = history_retention_cutoff(&state.db, device.user_id).await?;
 
-    let history_cutoff = history_retention_cutoff(&mut tx, device.user_id).await?;
+    // Transaction is held only across compute_objects and committed immediately
+    // to minimize connection checkout hold time (PERF-04).
+    let mut tx = state.db.begin().await?;
     let (snapshot_cursor, objects_map) =
         compute_objects(&mut tx, device.user_id, None, history_cutoff).await?;
+    tx.commit().await?;
 
+    // Active tombstones query runs directly off the pool without holding a transaction.
     let tombstone_rows = sqlx::query_as!(
         SnapshotTombstoneRow,
         "SELECT object_type, object_id FROM tombstones WHERE user_id = $1 AND active = true",
         device.user_id
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&state.db)
     .await?;
-
-    tx.commit().await?;
 
     let tombstone_ids: HashSet<(String, Uuid)> = tombstone_rows
         .iter()
@@ -1409,13 +1512,13 @@ async fn stats(
             tabs: r.tab_count as i64,
         },
         None => {
-            let mut tx = state.db.begin().await?;
             // Lazy backfill path — see doc comment above. Unchanged from
             // the original always-on computation, plus the trailing
             // `INSERT ... ON CONFLICT DO NOTHING` that makes this a
             // one-time-ever cost per account instead of a recurring one
             // every 30-second cache miss.
-            let history_cutoff = history_retention_cutoff(&mut tx, user.user_id).await?;
+            let history_cutoff = history_retention_cutoff(&state.db, user.user_id).await?;
+            let mut tx = state.db.begin().await?;
             let (_, objects_map) =
                 compute_objects(&mut tx, user.user_id, None, history_cutoff).await?;
 

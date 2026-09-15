@@ -172,6 +172,8 @@ async fn logout(
     jar: CookieJar,
 ) -> AppResult<(axum::http::StatusCode, CookieJar)> {
     if let Some(cookie) = jar.get(SESSION_COOKIE_NAME) {
+        let session_hash = crate::crypto::hash_token(cookie.value());
+        state.web_session_cache.remove(&session_hash);
         let _ = revoke_session(&state, cookie.value()).await;
     }
     let jar = jar
@@ -292,17 +294,20 @@ async fn revoke_session_route(
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> AppResult<Json<serde_json::Value>> {
-    let result = sqlx::query!(
-        "UPDATE web_sessions SET revoked_at = now() WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+    let row = sqlx::query!(
+        "UPDATE web_sessions SET revoked_at = now() WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL RETURNING session_hash",
         id,
         user.user_id
     )
-    .execute(&state.db)
+    .fetch_optional(&state.db)
     .await?;
 
-    if result.rows_affected() == 0 {
-        return Err(AppError::NotFound);
-    }
+    let row = match row {
+        Some(row) => row,
+        None => return Err(AppError::NotFound),
+    };
+
+    state.web_session_cache.remove(&row.session_hash);
 
     crate::audit::log(&state, Some(user.user_id), None, "web_session_revoked").await;
 

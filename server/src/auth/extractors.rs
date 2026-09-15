@@ -20,6 +20,7 @@ pub const CSRF_HEADER_NAME: &str = "x-csrf-token";
 /// going through `devices::routes::revoke_device` (which proactively
 /// overwrites the cache entry instead of waiting on the TTL).
 pub const DEVICE_REVOCATION_CACHE_TTL: Duration = Duration::from_secs(30);
+pub const WEB_SESSION_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[axum::async_trait]
 impl FromRequestParts<AppState> for AuthenticatedUser {
@@ -36,6 +37,15 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
             .ok_or(AppError::Unauthorized)?;
         let session_hash = hash_token(&token);
 
+        if let Some(entry) = state.web_session_cache.get(&session_hash) {
+            if entry.0.elapsed() < WEB_SESSION_CACHE_TTL {
+                return Ok(AuthenticatedUser {
+                    user_id: entry.1,
+                    email: entry.2.clone(),
+                });
+            }
+        }
+
         let row = sqlx::query!(
             r#"
             SELECT u.id as "user_id!", u.email as "email!"
@@ -48,8 +58,20 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
             session_hash
         )
         .fetch_optional(&state.db)
-        .await?
-        .ok_or(AppError::Unauthorized)?;
+        .await?;
+
+        let row = match row {
+            Some(row) => row,
+            None => {
+                state.web_session_cache.remove(&session_hash);
+                return Err(AppError::Unauthorized);
+            }
+        };
+
+        state.web_session_cache.insert(
+            session_hash,
+            (Instant::now(), row.user_id, row.email.clone()),
+        );
 
         Ok(AuthenticatedUser {
             user_id: row.user_id,
