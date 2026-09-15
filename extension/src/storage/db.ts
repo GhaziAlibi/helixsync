@@ -699,6 +699,21 @@ export async function deleteDeferredMaterialization(objectId: string): Promise<v
   await (await getDb()).delete("deferred_materializations", objectId);
 }
 
+/** Batch counterpart to `deleteDeferredMaterialization` — one transaction
+ * for the whole array instead of one per record, following the same
+ * shared-transaction pattern as `putRemoteObjectsBatch`. Used by
+ * `retryDeferredParent` (bookmarks/index.ts), which otherwise deleted each
+ * retried record's deferred-materialization row one at a time. */
+export async function deleteDeferredMaterializationsBatch(objectIds: string[]): Promise<void> {
+  if (objectIds.length === 0) return;
+  const db = await getDb();
+  const tx = db.transaction("deferred_materializations", "readwrite");
+  for (const objectId of objectIds) {
+    await tx.store.delete(objectId);
+  }
+  await tx.done;
+}
+
 export async function putRemoteObject(record: RemoteObjectRecord): Promise<void> {
   await (await getDb()).put("remote_objects", record);
 }
@@ -912,9 +927,16 @@ export async function gcFieldStates(): Promise<void> {
   const allRecords = await db.getAll("field_state");
   const cutoffMs = Date.now() - FIELD_STATE_GC_RETENTION_MS;
   const objectIds = selectFieldStateGcCandidates(allRecords, cutoffMs);
+  if (objectIds.length === 0) return;
+
+  const tx = db.transaction("field_state", "readwrite");
+  const index = tx.store.index("by-object-id");
   for (const objectId of objectIds) {
-    await deleteFieldStates(objectId);
+    for await (const cursor of index.iterate(objectId)) {
+      await cursor.delete();
+    }
   }
+  await tx.done;
 }
 
 /** Wipes all per-field provenance (docs/protocol.md §11 snapshot resync

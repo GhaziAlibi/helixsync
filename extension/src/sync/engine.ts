@@ -240,17 +240,25 @@ export async function uploadPending(): Promise<void> {
       await removeFromQueue(resolved);
       progressed = progressed || resolved.length > 0;
 
+      const toRequeue: string[] = [];
+      const toRemove: string[] = [];
+
       for (const rejection of response.rejected) {
         // Permanent client-side errors: drop rather than retry forever.
         // "object_not_found" can be a legitimate ordering race (an update
         // uploaded before its create landed) so it's requeued instead.
         if (rejection.reason === "object_not_found") {
-          await requeueInFlight([rejection.operationId]);
+          toRequeue.push(rejection.operationId);
         } else {
-          await removeFromQueue([rejection.operationId]);
-          progressed = true;
+          toRemove.push(rejection.operationId);
           console.error("HelixSync: dropping operation after rejection", rejection);
         }
+      }
+
+      if (toRequeue.length > 0) await requeueInFlight(toRequeue);
+      if (toRemove.length > 0) {
+        await removeFromQueue(toRemove);
+        progressed = true;
       }
     } catch (err) {
       await requeueInFlight(ids);
@@ -810,6 +818,7 @@ export async function runSyncCycle(): Promise<void> {
         if (err instanceof ApiError && err.status === 429) {
           const cooldownSeconds = err.retryAfterSeconds ?? DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS;
           void setSyncBlockedUntil(Date.now() + cooldownSeconds * 1000);
+          scheduleCooldownRetry();
         }
         emitStatus("error", err instanceof Error ? err.message : String(err));
         // Don't hot-loop retrying against whatever just failed (e.g. the

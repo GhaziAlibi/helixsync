@@ -4,14 +4,25 @@
 // and `audit_logs` (appended on every auth/revocation/settings-change
 // event). Unlike `sync::compaction`, none of these deletes needs a snapshot
 // or any other precondition first — each row's data has no downstream
-// consumer once it's past its retention window, so a plain unconditional
-// DELETE per table is enough.
+// consumer once it's past its retention window. Each delete is still
+// chunked in bounded passes (see `DELETE_CHUNK_SIZE`) rather than a single
+// unconditional statement, since any of the three can accumulate a large
+// backlog between sweeps and an unchunked DELETE over that many rows would
+// hold row-exclusive locks and spike WAL for the full duration of one giant
+// statement.
 use std::time::Duration;
 
 use chrono::Utc;
 
 use crate::error::AppResult;
 use crate::state::AppState;
+
+/// Max rows removed per DELETE statement in each housekeeping sweep. Kept
+/// small enough that no single statement holds row-exclusive locks or
+/// spikes WAL for long, regardless of how large the backlog is — mirrors
+/// `sync::compaction::compact_user_sync_operations_chunked`'s
+/// `DELETE_CHUNK_SIZE`.
+const DELETE_CHUNK_SIZE: i64 = 5_000;
 
 /// Spawns the periodic housekeeping task for the lifetime of the process.
 /// Call once from `main.rs` after `AppState` is constructed.
@@ -52,10 +63,23 @@ pub async fn run_once(state: &AppState) {
 async fn delete_expired_device_credentials(state: &AppState) -> AppResult<()> {
     let cutoff =
         Utc::now() - chrono::Duration::seconds(state.config.device_credential_retention_secs);
-    let result = sqlx::query!("DELETE FROM device_credentials WHERE expires_at < $1", cutoff)
+    let mut total_rows: u64 = 0;
+    loop {
+        let result = sqlx::query!(
+            "DELETE FROM device_credentials WHERE id IN ( \
+                SELECT id FROM device_credentials WHERE expires_at < $1 LIMIT $2 \
+             )",
+            cutoff,
+            DELETE_CHUNK_SIZE
+        )
         .execute(&state.db)
         .await?;
-    tracing::debug!(rows = result.rows_affected(), "housekeeping: pruned device_credentials");
+        total_rows += result.rows_affected();
+        if result.rows_affected() == 0 {
+            break;
+        }
+    }
+    tracing::debug!(rows = total_rows, "housekeeping: pruned device_credentials");
     Ok(())
 }
 
@@ -64,18 +88,44 @@ async fn delete_expired_device_credentials(state: &AppState) -> AppResult<()> {
 // window would protect, so "expired" alone is the right cutoff.
 async fn delete_expired_web_sessions(state: &AppState) -> AppResult<()> {
     let now = Utc::now();
-    let result = sqlx::query!("DELETE FROM web_sessions WHERE expires_at < $1", now)
+    let mut total_rows: u64 = 0;
+    loop {
+        let result = sqlx::query!(
+            "DELETE FROM web_sessions WHERE id IN ( \
+                SELECT id FROM web_sessions WHERE expires_at < $1 LIMIT $2 \
+             )",
+            now,
+            DELETE_CHUNK_SIZE
+        )
         .execute(&state.db)
         .await?;
-    tracing::debug!(rows = result.rows_affected(), "housekeeping: pruned web_sessions");
+        total_rows += result.rows_affected();
+        if result.rows_affected() == 0 {
+            break;
+        }
+    }
+    tracing::debug!(rows = total_rows, "housekeeping: pruned web_sessions");
     Ok(())
 }
 
 async fn delete_old_audit_logs(state: &AppState) -> AppResult<()> {
     let cutoff = Utc::now() - chrono::Duration::seconds(state.config.audit_log_retention_secs);
-    let result = sqlx::query!("DELETE FROM audit_logs WHERE created_at < $1", cutoff)
+    let mut total_rows: u64 = 0;
+    loop {
+        let result = sqlx::query!(
+            "DELETE FROM audit_logs WHERE id IN ( \
+                SELECT id FROM audit_logs WHERE created_at < $1 LIMIT $2 \
+             )",
+            cutoff,
+            DELETE_CHUNK_SIZE
+        )
         .execute(&state.db)
         .await?;
-    tracing::debug!(rows = result.rows_affected(), "housekeeping: pruned audit_logs");
+        total_rows += result.rows_affected();
+        if result.rows_affected() == 0 {
+            break;
+        }
+    }
+    tracing::debug!(rows = total_rows, "housekeeping: pruned audit_logs");
     Ok(())
 }

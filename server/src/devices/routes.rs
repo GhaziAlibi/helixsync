@@ -325,6 +325,13 @@ async fn revoke_device(
         .device_revocation_cache
         .insert(id, (std::time::Instant::now(), false));
 
+    // Also drop any live WebSocket the revoked device currently has open —
+    // otherwise it keeps receiving `changes_available` pushes (notify_changes
+    // filters connections by user, not by revocation status) until its
+    // socket happens to close on its own (ping/pong timeout or the client
+    // disconnecting).
+    state.ws_registry.disconnect_device(user.user_id, id);
+
     crate::audit::log(&state, Some(user.user_id), Some(id), "device_revoked").await;
 
     Ok(Json(device))

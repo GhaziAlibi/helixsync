@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM device_credentials WHERE id IN ( SELECT id FROM device_credentials WHERE expires_at < $1 LIMIT $2 )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1448ff7780865b2def5ebca408148c2634a92a9807b1467ecad2b1324469babe"
+}

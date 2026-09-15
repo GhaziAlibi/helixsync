@@ -23,7 +23,7 @@
 // baseline — while still honoring any backoff/rate-limit cooldown that was
 // already in progress before the restart, rather than bypassing it.
 import { getDevice } from "../storage/db";
-import { fetchSettings, invalidateSettingsCache } from "./client";
+import { fetchSettings, invalidateSettingsCache, refreshAccessToken } from "./client";
 
 type ChangesAvailableHandler = () => void;
 
@@ -47,6 +47,16 @@ const MAX_RECONNECT_DELAY_MS = 60_000;
 // moment, not a signal that we're being rate-limited or otherwise
 // rejected, so it keeps the existing, less cautious backoff behavior.
 const MIN_UNAUTHENTICATED_CLOSE_BACKOFF_MS = 15_000;
+
+// Sending a token we already know is expired is a wasted round trip: the
+// server rejects it with auth_error, and since `receivedConnected` never
+// becomes true for that attempt, the "close" handler below applies
+// MIN_UNAUTHENTICATED_CLOSE_BACKOFF_MS on top — a 15s lockout for a failure
+// that was entirely avoidable by checking the clock first. This margin
+// covers the handshake round-trip itself, so a token that's merely
+// about-to-expire (not yet expired) when connect() starts doesn't slip
+// through and expire mid-handshake.
+const TOKEN_EXPIRY_SAFETY_MARGIN_MS = 5_000;
 
 // `socket` and `reconnectTimer` are correctly reset on every service worker
 // restart — a WebSocket object and a setTimeout handle are inherently tied
@@ -189,6 +199,30 @@ async function connect(): Promise<void> {
 
   disconnectRequested = false;
 
+  // Refresh proactively if the cached token is already expired (or expires
+  // within the handshake margin above) rather than sending it and letting
+  // the server tell us — see TOKEN_EXPIRY_SAFETY_MARGIN_MS's comment. This
+  // reuses client.ts's memoized refreshAccessToken, the same one
+  // authedFetch's 401 path uses, so a WS-triggered refresh and an
+  // HTTP-triggered refresh racing around the same moment share one
+  // in-flight request instead of each kicking off their own.
+  let accessToken = device.accessToken;
+  const expiresAt = new Date(device.accessTokenExpiresAt).getTime();
+  if (Date.now() >= expiresAt - TOKEN_EXPIRY_SAFETY_MARGIN_MS) {
+    try {
+      accessToken = await refreshAccessToken(device.serverUrl);
+    } catch (e) {
+      // Same fallback as the WebSocket-constructor failure just below:
+      // warn and let the normal backoff/reconnect machinery pick this up
+      // rather than inventing separate handling for this failure mode —
+      // covers a dead refresh token (ReauthRequiredError) the same way it
+      // covers any other reason this attempt couldn't proceed.
+      console.warn("HelixSync: failed to refresh access token before WebSocket connect", e);
+      scheduleReconnect();
+      return;
+    }
+  }
+
   let ws: WebSocket;
   try {
     ws = new WebSocket(wsUrlFor(device.serverUrl));
@@ -207,12 +241,20 @@ async function connect(): Promise<void> {
   // bookkeeping does.
   let receivedConnected = false;
 
+  // Scoped identically to `receivedConnected` above (fresh per connect()
+  // call) — set true when the "rate_limited" handler below already bumped
+  // reconnectDelayMs to the server's instructed value, so the "close"
+  // listener knows not to clobber that fine-grained value with the coarser
+  // MIN_UNAUTHENTICATED_CLOSE_BACKOFF_MS floor meant for an uninformative
+  // bare close.
+  let wasRateLimited = false;
+
   ws.addEventListener("open", () => {
     // docs/protocol.md §12 / docs/security.md §1.3: the device access
     // token is sent as the first text frame after connect rather than a
     // URL query parameter, so it never lands in a reverse proxy's access
     // log the way a query string would.
-    ws.send(device.accessToken);
+    ws.send(accessToken);
     // Backoff reset does NOT happen here — "open" only means the TCP/TLS
     // handshake finished, not that the server accepted the token just sent
     // above. Resetting this early would let an expired token reset the
@@ -274,6 +316,10 @@ async function connect(): Promise<void> {
         // fresh count from this moment, not from whenever the previous
         // (possibly much smaller) backoff was armed.
         void setReconnectBlockedUntil(Date.now() + bumped);
+        // Tell the "close" listener below this attempt's close is already
+        // explained — don't let it re-raise the delay to
+        // MIN_UNAUTHENTICATED_CLOSE_BACKOFF_MS on top of what we just set.
+        wasRateLimited = true;
       }
     }
   });
@@ -281,7 +327,7 @@ async function connect(): Promise<void> {
   ws.addEventListener("close", () => {
     if (socket === ws) socket = undefined;
     if (disconnectRequested) return;
-    if (!receivedConnected) {
+    if (!receivedConnected && !wasRateLimited) {
       // This attempt never got a "connected" message — closed by
       // WEBSOCKET_HANDSHAKE_LIMIT before the upgrade completed (invisible to
       // JS as anything but a bare 1006), or some other failure before auth
@@ -291,6 +337,10 @@ async function connect(): Promise<void> {
       // reconnectDelayMs is still at its initial value or already larger
       // (e.g. a prior rate_limited bump, or several unauthenticated closes
       // in a row already having raised it past the floor via doubling).
+      // Skipped when `wasRateLimited` is true: the rate_limited handler
+      // already set reconnectDelayMs to the server's own instructed value,
+      // and this floor (meant for an uninformative bare close) would
+      // otherwise override that fine-grained value with a much coarser one.
       void setReconnectDelayMs(Math.max(reconnectDelayMs, MIN_UNAUTHENTICATED_CLOSE_BACKOFF_MS));
     }
     scheduleReconnect();

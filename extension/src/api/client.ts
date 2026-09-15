@@ -67,7 +67,7 @@ export class ReauthRequiredError extends Error {}
 // server with duplicate, mutually-invalidating tokens.
 let activeRefreshPromise: Promise<string> | null = null;
 
-async function refreshAccessToken(serverUrl: string): Promise<string> {
+export async function refreshAccessToken(serverUrl: string): Promise<string> {
   if (activeRefreshPromise) return activeRefreshPromise;
 
   activeRefreshPromise = (async () => {
@@ -128,7 +128,19 @@ async function authedFetch(path: string, init: RequestInit = {}): Promise<Respon
 
   let res = await doFetch(device.accessToken);
   if (res.status === 401) {
-    const newToken = await refreshAccessToken(device.serverUrl);
+    // Before rotating the refresh token ourselves, check whether some other
+    // concurrently in-flight `authedFetch` call already landed a refresh
+    // while we were waiting on our own request — if so, our 401 was caused
+    // by presenting the token that refresh just made stale, not by genuine
+    // expiry, and reusing the already-fresh token avoids an unnecessary
+    // second rotation (see `activeRefreshPromise` comment above for the
+    // full race). `getDevice()` is cheap here: it's backed by an in-memory
+    // cache that's already been populated by the call above.
+    const currentDevice = await getDevice();
+    const newToken =
+      currentDevice && currentDevice.accessToken !== device.accessToken
+        ? currentDevice.accessToken
+        : await refreshAccessToken(device.serverUrl);
     res = await doFetch(newToken);
   }
   return res;

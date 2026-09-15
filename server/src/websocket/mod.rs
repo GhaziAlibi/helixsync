@@ -11,6 +11,7 @@ use serde::Serialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::auth::extractors::DEVICE_REVOCATION_CACHE_TTL;
 use crate::error::AppError;
 use crate::middleware::client_ip::client_ip;
 use crate::middleware::rate_limit::{
@@ -80,6 +81,33 @@ impl ConnectionRegistry {
     pub fn unregister(&self, user_id: Uuid, id: u64) {
         if let Some(mut entry) = self.connections.get_mut(&user_id) {
             entry.retain(|c| c.id != id);
+            let now_empty = entry.is_empty();
+            drop(entry);
+            if now_empty {
+                self.connections.remove(&user_id);
+            }
+        }
+    }
+
+    /// Force-closes every open connection belonging to `device_id` under
+    /// `user_id` — called from `revoke_device` (server/src/devices/routes.rs)
+    /// so a revoked device's live WebSocket doesn't keep receiving
+    /// `changes_available` pushes (or sit connected at all) until it happens
+    /// to disconnect on its own (ping/pong timeout or the client closing).
+    ///
+    /// Removing the `Connection` entries here drops their `sender` half of
+    /// the mpsc channel. `handle_socket`'s main loop is a `tokio::select!`
+    /// with `outgoing = rx.recv()` as one of its arms; once the last sender
+    /// for that channel is dropped, `rx.recv()` resolves to `None` — tokio
+    /// wakes the receiver as part of the drop, there's no polling delay —
+    /// so the task takes the existing `None => break` path on its very next
+    /// poll and then runs its own `unregister` call, exactly like any other
+    /// close. That means this method only needs to touch the registry's own
+    /// bookkeeping; it doesn't need a separate shutdown signal or to close
+    /// the socket itself; dropping the sender is what makes the task notice.
+    pub fn disconnect_device(&self, user_id: Uuid, device_id: Uuid) {
+        if let Some(mut entry) = self.connections.get_mut(&user_id) {
+            entry.retain(|c| c.device_id != device_id);
             let now_empty = entry.is_empty();
             drop(entry);
             if now_empty {
@@ -228,16 +256,39 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 
     // Confirm the device is not revoked before accepting the connection.
-    let device_active = sqlx::query_scalar!(
-        "SELECT revoked_at IS NULL FROM devices WHERE id = $1",
-        claims.sub
-    )
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or(Some(false))
-    .unwrap_or(false);
+    // Checks `state.device_revocation_cache` first, exactly like
+    // `AuthenticatedDevice::from_request_parts` in auth::extractors does for
+    // every ordinary HTTP request, instead of paying a DB pool checkout on
+    // every single WS handshake (see the module's own rate-limiting comment
+    // above for why that matters during a reconnect burst).
+    let cached = state
+        .device_revocation_cache
+        .get(&claims.sub)
+        .filter(|entry| entry.0.elapsed() < DEVICE_REVOCATION_CACHE_TTL)
+        .map(|entry| entry.1);
+
+    let device_active = match cached {
+        Some(active) => active,
+        None => {
+            let active = sqlx::query_scalar!(
+                "SELECT revoked_at IS NULL FROM devices WHERE id = $1 AND user_id = $2",
+                claims.sub,
+                claims.user_id
+            )
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .flatten()
+            .unwrap_or(false);
+
+            state
+                .device_revocation_cache
+                .insert(claims.sub, (Instant::now(), active));
+
+            active
+        }
+    };
 
     if !device_active {
         let _ = socket.close().await;
@@ -312,4 +363,64 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     // registry (see `ConnectionRegistry::register`'s and `unregister`'s docs
     // for why that matters).
     state.ws_registry.unregister(claims.user_id, conn_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Mirrors what revoke_device (server/src/devices/routes.rs) triggers,
+    // and what handle_socket's own select loop observes on the other end:
+    // disconnect_device should both remove the connection from the registry
+    // and cause the receiving side's channel to close, since that's the
+    // only signal handle_socket's task has to notice it should exit and run
+    // its own `unregister`.
+    #[tokio::test]
+    async fn disconnect_device_drops_sender_and_prunes_registry() {
+        let registry = ConnectionRegistry::new();
+        let user_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let other_device_id = Uuid::new_v4();
+
+        let (tx, mut rx) = mpsc::channel::<String>(32);
+        registry.register(user_id, device_id, tx);
+
+        let (other_tx, mut other_rx) = mpsc::channel::<String>(32);
+        registry.register(user_id, other_device_id, other_tx);
+
+        registry.disconnect_device(user_id, device_id);
+
+        // The revoked device's receiver observes the channel closing, which
+        // is exactly what makes handle_socket's `outgoing = rx.recv()` arm
+        // break out of its loop and unregister.
+        assert_eq!(rx.recv().await, None);
+
+        // The other device on the same user wasn't touched — a targeted
+        // eviction, not a blunt wipe of every connection for the user.
+        registry.notify_changes(user_id, 1, None);
+        assert_eq!(other_rx.recv().await.as_deref(), Some(r#"{"type":"changes_available","cursor":1}"#));
+
+        // And the registry's own bookkeeping no longer thinks the revoked
+        // device is connected.
+        let conns = registry.connections.get(&user_id).unwrap();
+        assert!(conns.iter().all(|c| c.device_id != device_id));
+    }
+
+    #[tokio::test]
+    async fn disconnect_device_is_a_no_op_for_unknown_user_or_device() {
+        let registry = ConnectionRegistry::new();
+        let user_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+
+        let (tx, mut rx) = mpsc::channel::<String>(32);
+        registry.register(user_id, device_id, tx);
+
+        // Different user entirely — must not touch anything.
+        registry.disconnect_device(Uuid::new_v4(), device_id);
+        // Same user, unrelated device id — must not touch anything either.
+        registry.disconnect_device(user_id, Uuid::new_v4());
+
+        registry.notify_changes(user_id, 7, None);
+        assert_eq!(rx.recv().await.as_deref(), Some(r#"{"type":"changes_available","cursor":7}"#));
+    }
 }

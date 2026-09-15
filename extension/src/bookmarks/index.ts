@@ -6,6 +6,7 @@
 // device-generated random ones.
 import {
   deleteDeferredMaterialization,
+  deleteDeferredMaterializationsBatch,
   getDeferredMaterializationsWaitingOn,
   getFieldState,
   getFieldStatesForObjects,
@@ -597,16 +598,35 @@ async function materialize(objectId: string, objectType: ObjectType, p: Bookmark
  * on down the tree. */
 async function retryDeferredParent(parentObjectId: string): Promise<void> {
   const deferred = await getDeferredMaterializationsWaitingOn(parentObjectId);
-  for (const record of deferred) {
-    await deleteDeferredMaterialization(record.objectId);
+  if (deferred.length === 0) return;
 
-    const liveness = await getFieldState(record.objectId, "liveness");
+  // Batch every lookup the loop below needs, up front, in one shared
+  // transaction each — instead of up to 6 sequential IDB round trips per
+  // deferred record (deleteDeferredMaterialization, getFieldState x4,
+  // chromiumIdFor), which made a folder with N deferred children cost
+  // ~6N sequential transactions. Prefetching title/url for every record
+  // (not just the subset that turns out to be unmaterialized) is a
+  // deliberate, small amount of wasted work in exchange for keeping this
+  // O(1) transactions instead of O(N).
+  const deferredObjectIds = deferred.map((record) => record.objectId);
+  const [livenessByObjectId, moveByObjectId, titleByObjectId, urlByObjectId, chromiumIdByObjectId] =
+    await Promise.all([
+      getFieldStatesForObjects(deferredObjectIds, "liveness"),
+      getFieldStatesForObjects(deferredObjectIds, "move"),
+      getFieldStatesForObjects(deferredObjectIds, "title"),
+      getFieldStatesForObjects(deferredObjectIds, "url"),
+      chromiumIdsFor(deferredObjectIds),
+    ]);
+  await deleteDeferredMaterializationsBatch(deferredObjectIds);
+
+  for (const record of deferred) {
+    const liveness = livenessByObjectId.get(record.objectId);
     if (liveness?.value !== "live") continue; // deleted (or never-live) since deferring
 
-    const moveState = await getFieldState(record.objectId, "move");
+    const moveState = moveByObjectId.get(record.objectId);
     const move = moveState?.value as { parent?: string | null; position?: string } | undefined;
 
-    if (await chromiumIdFor(record.objectId)) {
+    if (chromiumIdByObjectId.has(record.objectId)) {
       // Already materialized — this was a move waiting on its destination.
       if (move?.parent) {
         await applyMove(record.objectId, record.objectType, {
@@ -618,10 +638,8 @@ async function retryDeferredParent(parentObjectId: string): Promise<void> {
     }
 
     // Not yet materialized — this was a create/restore waiting on its parent.
-    const [titleState, urlState] = await Promise.all([
-      getFieldState(record.objectId, "title"),
-      getFieldState(record.objectId, "url"),
-    ]);
+    const titleState = titleByObjectId.get(record.objectId);
+    const urlState = urlByObjectId.get(record.objectId);
     await materialize(record.objectId, record.objectType, {
       title: (titleState?.value as string) ?? "",
       url: (urlState?.value as string | null) ?? null,
