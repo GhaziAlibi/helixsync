@@ -208,10 +208,20 @@ const MAX_BATCHES_PER_CYCLE = 50;
 // lands. But if the create was itself permanently rejected (e.g.
 // `payload_too_large`) and dropped, every op depending on it requeues as
 // "object_not_found" forever: it keeps the lowest device sequence in the
-// queue, so it's re-fetched at the head of every batch of every cycle
-// (`attempts` tracks this). This caps it — 20 attempts is a deliberately
-// generous margin over the minutes an actual ordering race takes to
-// resolve itself, so only a genuinely unresolvable op ever hits it.
+// queue, so it's re-fetched at the head of the queue on every call to
+// `uploadPending` (`attempts` tracks this). This caps it — 20 attempts is a
+// deliberately generous margin over the number of real sync cycles an
+// actual ordering race takes to resolve itself, so only a genuinely
+// unresolvable op ever hits it.
+//
+// `uploadPending` itself only ever bumps this once per call, no matter how
+// many batches that call drains — see `requeuedThisCycle` below. Without
+// that, a single call could re-select the same blocked op at the head of
+// every subsequent batch (it's requeued back to LOCAL_QUEUED, so it's still
+// there) and requeue it again each time, racing it through all 20 attempts
+// in one cycle before `downloadAndApply` (which only runs after
+// `uploadPending` returns) ever gets a chance to land the dependency and
+// unblock it for real.
 //
 // Critically, `attempts` only advances when the server has explicitly,
 // individually rejected an operation (the "object_not_found" requeue
@@ -251,6 +261,15 @@ export function classifyRejections(rejected: UploadRejection[]): {
 }
 
 export async function uploadPending(): Promise<void> {
+  // Operation ids already requeued as `object_not_found` earlier in this
+  // same call. Since a requeued op goes back to LOCAL_QUEUED and keeps the
+  // lowest device sequence in the queue, `getPendingOperations` will hand it
+  // back to us again at the head of the very next batch — this set makes
+  // sure we don't treat that re-fetch as a fresh attempt (see the comment
+  // above `MAX_UPLOAD_ATTEMPTS`). The op stays queued and simply waits for a
+  // later cycle, by which point `downloadAndApply` has had a chance to run.
+  const requeuedThisCycle = new Set<string>();
+
   for (let batch = 0; batch < MAX_BATCHES_PER_CYCLE; batch++) {
     const pending = await getPendingOperations(MAX_UPLOAD_BATCH);
     if (pending.length === 0) return;
@@ -263,11 +282,15 @@ export async function uploadPending(): Promise<void> {
       );
       await removeFromQueue(stuck.map((p) => p.operation.operationId));
     }
-    const retryable = pending.filter((p) => p.attempts < MAX_UPLOAD_ATTEMPTS);
+    const retryable = pending.filter(
+      (p) => p.attempts < MAX_UPLOAD_ATTEMPTS && !requeuedThisCycle.has(p.operation.operationId),
+    );
 
     if (retryable.length === 0) {
       // Nothing left to upload this round, but dropping `stuck` above still
       // counts as progress, and there may be more queued beyond this batch.
+      // (Or everything left in this batch was already requeued earlier in
+      // this cycle and is just waiting it out — see `requeuedThisCycle`.)
       if (pending.length < MAX_UPLOAD_BATCH) return;
       continue;
     }
@@ -293,7 +316,10 @@ export async function uploadPending(): Promise<void> {
       // operationIds as "object_not_found" — a real per-operation verdict,
       // so it's fair (and necessary, per MAX_UPLOAD_ATTEMPTS's comment) to
       // count it as an attempt.
-      if (toRequeue.length > 0) await requeueInFlight(toRequeue, true);
+      if (toRequeue.length > 0) {
+        await requeueInFlight(toRequeue, true);
+        for (const id of toRequeue) requeuedThisCycle.add(id);
+      }
       if (toRemove.length > 0) {
         await removeFromQueue(toRemove);
         progressed = true;
@@ -813,6 +839,19 @@ function scheduleCooldownRetry(): void {
     cooldownRetryTimer = undefined;
     void runSyncCycle();
   }, remaining);
+}
+
+/** Called on device disconnect so a stale rate-limit cooldown (and any timer
+ * scheduled to retry once it lifts) doesn't linger against an
+ * account/server this device no longer holds credentials for — same
+ * reasoning, and the same await-before-returning pattern, as `disconnect` in
+ * api/websocket.ts. */
+export async function clearSyncBlockedState(): Promise<void> {
+  if (cooldownRetryTimer !== undefined) {
+    clearTimeout(cooldownRetryTimer);
+    cooldownRetryTimer = undefined;
+  }
+  await setSyncBlockedUntil(0);
 }
 
 let syncInFlight = false;

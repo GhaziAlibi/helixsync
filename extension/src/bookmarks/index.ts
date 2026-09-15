@@ -38,6 +38,7 @@ import { createMicroBatchQueue } from "../sync/micro-batch";
 import { createSuppressionGuard } from "../sync/suppress";
 import { keyBetween } from "../util/fractional-index";
 import { uuidv7 } from "../util/uuid";
+import { yieldToEventLoop } from "../util/yield";
 import type { BookmarkPayload, ObjectType, OperationOut, OperationType } from "../sync/types";
 
 const MAP_TYPE: ObjectType = "bookmark"; // shared local mapping namespace for all chrome.bookmarks nodes
@@ -600,6 +601,14 @@ async function materialize(objectId: string, objectType: ObjectType, p: Bookmark
  * these retries is itself a folder that successfully materializes, its own
  * `retryDeferredParent` call unblocks whatever was waiting on *it*, and so
  * on down the tree. */
+// Matches sync/engine.ts's CRYPTO_YIELD_CHUNK convention (see yieldToEventLoop's
+// doc comment for why a MessageChannel round-trip rather than a microtask or
+// setTimeout): a smaller chunk than that constant's 25, since each iteration
+// here does chrome.bookmarks IPC work (materialize's create call, plus a
+// recursive retryDeferredParent for every child that's itself a folder) that
+// can be sizeable, rather than pure in-process crypto.
+const DEFERRED_RETRY_YIELD_CHUNK = 10;
+
 async function retryDeferredParent(parentObjectId: string): Promise<void> {
   const deferred = await getDeferredMaterializationsWaitingOn(parentObjectId);
   if (deferred.length === 0) return;
@@ -623,7 +632,12 @@ async function retryDeferredParent(parentObjectId: string): Promise<void> {
     ]);
   await deleteDeferredMaterializationsBatch(deferredObjectIds);
 
+  let sinceYield = 0;
   for (const record of deferred) {
+    if (++sinceYield >= DEFERRED_RETRY_YIELD_CHUNK) {
+      sinceYield = 0;
+      await yieldToEventLoop();
+    }
     const liveness = livenessByObjectId.get(record.objectId);
     if (liveness?.value !== "live") continue; // deleted (or never-live) since deferring
 

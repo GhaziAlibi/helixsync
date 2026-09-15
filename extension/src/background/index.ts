@@ -14,6 +14,7 @@ import {
   onChangesAvailable,
 } from "../api/websocket";
 import {
+  countPendingTabRestores,
   gcFieldStates,
   getDevice,
   getPendingTabRestores,
@@ -25,7 +26,13 @@ import {
   pruneRemoteObjectsByType,
   resetInFlightOperations,
 } from "../storage/db";
-import { getPendingCount, onStatusChange, runSyncCycle, type SyncStatus } from "../sync/engine";
+import {
+  clearSyncBlockedState,
+  getPendingCount,
+  onStatusChange,
+  runSyncCycle,
+  type SyncStatus,
+} from "../sync/engine";
 import { flushAllMicroBatchQueues } from "../sync/micro-batch";
 import type { ObjectType } from "../sync/types";
 import { backfillExisting as backfillBookmarks, registerCapture as registerBookmarkCapture } from "../bookmarks";
@@ -76,8 +83,8 @@ async function updateBadge(): Promise<void> {
       await chrome.action.setBadgeText({ text: "" });
       return;
     }
-    const pending = await getPendingTabRestores();
-    await chrome.action.setBadgeText({ text: pending.length > 0 ? String(pending.length) : "" });
+    const pendingCount = await countPendingTabRestores();
+    await chrome.action.setBadgeText({ text: pendingCount > 0 ? String(pendingCount) : "" });
   } catch (e) {
     console.warn("HelixSync: failed to update restore badge", e);
   }
@@ -255,6 +262,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       case "DEVICE_DISCONNECTED": {
         await disconnectWebSocket();
+        await clearSyncBlockedState();
         sendResponse({ ok: true });
         return;
       }

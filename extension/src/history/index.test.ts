@@ -59,15 +59,18 @@ function baseDevice(overrides: Partial<DeviceRecord> = {}): DeviceRecord {
  * sorted newest-first like the real API — search filters to items with
  * `lastVisitTime < endTime` when `endTime` is passed, exactly like real
  * Chrome does, since that's the one behavior backfillExisting's resume
- * path depends on. */
+ * path depends on, and truncates to `maxResults` like real Chrome does too,
+ * since that's what backfillExisting's inner search-pagination loop depends
+ * on. */
 function installFakeChromeHistory(items: FakeHistoryItem[]): void {
   const sorted = [...items].sort((a, b) => b.lastVisitTime - a.lastVisitTime);
   (globalThis as unknown as { chrome: unknown }).chrome = {
     history: {
-      search: vi.fn(async (query: { endTime?: number }) => {
+      search: vi.fn(async (query: { endTime?: number; maxResults?: number }) => {
         const filtered =
           query.endTime === undefined ? sorted : sorted.filter((i) => i.lastVisitTime < query.endTime!);
-        return filtered.map((i) => ({ id: i.url, url: i.url, title: "", lastVisitTime: i.lastVisitTime }));
+        const page = query.maxResults === undefined ? filtered : filtered.slice(0, query.maxResults);
+        return page.map((i) => ({ id: i.url, url: i.url, title: "", lastVisitTime: i.lastVisitTime }));
       }),
       getVisits: vi.fn(async ({ url }: { url: string }) => {
         const item = items.find((i) => i.url === url);
@@ -168,5 +171,86 @@ describe("backfillExisting (EXT-3 resumability, review.md)", () => {
     await backfillExisting();
 
     expect(createLocalOperationsBatchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("backfillExisting search pagination (review.md)", () => {
+  // BACKFILL_SEARCH_PAGE_SIZE is 5_000 and not exported (matching this file's
+  // existing convention of hardcoding BACKFILL_FLUSH_CHUNK's 500 rather than
+  // importing it) — these sizes are chosen relative to that page size.
+  const PAGE_SIZE = 5_000;
+
+  it("issues a second chrome.history.search call, resuming from the first page's oldest item, when history exceeds one page", async () => {
+    const items: FakeHistoryItem[] = Array.from({ length: PAGE_SIZE + 1 }, (_, i) => {
+      const lastVisitTime = 100_000 - i; // strictly decreasing, newest-first
+      return { url: `https://item-${i}.test`, lastVisitTime, visitTimes: [lastVisitTime] };
+    });
+    installFakeChromeHistory(items);
+
+    await backfillExisting();
+
+    const searchMock = (globalThis as unknown as { chrome: { history: { search: ReturnType<typeof vi.fn> } } })
+      .chrome.history.search;
+
+    // One page's worth (5000) plus the one leftover item forces a second
+    // search call; a leftover page shorter than PAGE_SIZE then stops the loop.
+    expect(searchMock).toHaveBeenCalledTimes(2);
+    expect(searchMock.mock.calls[0][0].endTime).toBeUndefined();
+    expect(searchMock.mock.calls[0][0].maxResults).toBe(PAGE_SIZE);
+    // Page 1's oldest (last) item is lastVisitTime 100_000 - (PAGE_SIZE - 1);
+    // page 2 must resume from exactly that, not from the outer
+    // historyBackfillLastVisitTime mechanism (device has none set here).
+    const page1OldestVisitTime = 100_000 - (PAGE_SIZE - 1);
+    expect(searchMock.mock.calls[1][0].endTime).toBe(page1OldestVisitTime);
+
+    // Every item across both pages was processed exactly once (no gap, no
+    // double-count at the page boundary), and the final high-water mark is
+    // the very oldest item across the whole backfill.
+    expect(totalOps(createLocalOperationsBatchMock.mock.calls.map((c) => c[0]))).toBe(PAGE_SIZE + 1);
+    expect(device.historyBackfillLastVisitTime).toBe(100_000 - PAGE_SIZE);
+  });
+
+  it("stops paginating once a page comes back empty, without dropping the last full page", async () => {
+    const items: FakeHistoryItem[] = Array.from({ length: PAGE_SIZE }, (_, i) => {
+      const lastVisitTime = 100_000 - i;
+      return { url: `https://full-${i}.test`, lastVisitTime, visitTimes: [lastVisitTime] };
+    });
+    installFakeChromeHistory(items);
+
+    await backfillExisting();
+
+    const searchMock = (globalThis as unknown as { chrome: { history: { search: ReturnType<typeof vi.fn> } } })
+      .chrome.history.search;
+
+    // Exactly one full page of history: the first call returns PAGE_SIZE
+    // items (not yet known to be the last page), so a second call is made
+    // to confirm there's nothing left; that second call comes back empty
+    // and the loop stops there instead of looping forever or erroring.
+    expect(searchMock).toHaveBeenCalledTimes(2);
+    const secondCallResult = await searchMock.mock.results[1].value;
+    expect(secondCallResult).toHaveLength(0);
+
+    expect(totalOps(createLocalOperationsBatchMock.mock.calls.map((c) => c[0]))).toBe(PAGE_SIZE);
+    expect(device.historyBackfillLastVisitTime).toBe(100_000 - (PAGE_SIZE - 1));
+  });
+
+  it("still respects device.historyBackfillLastVisitTime as the very first page's endTime when pagination is also in play", async () => {
+    device = baseDevice({ historyBackfillLastVisitTime: 50_000 });
+    const items: FakeHistoryItem[] = Array.from({ length: PAGE_SIZE + 1 }, (_, i) => {
+      const lastVisitTime = 40_000 - i;
+      return { url: `https://old-${i}.test`, lastVisitTime, visitTimes: [lastVisitTime] };
+    });
+    installFakeChromeHistory(items);
+
+    await backfillExisting();
+
+    const searchMock = (globalThis as unknown as { chrome: { history: { search: ReturnType<typeof vi.fn> } } })
+      .chrome.history.search;
+    // The outer resume mechanism seeds only the FIRST page's endTime.
+    expect(searchMock.mock.calls[0][0].endTime).toBe(50_000);
+    // The second page's endTime comes from pagination, not from re-reading
+    // the (unchanged mid-loop) device record.
+    const page1OldestVisitTime = 40_000 - (PAGE_SIZE - 1);
+    expect(searchMock.mock.calls[1][0].endTime).toBe(page1OldestVisitTime);
   });
 });

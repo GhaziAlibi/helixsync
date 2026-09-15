@@ -38,6 +38,7 @@ fn test_config() -> Config {
         housekeeping_interval_secs: 60 * 60 * 24,
         device_credential_retention_secs: 60 * 60 * 24 * 7,
         audit_log_retention_secs: 60 * 60 * 24 * 90,
+        database_max_connections: 5,
     }
 }
 
@@ -1025,7 +1026,7 @@ async fn concurrent_upload_is_not_blocked_by_compaction_delete_phase(pool: PgPoo
     // The backlog above was inserted directly via SQL, bypassing
     // `sync::routes::process_batch`'s normal cursor allocator — which hands
     // out fresh `server_cursor` values from a dedicated `sync_cursors` row
-    // keyed by `device_id IS NULL` (see `current_cursor_tx` /
+    // keyed by `device_id IS NULL` (see `current_cursor` /
     // the `cursor_value = cursor_value + count` allocation in
     // `process_batch`), entirely separate from the per-device ack cursors
     // below. Without advancing that row to `OP_COUNT` too, the concurrent

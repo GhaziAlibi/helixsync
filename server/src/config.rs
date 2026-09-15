@@ -58,6 +58,11 @@ pub struct Config {
     /// other two housekeeping tables, `audit_logs` rows have no `expires_at`
     /// of their own, so the cutoff is measured from `created_at`.
     pub audit_log_retention_secs: i64,
+    /// Upper bound on concurrent Postgres connections (`database::connect`).
+    /// Sized per deployment: too low and ordinary requests queue behind
+    /// background work (compaction, housekeeping, batch uploads) under load;
+    /// too high and the server can exceed what the Postgres instance allows.
+    pub database_max_connections: u32,
 }
 
 impl Config {
@@ -135,6 +140,11 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(60 * 60 * 24 * 90); // 90 days
 
+        let database_max_connections = env::var("DATABASE_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50);
+
         Ok(Self {
             database_url,
             bind_addr,
@@ -154,6 +164,7 @@ impl Config {
             housekeeping_interval_secs,
             device_credential_retention_secs,
             audit_log_retention_secs,
+            database_max_connections,
         })
     }
 }

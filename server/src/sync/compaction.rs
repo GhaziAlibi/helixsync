@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures::StreamExt;
+use sqlx::Acquire;
 use uuid::Uuid;
 
 use crate::error::AppResult;
@@ -49,12 +50,12 @@ pub fn spawn(state: AppState) {
 
 // Compacting one user is mostly waiting on Postgres (several round trips
 // per user, one transaction each), so running users one at a time left
-// most of the connection pool (`database::connect`'s max_connections=20)
-// idle for the length of an hourly compaction pass while ordinary request
-// traffic competed for the one connection actually in use. 8 fixed that but
-// overshot: with max_connections=20, 8 concurrent compaction transactions
-// could tie up 40% of the pool at once, starving ordinary request traffic
-// during the pass (SRV-3). 3 is the middle ground — still enough to
+// most of the connection pool (sized by `database_max_connections`, see
+// `database::connect`) idle for the length of an hourly compaction pass
+// while ordinary request traffic competed for the one connection actually
+// in use. 8 fixed that but overshot: 8 concurrent compaction transactions
+// could tie up a large share of the pool at once, starving ordinary request
+// traffic during the pass (SRV-3). 3 is the middle ground — still enough to
 // parallelize compaction across users, but even if all 3 slots land on
 // unusually large/slow accounts simultaneously, that's a small, bounded
 // share of the pool, leaving the large majority of connections free for
@@ -417,37 +418,106 @@ async fn prune_compacted_operations(state: &AppState, user_id: Uuid, ack_boundar
     // never holds any single set of locks for longer than one 5,000-row
     // chunk.
     //
-    // No ORDER BY needed on the inner LIMIT for correctness: `survivor_ids`
-    // rows never satisfy the WHERE clause, so they're never selected by any
-    // iteration (not merely pushed outside an unlucky LIMIT window) — every
-    // row the subquery does return this pass is one this pass actually
-    // deletes. That makes the matching set strictly finite and monotonically
-    // shrinking, so the loop is guaranteed to terminate once a pass deletes
-    // zero rows, regardless of how large `survivor_ids` is.
+    // The inner subquery orders by `server_cursor` before `LIMIT`: this is
+    // purely a query-plan concern, orthogonal to the termination argument
+    // below. `sync_operations` holds every user's rows, so without an
+    // ordering that matches `idx_sync_operations_user_cursor(user_id,
+    // server_cursor)`, the planner has no reason to prefer that index over
+    // one that satisfies `LIMIT` some other way (e.g. the primary key) and
+    // filters the rest in memory — potentially scanning far more of the
+    // table than the chunk it actually returns. Ordering by `server_cursor`
+    // lets it walk `idx_sync_operations_user_cursor` forward from this
+    // user's first matching row and stop as soon as it has `LIMIT` of them.
+    // Correctness never depended on the ordering — regardless of *which*
+    // eligible rows a pass picks up, `survivor_ids` rows never satisfy the
+    // WHERE clause, so they're never selected by any iteration (not merely
+    // pushed outside an unlucky LIMIT window) — every row the subquery does
+    // return this pass is one this pass actually deletes. That makes the
+    // matching set strictly finite and monotonically shrinking, so the loop
+    // is guaranteed to terminate once a pass deletes zero rows, regardless
+    // of how large `survivor_ids` is or which subset of eligible rows any
+    // given chunk happens to pick up.
+    //
+    // `survivor_ids` is loaded into a temp table once, up front, rather than
+    // passed as an `= ANY($n)` array parameter on every loop iteration: for
+    // an active account this can hold thousands of ids, and re-sending the
+    // whole array plus re-evaluating it against every candidate row on each
+    // of potentially many chunks is wasteful compared to an index-backed
+    // anti-join against a table Postgres can plan once. A temp table is only
+    // usable here because the whole sweep pins one connection out of the
+    // pool up front (`state.db.acquire()`) instead of letting each loop
+    // iteration's `begin()` pull a (possibly different) pooled connection —
+    // temp tables are session-scoped, so a table created on one pooled
+    // connection is invisible to another. Each chunk still runs as its own
+    // short transaction *on that connection*, preserving the property that
+    // matters (no lock outlives one chunk's delete); only the connection
+    // checkout itself, not any lock or transaction, spans the whole sweep.
+    // The temp table is dropped explicitly before the connection is
+    // returned to the pool, since a pooled connection is recycled rather
+    // than closed and Postgres would otherwise leave it visible to whatever
+    // this connection serves next.
     const DELETE_CHUNK_SIZE: i64 = 5_000;
-    loop {
-        let mut tx = state.db.begin().await?;
 
-        let result = sqlx::query!(
-            "DELETE FROM sync_operations WHERE id IN ( \
-                SELECT id FROM sync_operations \
-                WHERE user_id = $1 AND server_cursor <= $2 AND NOT (id = ANY($3)) \
-                LIMIT $4 \
-             )",
-            user_id,
-            ack_boundary,
-            &survivor_ids,
-            DELETE_CHUNK_SIZE
-        )
-        .execute(&mut *tx)
+    let mut conn = state.db.acquire().await?;
+
+    // Plain (non-macro) `sqlx::query` here, not `sqlx::query!`: the latter's
+    // compile-time check runs each macro invocation against its own
+    // connection, so it can never see a temp table a *previous* macro
+    // invocation created — the exact same cross-connection-visibility issue
+    // called out above, just at compile time instead of runtime. These
+    // three statements are simple enough that losing compile-time column
+    // verification isn't a meaningful cost.
+    sqlx::query("CREATE TEMPORARY TABLE compaction_survivor_ids (id BIGINT PRIMARY KEY) ON COMMIT PRESERVE ROWS")
+        .execute(&mut *conn)
         .await?;
 
-        tx.commit().await?;
-
-        if result.rows_affected() == 0 {
-            break;
-        }
+    if !survivor_ids.is_empty() {
+        sqlx::query("INSERT INTO compaction_survivor_ids SELECT unnest($1::bigint[])")
+            .bind(&survivor_ids)
+            .execute(&mut *conn)
+            .await?;
     }
 
-    Ok(())
+    let sweep_result: AppResult<()> = async {
+        loop {
+            let mut tx = Acquire::begin(&mut conn).await?;
+
+            let result = sqlx::query(
+                "DELETE FROM sync_operations WHERE id IN ( \
+                    SELECT so.id FROM sync_operations so \
+                    WHERE so.user_id = $1 AND so.server_cursor <= $2 \
+                      AND NOT EXISTS ( \
+                          SELECT 1 FROM compaction_survivor_ids s WHERE s.id = so.id \
+                      ) \
+                    ORDER BY so.server_cursor ASC \
+                    LIMIT $3 \
+                 )",
+            )
+            .bind(user_id)
+            .bind(ack_boundary)
+            .bind(DELETE_CHUNK_SIZE)
+            .execute(&mut *tx)
+            .await?;
+
+            tx.commit().await?;
+
+            if result.rows_affected() == 0 {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+    .await;
+
+    // Best-effort: the connection returning to the pool without this table
+    // dropped would only cause a (loud, immediate) "already exists" error
+    // the next time this same connection runs a prune pass, not silent
+    // corruption — but there's no reason to leave it behind when we can
+    // clean up now.
+    let _ = sqlx::query("DROP TABLE IF EXISTS compaction_survivor_ids")
+        .execute(&mut *conn)
+        .await;
+
+    sweep_result
 }

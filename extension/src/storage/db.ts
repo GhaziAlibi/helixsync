@@ -1,6 +1,7 @@
 import { openDB, type DBSchema, type IDBPDatabase } from "idb";
 import type { HistoryVisitPayload, LocalOperation, ObjectType } from "../sync/types";
 import {
+  isPendingTabRestore,
   selectFieldStateGcCandidates,
   selectPendingTabRestores,
   selectRecentHistoryVisits,
@@ -886,6 +887,35 @@ export async function getPendingTabRestores(): Promise<PendingTabRestore[]> {
   ]);
   const materializedObjectIds = new Set(tabMappings.map((m) => m.objectId));
   return selectPendingTabRestores(records, materializedObjectIds);
+}
+
+/** Same count as `(await getPendingTabRestores()).length`, for callers that
+ * only need the number of pending tab restores (`updateBadge`,
+ * background/index.ts) — not the records themselves. `getPendingTabRestores`
+ * gets there via `getRemoteObjectsByType`'s `getAllFromIndex`, which
+ * deserializes and materializes *every* "tab" `remote_objects` row (payload
+ * included) into one array purely to read `.length` off the end result;
+ * on an account with a lot of synced tabs, `updateBadge` re-pays that full
+ * cost every sync cycle and every WebSocket push just to set the toolbar
+ * badge text. This instead walks the same `by-type` index via a cursor,
+ * applying `isPendingTabRestore` (the exact same per-record predicate
+ * `selectPendingTabRestores` filters with) one row at a time — so it never
+ * holds more than one record's deserialized payload in memory at once,
+ * instead of every matching record simultaneously. */
+export async function countPendingTabRestores(): Promise<number> {
+  const db = await getDb();
+  const [tabMappings, cursor] = await Promise.all([
+    db.getAllFromIndex("object_mappings", "by-type", "tab"),
+    db.transaction("remote_objects").store.index("by-type").openCursor(IDBKeyRange.only("tab")),
+  ]);
+  const materializedObjectIds = new Set(tabMappings.map((m) => m.objectId));
+  let count = 0;
+  let c = cursor;
+  while (c) {
+    if (isPendingTabRestore(c.value, materializedObjectIds)) count++;
+    c = await c.continue();
+  }
+  return count;
 }
 
 export function fieldStateKey(objectId: string, field: string): string {

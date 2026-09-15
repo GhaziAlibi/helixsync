@@ -25,6 +25,7 @@ import { createMicroBatchQueue } from "../sync/micro-batch";
 import { createSuppressionGuard } from "../sync/suppress";
 import { tabGroupUpdateProps, tabsGroupOptions } from "./groupSync";
 import { fetchSettings } from "../api/client";
+import { createKeyedLock } from "../util/keyed-lock";
 import type {
   ObjectType,
   OperationOut,
@@ -53,6 +54,15 @@ const tabGroupsSupported = typeof chrome.tabGroups !== "undefined";
 // loading events (see that function's comment), which this synchronous
 // guard alone can't cover.
 const guard = createSuppressionGuard();
+
+// Serializes syncTabGroup calls per `groupObjectId`: RESTORE_ALL_TABS
+// (background/index.ts) restores several tabs concurrently, and if two of
+// them belong to the same remote group, without this they'd both read
+// `lookupChromiumLocalId` before either had created the group, race to
+// each create their own Chromium tab group via `chrome.tabs.group`, and
+// stomp each other's `establishMapping` call. Locking per key rather than
+// globally means unrelated groups still materialize fully in parallel.
+const groupSyncLock = createKeyedLock();
 
 function opKey(lamportTimestamp: number, deviceId: string, operationId: string, operationType: OperationType) {
   return { lamportTimestamp, deviceId, operationId, operationType };
@@ -249,16 +259,18 @@ async function stageTabRemoved(tabId: number): Promise<StagedTabOp | null> {
 async function syncTabGroup(chromiumTabId: string, groupObjectId: string): Promise<void> {
   if (!tabGroupsSupported) return;
 
-  const existingGroupId = await lookupChromiumLocalId(groupObjectId);
-  const groupId = await guard.run(() =>
-    chrome.tabs.group(tabsGroupOptions(Number(chromiumTabId), existingGroupId)),
-  );
-  await establishMapping(GROUP_TYPE, String(groupId), groupObjectId);
+  await groupSyncLock.run(groupObjectId, async () => {
+    const existingGroupId = await lookupChromiumLocalId(groupObjectId);
+    const groupId = await guard.run(() =>
+      chrome.tabs.group(tabsGroupOptions(Number(chromiumTabId), existingGroupId)),
+    );
+    await establishMapping(GROUP_TYPE, String(groupId), groupObjectId);
 
-  const stored = await getFieldState(groupObjectId, "state");
-  if (stored?.value) {
-    await guard.run(() => chrome.tabGroups.update(groupId, tabGroupUpdateProps(stored.value as TabGroupPayload)));
-  }
+    const stored = await getFieldState(groupObjectId, "state");
+    if (stored?.value) {
+      await guard.run(() => chrome.tabGroups.update(groupId, tabGroupUpdateProps(stored.value as TabGroupPayload)));
+    }
+  });
 }
 
 async function stageGroupUpdated(
@@ -359,8 +371,17 @@ async function flushTabEvents(events: QueuedTabEvent[]): Promise<void> {
   await recordLocalFieldStatesBatch(fieldStateEntries);
   // EXT-1: operations are now durably in pending_operations — nudge a sync
   // cycle instead of leaving them for the next alarm/push (see
-  // scheduleLocalSync's doc comment in sync/engine.ts).
-  scheduleLocalSync();
+  // scheduleLocalSync's doc comment in sync/engine.ts). Exception: a batch
+  // made up entirely of "activate" ops (i.e. only tab-switch events, which
+  // fire on every chrome.tabs.onActivated during normal browsing) skips the
+  // immediate debounced push — nothing on the receiving end materializes
+  // this state, so pushing it right away just wakes every peer device's
+  // service worker for no observable effect. The operations are still
+  // written to pending_operations above, so they go out on the next regular
+  // alarm/push like any other op; a batch with any non-"activate" op still
+  // triggers the immediate sync as before.
+  const hasNonActivateOp = staged.some((op) => op.operationType !== "activate");
+  if (hasNonActivateOp) scheduleLocalSync();
 }
 
 const enqueueTabEvent = createMicroBatchQueue<QueuedTabEvent>(flushTabEvents);

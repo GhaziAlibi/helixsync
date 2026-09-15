@@ -63,7 +63,20 @@ impl ConnectionRegistry {
         sender: mpsc::Sender<String>,
     ) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.connections.entry(user_id).or_default().push(Connection {
+        let mut entry = self.connections.entry(user_id).or_default();
+        // Evict any existing connection for this same device before pushing
+        // the new one. Without this, a reconnect that beats the old
+        // connection's own heartbeat timeout (network transition, sleep/
+        // wake) left the dead connection sitting alongside the live one —
+        // `notify_changes` would `try_send` to both, and the dead one would
+        // only get pruned once its own `pong_timeout` eventually elapsed.
+        // Dropping its `sender` here (same mechanism `disconnect_device`
+        // documents) makes that old connection's `handle_socket` task see
+        // `rx.recv() == None` on its next poll and unregister itself — no
+        // extra signaling needed. Scoped to `device_id` only, so a sibling
+        // device on the same user is never touched.
+        entry.retain(|c| c.device_id != device_id);
+        entry.push(Connection {
             id,
             device_id,
             sender,
@@ -404,6 +417,41 @@ mod tests {
         // device is connected.
         let conns = registry.connections.get(&user_id).unwrap();
         assert!(conns.iter().all(|c| c.device_id != device_id));
+    }
+
+    // Mirrors a reconnect that beats the old connection's own heartbeat
+    // timeout: registering a second connection for the same (user_id,
+    // device_id) must evict the first one, not let both sit in the registry
+    // simultaneously.
+    #[tokio::test]
+    async fn register_evicts_stale_connection_for_same_device() {
+        let registry = ConnectionRegistry::new();
+        let user_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let other_device_id = Uuid::new_v4();
+
+        let (tx, mut rx) = mpsc::channel::<String>(32);
+        registry.register(user_id, device_id, tx);
+
+        let (other_tx, mut other_rx) = mpsc::channel::<String>(32);
+        registry.register(user_id, other_device_id, other_tx);
+
+        let (new_tx, mut new_rx) = mpsc::channel::<String>(32);
+        registry.register(user_id, device_id, new_tx);
+
+        // The old connection's receiver observes the channel closing, which
+        // is exactly what makes handle_socket's `outgoing = rx.recv()` arm
+        // break out of its loop and unregister.
+        assert_eq!(rx.recv().await, None);
+
+        // Only the new connection for that device receives notifications now
+        // — the stale one is gone, not merely joined by the new one.
+        registry.notify_changes(user_id, 1, None);
+        assert_eq!(new_rx.recv().await.as_deref(), Some(r#"{"type":"changes_available","cursor":1}"#));
+
+        // The other device on the same user wasn't touched — a targeted
+        // eviction, not a blunt wipe of every connection for the user.
+        assert_eq!(other_rx.recv().await.as_deref(), Some(r#"{"type":"changes_available","cursor":1}"#));
     }
 
     #[tokio::test]

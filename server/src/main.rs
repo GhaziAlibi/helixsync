@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    let db = database::connect(&config.database_url).await?;
+    let db = database::connect(&config).await?;
     database::run_migrations(&db).await?;
     tracing::info!("database migrations applied");
 

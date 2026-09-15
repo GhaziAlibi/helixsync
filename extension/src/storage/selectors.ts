@@ -26,6 +26,26 @@ export interface PendingTabRestore {
   payload: TabPayload;
 }
 
+/** Per-record predicate behind `selectPendingTabRestores` below: whether one
+ * `remote_objects` row counts as a not-yet-restored pending tab (a "tab"
+ * record, not tombstoned, with a payload, that isn't already materialized
+ * as a real local Chromium tab per `materializedObjectIds`). Factored out so
+ * `storage/db.ts::countPendingTabRestores` can apply the exact same
+ * semantics while walking records one at a time via a cursor, instead of
+ * needing the whole array `selectPendingTabRestores` operates over just to
+ * read off a `.length`. */
+export function isPendingTabRestore(
+  record: RemoteObjectRecord,
+  materializedObjectIds: ReadonlySet<string>,
+): record is RemoteObjectRecord & { payload: TabPayload } {
+  return (
+    record.objectType === "tab" &&
+    !record.deleted &&
+    !!record.payload &&
+    !materializedObjectIds.has(record.objectId)
+  );
+}
+
 /** Remote tabs tracked for display but not yet materialized as a real
  * local browser tab — backs the popup's "ask" restore-policy list
  * (README.md "Known gaps": the `ask` policy used to behave identically to
@@ -38,8 +58,7 @@ export function selectPendingTabRestores(
   materializedObjectIds: ReadonlySet<string>,
 ): PendingTabRestore[] {
   return records
-    .filter((r): r is RemoteObjectRecord & { payload: TabPayload } => r.objectType === "tab" && !r.deleted && !!r.payload)
-    .filter((r) => !materializedObjectIds.has(r.objectId))
+    .filter((r): r is RemoteObjectRecord & { payload: TabPayload } => isPendingTabRestore(r, materializedObjectIds))
     .map((r) => ({ objectId: r.objectId, payload: r.payload }));
 }
 

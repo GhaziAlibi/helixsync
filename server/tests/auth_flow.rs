@@ -28,26 +28,31 @@ fn test_config() -> Config {
         housekeeping_interval_secs: 60 * 60 * 24,
         device_credential_retention_secs: 60 * 60 * 24 * 7,
         audit_log_retention_secs: 60 * 60 * 24 * 90,
+        database_max_connections: 5,
     }
 }
 
-fn server_for(pool: PgPool) -> TestServer {
+fn server_for_config(pool: PgPool, config: Config) -> TestServer {
     let state = AppState {
         db: pool,
-        config: Arc::new(test_config()),
+        config: Arc::new(config),
         rate_limiter: Arc::new(RateLimiter::new()),
         ws_registry: Arc::new(ConnectionRegistry::new()),
         last_seen_cache: Arc::new(dashmap::DashMap::new()),
         device_revocation_cache: Arc::new(dashmap::DashMap::new()),
     };
-    let config = TestServerConfig {
+    let test_server_config = TestServerConfig {
         transport: Some(Transport::HttpRandomPort),
         save_cookies: true,
         ..Default::default()
     };
     let make_service = helixsync_server::app(state)
         .into_make_service_with_connect_info::<std::net::SocketAddr>();
-    TestServer::new_with_config(make_service, config).unwrap()
+    TestServer::new_with_config(make_service, test_server_config).unwrap()
+}
+
+fn server_for(pool: PgPool) -> TestServer {
+    server_for_config(pool, test_config())
 }
 
 /// Regression test: the web client always parses a JSON body on any
@@ -150,7 +155,9 @@ async fn register_device(server: &TestServer, email: &str, name: &str) -> (Strin
 /// trip once `TOKEN_REFRESH_LIMIT`'s 30/60s limit is exceeded.
 #[sqlx::test(migrations = "./migrations")]
 async fn rapid_token_rotation_is_rate_limited_by_device_not_by_hash(pool: PgPool) {
-    let server = server_for(pool);
+    let mut config = test_config();
+    config.behind_proxy = true;
+    let server = server_for_config(pool, config);
 
     let register_res = server
         .post("/api/v1/auth/register")
@@ -162,9 +169,10 @@ async fn rapid_token_rotation_is_rate_limited_by_device_not_by_hash(pool: PgPool
         register_device(&server, "ivy@example.com", "Laptop").await;
 
     let mut hit_rate_limit = false;
-    for _ in 0..40 {
+    for i in 0..40 {
         let res = server
             .post("/api/v1/devices/credentials/refresh")
+            .add_header("x-forwarded-for", format!("198.51.100.{i}"))
             .json(&json!({ "refreshToken": refresh_token }))
             .await;
 
@@ -182,6 +190,38 @@ async fn rapid_token_rotation_is_rate_limited_by_device_not_by_hash(pool: PgPool
         hit_rate_limit,
         "expected a 429 before exhausting the loop: a strictly-rotating \
          sequence of refresh calls against one device must eventually hit \
-         the device-id-keyed rate limit"
+         the device-id-keyed rate limit even when called from different IPs"
+    );
+}
+
+/// SRV-09 regression: `/api/v1/devices/credentials/refresh` must enforce an
+/// IP-level rate limit before touching the database or hashing tokens,
+/// preventing an unauthenticated attacker from flooding random tokens from
+/// one IP to exhaust connection pool slots or rate limiter memory.
+#[sqlx::test(migrations = "./migrations")]
+async fn refresh_credentials_is_rate_limited_by_ip_even_with_random_tokens(pool: PgPool) {
+    let server = server_for(pool);
+
+    let mut hit_rate_limit = false;
+    for i in 0..40 {
+        // Send a unique, random refresh token every iteration so hash-based
+        // rate limiting never triggers (every call lands in a fresh hash bucket).
+        let res = server
+            .post("/api/v1/devices/credentials/refresh")
+            .json(&json!({ "refreshToken": format!("random-unauthenticated-token-{i}") }))
+            .await;
+
+        if res.status_code() == axum::http::StatusCode::TOO_MANY_REQUESTS {
+            hit_rate_limit = true;
+            break;
+        }
+
+        assert_eq!(res.status_code(), axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    assert!(
+        hit_rate_limit,
+        "expected a 429: an unauthenticated caller flooding distinct tokens \
+         from the same IP must be tripped by the IP-level rate limit"
     );
 }

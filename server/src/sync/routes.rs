@@ -46,6 +46,16 @@ const PROTOCOL_VERSION_HEADER: &str = "x-protocol-version";
 /// operationId strings, etc. — at most a few hundred bytes per op).
 const MAX_UPLOAD_BODY_BYTES: usize = MAX_OPERATIONS_PER_BATCH * MAX_PAYLOAD_BYTES + 1024 * 1024;
 
+/// Ceiling on how much a single `sync_snapshots.data` row is allowed to
+/// gzip-inflate to in [`decompress_snapshot_data`]. Today's largest
+/// observed accounts produce a raw (pre-compression) snapshot document in
+/// the 30-50MB range (see [`compress_snapshot_data`]'s doc comment) — this
+/// leaves several times that much headroom for account growth while still
+/// bounding how much memory a single corrupt or maliciously-crafted row
+/// (gzip can inflate a tiny input by orders of magnitude) can force this
+/// process to allocate while decoding it.
+const MAX_DECOMPRESSED_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
+
 /// docs/protocol.md §13: a client whose advertised protocol version is
 /// below the server's minimum is blocked from *writing* new operations
 /// (but not from reading — see the same section). The header is optional
@@ -154,7 +164,11 @@ async fn process_batch(
     ops: &[OperationIn],
 ) -> AppResult<BatchOutcome> {
     if ops.is_empty() {
-        let cursor = current_cursor_tx(&mut state.db.begin().await?, device.user_id).await?;
+        // No writes to make for an empty batch — just report the current
+        // cursor, read straight off the pool. Opening a transaction here
+        // (`BEGIN` + this `SELECT` + an implicit `ROLLBACK` on drop) would be
+        // three round trips and a checked-out connection for a single read.
+        let cursor = current_cursor(&state.db, device.user_id).await?;
         return Ok(BatchOutcome {
             accepted: vec![],
             duplicate: vec![],
@@ -601,7 +615,7 @@ async fn process_batch(
         .unwrap_or(0);
     server_cursor = server_cursor.max(max_duplicate_cursor);
     if server_cursor == 0 {
-        server_cursor = current_cursor_tx(&mut tx, device.user_id).await?;
+        server_cursor = current_cursor(&mut *tx, device.user_id).await?;
     }
 
     tx.commit().await?;
@@ -628,15 +642,19 @@ async fn process_batch(
     })
 }
 
-async fn current_cursor_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    user_id: Uuid,
-) -> AppResult<i64> {
+/// Generic over the sqlx executor so callers can pass either a pooled
+/// connection directly (no transaction needed for a plain read) or a
+/// transaction already in progress (to read a value consistent with other
+/// work happening in that same transaction).
+async fn current_cursor<'e, E>(executor: E, user_id: Uuid) -> AppResult<i64>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     let cursor: Option<i64> = sqlx::query_scalar!(
         "SELECT cursor_value FROM sync_cursors WHERE user_id = $1 AND device_id IS NULL",
         user_id
     )
-    .fetch_optional(&mut **tx)
+    .fetch_optional(executor)
     .await?;
     Ok(cursor.unwrap_or(0))
 }
@@ -1033,9 +1051,24 @@ pub(super) fn compress_snapshot_data(objects: &[SnapshotObject]) -> AppResult<Ve
 pub(super) fn decompress_snapshot_data(bytes: &[u8]) -> AppResult<Vec<SnapshotObject>> {
     use std::io::Read;
 
-    let mut decoder = flate2::read::GzDecoder::new(bytes);
+    // Capped at one more byte than the limit (rather than exactly the
+    // limit) so the two cases below are distinguishable: reading fewer
+    // than `MAX_DECOMPRESSED_SNAPSHOT_BYTES + 1` bytes means the stream
+    // genuinely ended within budget, while reading exactly that many means
+    // there was more data past the cap that `Take` simply stopped handing
+    // over — `Take` truncates silently and never surfaces an error of its
+    // own, so this is the only way to tell "fit exactly" apart from
+    // "would have kept going".
+    let mut decoder =
+        flate2::read::GzDecoder::new(bytes).take(MAX_DECOMPRESSED_SNAPSHOT_BYTES + 1);
     let mut json = Vec::new();
     let parsed: Vec<SnapshotObject> = match decoder.read_to_end(&mut json) {
+        Ok(_) if json.len() as u64 > MAX_DECOMPRESSED_SNAPSHOT_BYTES => {
+            return Err(anyhow::anyhow!(
+                "snapshot data decompresses to more than {MAX_DECOMPRESSED_SNAPSHOT_BYTES} bytes"
+            )
+            .into());
+        }
         Ok(_) => serde_json::from_slice(&json).map_err(anyhow::Error::from)?,
         Err(_) => {
             // Not a gzip stream (or a truncated/corrupt one) — fall back to
@@ -1045,6 +1078,55 @@ pub(super) fn decompress_snapshot_data(bytes: &[u8]) -> AppResult<Vec<SnapshotOb
         }
     };
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod decompress_snapshot_data_tests {
+    use super::*;
+
+    fn sample_objects(count: usize) -> Vec<SnapshotObject> {
+        (0..count)
+            .map(|i| SnapshotObject {
+                object_type: "note".to_string(),
+                object_id: Uuid::new_v4(),
+                operation_type: "upsert".to_string(),
+                encryption_version: 1,
+                payload: serde_json::json!({ "index": i, "body": "hello world" }),
+                created_at: Utc::now(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn round_trips_a_normal_sized_payload() {
+        let objects = sample_objects(50);
+        let compressed = compress_snapshot_data(&objects).expect("compression should succeed");
+        let decompressed =
+            decompress_snapshot_data(&compressed).expect("decompression should succeed");
+        assert_eq!(decompressed.len(), objects.len());
+        assert_eq!(decompressed[0].object_type, "note");
+    }
+
+    #[test]
+    fn rejects_a_payload_that_decompresses_past_the_cap() {
+        // A gzip stream of highly repetitive bytes compresses to a tiny
+        // fraction of its inflated size, so a small buffer here is enough
+        // to blow well past `MAX_DECOMPRESSED_SNAPSHOT_BYTES` once
+        // decoded — exactly the "zip bomb" shape the cap defends against.
+        use std::io::Read as _;
+        let oversized_len = MAX_DECOMPRESSED_SNAPSHOT_BYTES + 1024;
+        let mut encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        std::io::copy(&mut std::io::repeat(b'a').take(oversized_len), &mut encoder)
+            .expect("streaming into the encoder should succeed");
+        let compressed = encoder.finish().expect("gzip finish should succeed");
+
+        let result = decompress_snapshot_data(&compressed);
+        assert!(
+            result.is_err(),
+            "decompressing past the cap should be rejected, not silently truncated"
+        );
+    }
 }
 
 /// Computes the merged current state of every object as of `ceiling` (or

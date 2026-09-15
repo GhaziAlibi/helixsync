@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,12 +31,66 @@ struct TokenBucket {
 /// gets tokens back gradually, not all at once.
 pub struct RateLimiter {
     windows: DashMap<(&'static str, String), TokenBucket>,
+    /// Wall-clock start point `last_emergency_sweep_nanos` is measured from
+    /// (an `AtomicU64` can't hold an `Instant` directly).
+    created_at: Instant,
+    /// Nanoseconds since `created_at` at which the last capacity-triggered
+    /// sweep (see `check_with_retry_after`) ran. Used to rate-limit those
+    /// sweeps themselves to at most one per `EMERGENCY_SWEEP_COOLDOWN` —
+    /// without this, once `windows` is at capacity and full of genuinely
+    /// active (non-expired) entries, every subsequent request for a new key
+    /// would trigger its own full `sweep()` (an O(n) scan) that frees
+    /// nothing, turning the very defense against unbounded memory growth
+    /// into an unbounded-CPU-per-request problem instead.
+    last_emergency_sweep_nanos: AtomicU64,
 }
+
+/// Hard cap on the number of distinct (bucket, key) entries `windows` may
+/// hold. Without this, an attacker who varies the rate-limit key on every
+/// request (random `X-Forwarded-For` values, random device ids at
+/// `/devices/register`, etc.) can insert entries faster than the periodic
+/// `sweep()` (every `SWEEP_INTERVAL`) can remove them, growing `windows`
+/// without bound. See `check_with_retry_after` for how this is enforced —
+/// only *new* keys are affected, and only once the map is actually at
+/// capacity.
+const MAX_ENTRIES: usize = 50_000;
+
+/// Minimum spacing between capacity-triggered emergency sweeps (see
+/// `last_emergency_sweep_nanos`). Deliberately much shorter than
+/// `SWEEP_INTERVAL` — this only matters while the map is actively at
+/// capacity, a state the periodic sweep alone isn't keeping up with, so it
+/// needs to be responsive; but it still needs to be nonzero so a sustained
+/// flood of new keys can't force a full O(n) scan on every single request.
+const EMERGENCY_SWEEP_COOLDOWN: Duration = Duration::from_secs(1);
 
 impl RateLimiter {
     pub fn new() -> Self {
         Self {
             windows: DashMap::new(),
+            created_at: Instant::now(),
+            last_emergency_sweep_nanos: AtomicU64::new(0),
+        }
+    }
+
+    /// Runs `sweep()` if (and only if) no other caller has done so within
+    /// the last `EMERGENCY_SWEEP_COOLDOWN`. The compare-exchange ensures
+    /// that when many requests hit this concurrently while the map is
+    /// saturated, only one of them actually pays for the O(n) scan — the
+    /// rest just fall through and re-check `windows.len()` (cheap: DashMap
+    /// sums per-shard lengths rather than iterating entries).
+    fn maybe_emergency_sweep(&self) {
+        let now_nanos = self.created_at.elapsed().as_nanos() as u64;
+        let last = self.last_emergency_sweep_nanos.load(Ordering::Relaxed);
+        let cooldown_nanos = EMERGENCY_SWEEP_COOLDOWN.as_nanos() as u64;
+        if now_nanos.saturating_sub(last) < cooldown_nanos {
+            return;
+        }
+        if self
+            .last_emergency_sweep_nanos
+            .compare_exchange(last, now_nanos, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.sweep();
         }
     }
 
@@ -59,6 +114,18 @@ impl RateLimiter {
     /// not bursting itself). Each call refills tokens for the elapsed time
     /// since the last call at a rate of `limit / window` tokens/sec, capped
     /// at `limit`, then consumes one token if available.
+    ///
+    /// If `key` is new (not already tracked) and `windows` is at or over
+    /// `MAX_ENTRIES`, an emergency sweep is attempted first (see
+    /// `maybe_emergency_sweep`) to try to reclaim space from expired
+    /// entries before giving up on the new key. If the map is still at
+    /// capacity afterwards (i.e. it's full of genuinely active entries, not
+    /// just ones waiting on the next periodic sweep — or another request
+    /// already used up this window's emergency sweep), the new key is
+    /// rejected the same way an ordinary rate-limited request would be,
+    /// rather than growing the map further. Already-tracked keys are never
+    /// affected by this: only brand new ones can be turned away, and only
+    /// while the map is saturated.
     pub fn check_with_retry_after(
         &self,
         bucket: &'static str,
@@ -66,8 +133,21 @@ impl RateLimiter {
         limit: u32,
         window: Duration,
     ) -> Result<(), Duration> {
+        let map_key = (bucket, key.to_string());
+
+        if !self.windows.contains_key(&map_key) && self.windows.len() >= MAX_ENTRIES {
+            self.maybe_emergency_sweep();
+            if self.windows.len() >= MAX_ENTRIES {
+                // Genuinely full of active entries — reject rather than
+                // grow past the cap. Reuse `window` as the retry hint since
+                // that's roughly how long it'll take for other entries in
+                // this bucket to age out and free up room.
+                return Err(window);
+            }
+        }
+
         let now = Instant::now();
-        let mut entry = self.windows.entry((bucket, key.to_string())).or_insert_with(|| TokenBucket {
+        let mut entry = self.windows.entry(map_key).or_insert_with(|| TokenBucket {
             last_refill: now,
             tokens: limit as f64,
             window,
@@ -302,5 +382,41 @@ mod tests {
             .expect_err("bucket should be empty");
         assert!(err > Duration::from_secs(0));
         assert!(err <= window);
+    }
+
+    #[test]
+    fn distinct_keys_do_not_grow_windows_past_capacity() {
+        let limiter = RateLimiter::new();
+        let window = Duration::from_secs(60);
+        // Far more distinct keys than MAX_ENTRIES, all with plenty of
+        // quota left, so every rejection observed here can only be the
+        // capacity guard kicking in, not the token bucket itself.
+        for i in 0..(MAX_ENTRIES * 2) {
+            let key = format!("key-{i}");
+            limiter.check("test", &key, 1000, window);
+        }
+        assert!(limiter.windows.len() <= MAX_ENTRIES);
+    }
+
+    #[test]
+    fn existing_key_is_unaffected_by_a_full_map() {
+        let limiter = RateLimiter::new();
+        let window = Duration::from_secs(60);
+
+        // Track one key first, then saturate the map with other keys.
+        assert!(limiter.check("test", "known-key", 5, window));
+        for i in 0..MAX_ENTRIES {
+            let key = format!("filler-{i}");
+            limiter.check("test", &key, 1000, window);
+        }
+        assert!(limiter.windows.len() >= MAX_ENTRIES);
+
+        // The already-tracked key still has its normal remaining quota
+        // (4 more of its 5-per-window tokens), unaffected by the map being
+        // at capacity.
+        for _ in 0..4 {
+            assert!(limiter.check("test", "known-key", 5, window));
+        }
+        assert!(!limiter.check("test", "known-key", 5, window));
     }
 }

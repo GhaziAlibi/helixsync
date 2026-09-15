@@ -169,22 +169,19 @@ struct RefreshResponse {
 /// goes on to use the new one, so a stolen-then-replayed old token is
 /// detected (its hash will already be revoked) rather than silently reused.
 ///
-/// Rate limiting happens in two layers, at two different points, keyed on
-/// two different things, because they guard against two different costs
-/// (mirrors websocket::ws_handler's two-layer comment for the same reason):
+/// Rate limiting happens in three layers, at three different points, keyed on
+/// three different things, because they guard against different costs:
 ///
-/// - Here, before the database is ever touched, `TOKEN_REFRESH_LIMIT` is
-///   enforced by the presented token's hash rather than client IP. This
-///   ties the limit to the actual credential being presented (so one
-///   stolen/guessed token can't be hammered regardless of what IP it's
-///   hammered from) and sidesteps the ConnectInfo-behind-nginx IP-masking
-///   problem entirely (see middleware::client_ip) since no IP is used here
-///   at all. It's cheap and runs before any DB lookup, so it's what bounds
-///   raw request volume from garbage/replayed-same-token junk. But because
-///   every successful refresh rotates the token (see above), the hash on a
-///   *legitimately rotating* sequence of calls is different every time —
-///   this check alone can never fire against that sequence, no matter how
-///   fast it repeats, since each call lands in a fresh bucket.
+/// - First, before the database is ever touched or the token hashed,
+///   `TOKEN_REFRESH_LIMIT` is enforced by client IP (via `client_ip` which
+///   accounts for reverse proxies). This bounds raw request volume from an
+///   unauthenticated caller and prevents an attacker from bypassing rate
+///   limits and exhausting DB connection pool slots or memory by flooding
+///   random token strings from a single IP (SRV-09).
+/// - Second, before the database is touched, `TOKEN_REFRESH_LIMIT` is
+///   enforced by the presented token's hash. This ties the limit to the
+///   actual credential being presented (so one stolen/guessed token can't
+///   be hammered regardless of what IP it's hammered from).
 /// - Below, after `cred` is looked up and confirmed not device-revoked but
 ///   *before* it's revoked/rotated, the same `TOKEN_REFRESH_LIMIT` is
 ///   enforced again, this time keyed by `cred.device_id` — the actual,
@@ -194,8 +191,13 @@ struct RefreshResponse {
 ///   regardless of how many times the token itself has rotated in between.
 async fn refresh_credentials(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<RefreshRequest>,
 ) -> AppResult<Json<RefreshResponse>> {
+    let ip = client_ip(&headers, addr, state.config.behind_proxy);
+    enforce(&state.rate_limiter, TOKEN_REFRESH_LIMIT, &ip.to_string())?;
+
     let hash = hash_token(&req.refresh_token);
 
     enforce(&state.rate_limiter, TOKEN_REFRESH_LIMIT, &hash)?;

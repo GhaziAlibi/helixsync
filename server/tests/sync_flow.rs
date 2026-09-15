@@ -31,6 +31,7 @@ fn test_config() -> Config {
         housekeeping_interval_secs: 60 * 60 * 24,
         device_credential_retention_secs: 60 * 60 * 24 * 7,
         audit_log_retention_secs: 60 * 60 * 24 * 90,
+        database_max_connections: 5,
     }
 }
 
@@ -136,6 +137,38 @@ async fn duplicate_operation_upload_is_idempotent(pool: PgPool) {
     let body2: serde_json::Value = res2.json();
     assert_eq!(body2["duplicate"].as_array().unwrap().len(), 1);
     assert!(body2["accepted"].as_array().unwrap().is_empty());
+    assert_eq!(body2["serverCursor"].as_i64().unwrap(), cursor1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn empty_operations_batch_returns_current_cursor(pool: PgPool) {
+    let server = server_for(pool);
+    register_and_login(&server, "dana@example.com").await;
+    let (_device_id, access_token) = register_device(&server, "dana@example.com", "Laptop").await;
+
+    let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
+    let res1 = server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&access_token)
+        .json(&json!({ "operations": [op] }))
+        .await;
+    res1.assert_status_ok();
+    let body1: serde_json::Value = res1.json();
+    let cursor1 = body1["serverCursor"].as_i64().unwrap();
+
+    // An empty batch (e.g. a client polling just to learn its current
+    // cursor) must succeed and report the same cursor, without accepting,
+    // duplicating, or rejecting anything.
+    let res2 = server
+        .post("/api/v1/sync/operations")
+        .authorization_bearer(&access_token)
+        .json(&json!({ "operations": [] }))
+        .await;
+    res2.assert_status_ok();
+    let body2: serde_json::Value = res2.json();
+    assert!(body2["accepted"].as_array().unwrap().is_empty());
+    assert!(body2["duplicate"].as_array().unwrap().is_empty());
+    assert!(body2["rejected"].as_array().unwrap().is_empty());
     assert_eq!(body2["serverCursor"].as_i64().unwrap(), cursor1);
 }
 

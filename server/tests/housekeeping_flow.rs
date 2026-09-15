@@ -33,6 +33,7 @@ fn test_config() -> Config {
         // matching everything.
         device_credential_retention_secs: 60 * 60 * 24 * 7,
         audit_log_retention_secs: 60 * 60 * 24 * 90,
+        database_max_connections: 5,
     }
 }
 

@@ -71,7 +71,7 @@ vi.mock("../api/client", () => ({
   fetchSnapshot: vi.fn(),
 }));
 
-const { uploadPending, MAX_UPLOAD_ATTEMPTS } = await import("./engine");
+const { uploadPending, runSyncCycle, clearSyncBlockedState, MAX_UPLOAD_ATTEMPTS } = await import("./engine");
 
 function pendingRecord(operationId: string): PendingOperationRecord {
   return {
@@ -163,5 +163,119 @@ describe("uploadPending attempts tracking (EXT-2 fix, review.md)", () => {
     await uploadPending();
 
     expect(store.has("op-ok")).toBe(false);
+  });
+
+  it("only counts one attempt per call against a blocked op, even when a large backlog spans many batches", async () => {
+    // Mirrors engine.ts's MAX_UPLOAD_BATCH — not exported since nothing else
+    // needs it, so it's duplicated here to size the backlog against it.
+    const BATCH_SIZE = 500;
+
+    // "op-blocked" is inserted first, so — like the real `by-sequence`
+    // cursor picking the lowest device sequence — the fake store's
+    // insertion-order iteration always hands it back at the head of every
+    // batch, for as long as it stays LOCAL_QUEUED (which a requeue does).
+    const blocked = pendingRecord("op-blocked");
+    store.set(blocked.operation.operationId, blocked);
+
+    // Enough healthy ops to force at least 21 full batches of BATCH_SIZE —
+    // one more than MAX_UPLOAD_ATTEMPTS — so that, pre-fix, "op-blocked"
+    // would have been requeued (and its `attempts` incremented) on every one
+    // of those batches within this single `uploadPending()` call, blowing
+    // past MAX_UPLOAD_ATTEMPTS and getting dropped before a download ever
+    // had a chance to land its missing dependency.
+    const healthyCount = (MAX_UPLOAD_ATTEMPTS + 1) * (BATCH_SIZE - 1);
+    for (let i = 0; i < healthyCount; i++) {
+      const record = pendingRecord(`op-healthy-${i}`);
+      store.set(record.operation.operationId, record);
+    }
+
+    uploadOperationsMock.mockImplementation(async (ops) => ({
+      accepted: ops.filter((op) => op.operationId !== "op-blocked").map((op) => op.operationId),
+      duplicate: [],
+      rejected: ops
+        .filter((op) => op.operationId === "op-blocked")
+        .map((op) => ({ operationId: op.operationId, reason: "object_not_found" as const })),
+      serverCursor: 0,
+    }));
+
+    await uploadPending();
+
+    // "op-blocked" must still be queued, with at most one attempt counted
+    // for this entire call — not one per batch it was re-fetched in.
+    expect(store.has("op-blocked")).toBe(true);
+    expect(store.get("op-blocked")?.attempts).toBe(1);
+    expect(store.get("op-blocked")?.state).toBe("LOCAL_QUEUED");
+
+    // Every healthy op across every batch still got uploaded and removed
+    // within this one call — draining a large backlog in one cycle still
+    // works when nothing is genuinely blocked.
+    expect(store.size).toBe(1);
+  });
+});
+
+// engine.ts's runSyncCycle skip-while-blocked check reads
+// `chrome.storage.session` (via ensureSyncBlockedUntilHydrated), which has no
+// real implementation in this vitest environment — stub it with a plain
+// object standing in for the storage area, same spirit as `store` standing
+// in for IndexedDB above.
+let sessionStore: Record<string, unknown>;
+
+function stubChromeStorageSession(): void {
+  sessionStore = {};
+  vi.stubGlobal("chrome", {
+    storage: {
+      session: {
+        get: vi.fn(async (keys: string | string[]) => {
+          const requested = Array.isArray(keys) ? keys : [keys];
+          const result: Record<string, unknown> = {};
+          for (const key of requested) {
+            if (key in sessionStore) result[key] = sessionStore[key];
+          }
+          return result;
+        }),
+        set: vi.fn(async (items: Record<string, unknown>) => {
+          Object.assign(sessionStore, items);
+        }),
+      },
+    },
+  });
+}
+
+describe("clearSyncBlockedState unblocking runSyncCycle after a 429 cooldown", () => {
+  beforeEach(() => {
+    store = new Map();
+    uploadOperationsMock.mockReset();
+    stubChromeStorageSession();
+  });
+
+  it("lets runSyncCycle proceed again once the cooldown from a prior 429 is cleared", async () => {
+    const record = pendingRecord("op-during-cooldown");
+    store.set(record.operation.operationId, record);
+
+    // A 429 during this cycle sets the cooldown (runSyncCycle catches the
+    // rejection internally rather than propagating it, unlike the direct
+    // uploadPending() calls in the tests above).
+    uploadOperationsMock.mockRejectedValueOnce(new FakeApiError("rate limited", 429, undefined, 30));
+    await runSyncCycle();
+    expect(store.get("op-during-cooldown")?.state).toBe("LOCAL_QUEUED");
+
+    // Immediately afterward, still within the cooldown window, runSyncCycle
+    // must skip entirely rather than retry the server — no attempt to
+    // upload is made at all.
+    uploadOperationsMock.mockClear();
+    await runSyncCycle();
+    expect(uploadOperationsMock).not.toHaveBeenCalled();
+
+    // Clearing the cooldown must actually unblock the next cycle.
+    await clearSyncBlockedState();
+    uploadOperationsMock.mockResolvedValueOnce({
+      accepted: ["op-during-cooldown"],
+      duplicate: [],
+      rejected: [],
+      serverCursor: 0,
+    });
+    await runSyncCycle();
+    expect(uploadOperationsMock).toHaveBeenCalledTimes(1);
+    expect(store.has("op-during-cooldown")).toBe(false);
   });
 });

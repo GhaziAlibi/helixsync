@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { selectFieldStateGcCandidates, selectPendingTabRestores, selectRecentHistoryVisits } from "./selectors";
+import {
+  isPendingTabRestore,
+  selectFieldStateGcCandidates,
+  selectPendingTabRestores,
+  selectRecentHistoryVisits,
+} from "./selectors";
 import type { FieldStateRecord, RemoteObjectRecord } from "./db";
 
 function historyRecord(
@@ -94,6 +99,33 @@ describe("selectPendingTabRestores (README.md 'ask' restore policy)", () => {
     ];
     const result = selectPendingTabRestores(records, new Set());
     expect(result.map((r) => r.objectId)).toEqual(["b"]);
+  });
+});
+
+describe("isPendingTabRestore (storage/db.ts's countPendingTabRestores)", () => {
+  // Guards against `countPendingTabRestores` (which walks records one at a
+  // time via a cursor instead of collecting them into an array like
+  // `selectPendingTabRestores` does) drifting out of sync with the actual
+  // "is this pending" semantics — the per-record predicate is exercised
+  // directly here, and cross-checked against `selectPendingTabRestores`
+  // below across a mixed batch, so a future edit to one can't silently
+  // diverge from the other.
+  it("matches selectPendingTabRestores's filtering, record by record", () => {
+    const records = [
+      tabRecord("a"), // pending
+      tabRecord("b", { deleted: true }), // tombstoned
+      tabRecord("c"), // materialized
+      { ...tabRecord("d"), objectType: "window" as const }, // wrong type
+      tabRecord("e", { payload: undefined }), // no payload
+      tabRecord("f"), // pending
+    ];
+    const materializedObjectIds = new Set(["c"]);
+
+    const viaPredicate = records.filter((r) => isPendingTabRestore(r, materializedObjectIds)).map((r) => r.objectId);
+    const viaSelector = selectPendingTabRestores(records, materializedObjectIds).map((r) => r.objectId);
+
+    expect(viaPredicate).toEqual(["a", "f"]);
+    expect(viaPredicate).toEqual(viaSelector);
   });
 });
 

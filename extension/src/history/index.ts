@@ -86,7 +86,16 @@ export function registerCapture(): void {
 // each matching URL is re-expanded via getVisits() to recover every
 // individual past visit — matching the one-object-per-visit model
 // onVisited already produces going forward (see file header).
-const BACKFILL_MAX_RESULTS = 100_000;
+//
+// The search itself is paginated at this size rather than requested with
+// one `maxResults` covering the whole history: a single call for an
+// account with tens or hundreds of thousands of items pulls that entire
+// array across the Chromium IPC boundary into memory in one shot, a
+// multi-megabyte allocation spike that can get the service worker killed
+// before a single item is processed. This is independent of
+// BACKFILL_FLUSH_CHUNK below, which bounds how the resulting operations are
+// written, not how the source items are fetched.
+const BACKFILL_SEARCH_PAGE_SIZE = 5_000;
 
 // Visits are flushed via createLocalOperationsBatch in chunks of this size
 // rather than one array covering the whole backfill (bounds memory and
@@ -135,26 +144,27 @@ async function resolveVisitOps(
  * items in decreasing lastVisitTime order and this function processes them
  * in that same order, so `flush` below persists the lastVisitTime of the
  * last item whose ops it just durably committed to pending_operations as
- * the new high-water mark, and the search above resumes from it via
- * `endTime` on the next call. A service worker kill, browser restart, or
- * thrown error mid-backfill therefore loses at most one
+ * the new high-water mark, and the search resumes from it via `endTime` on
+ * the next call to this function. A service worker kill, browser restart,
+ * or thrown error mid-backfill therefore loses at most one
  * BACKFILL_FLUSH_CHUNK's worth of re-scanned work on the next attempt,
  * instead of re-scanning — and re-creating fresh-operationId operations
- * for — the user's entire history from scratch. */
+ * for — the user's entire history from scratch.
+ *
+ * Within a single call, the search is additionally paginated in
+ * BACKFILL_SEARCH_PAGE_SIZE-sized pages (see its doc comment) — a separate,
+ * inner concern from the cross-call resumability above. Only the first
+ * page's `endTime` comes from `device.historyBackfillLastVisitTime`; each
+ * later page's `endTime` is the previous page's oldest (last) item's
+ * `lastVisitTime`, the same "resume from the last item seen" trick, just
+ * applied one page ahead instead of one call ahead. The loop ends when a
+ * page comes back with fewer than a full page of items. */
 export async function backfillExisting(): Promise<void> {
   const device = await getDevice();
   if (!device) return;
 
-  const items = await chrome.history.search({
-    text: "",
-    startTime: 0,
-    maxResults: BACKFILL_MAX_RESULTS,
-    ...(device.historyBackfillLastVisitTime !== undefined
-      ? { endTime: device.historyBackfillLastVisitTime }
-      : {}),
-  });
-
   let pending: PendingLocalOperation[] = [];
+  let lastSeenVisitTime: number | undefined;
 
   // Only persists `boundaryVisitTime` once every op up to and including
   // that boundary item is durably in pending_operations — so a crash
@@ -172,18 +182,35 @@ export async function backfillExisting(): Promise<void> {
     }
   }
 
-  for (let i = 0; i < items.length; i += BACKFILL_URL_CONCURRENCY) {
-    const slice = items.slice(i, i + BACKFILL_URL_CONCURRENCY);
-    const opsPerUrl = await Promise.all(slice.map((item) => resolveVisitOps(item, device.deviceId)));
+  let pageEndTime = device.historyBackfillLastVisitTime;
+  for (;;) {
+    const items = await chrome.history.search({
+      text: "",
+      startTime: 0,
+      maxResults: BACKFILL_SEARCH_PAGE_SIZE,
+      ...(pageEndTime !== undefined ? { endTime: pageEndTime } : {}),
+    });
 
-    for (let j = 0; j < opsPerUrl.length; j++) {
-      for (const op of opsPerUrl[j]) pending.push(op);
-      if (pending.length >= BACKFILL_FLUSH_CHUNK) {
-        await flush(slice[j].lastVisitTime);
+    for (let i = 0; i < items.length; i += BACKFILL_URL_CONCURRENCY) {
+      const slice = items.slice(i, i + BACKFILL_URL_CONCURRENCY);
+      const opsPerUrl = await Promise.all(slice.map((item) => resolveVisitOps(item, device.deviceId)));
+
+      for (let j = 0; j < opsPerUrl.length; j++) {
+        for (const op of opsPerUrl[j]) pending.push(op);
+        if (pending.length >= BACKFILL_FLUSH_CHUNK) {
+          await flush(slice[j].lastVisitTime);
+        }
       }
     }
+
+    if (items.length > 0) {
+      lastSeenVisitTime = items[items.length - 1].lastVisitTime;
+      pageEndTime = lastSeenVisitTime;
+    }
+
+    if (items.length < BACKFILL_SEARCH_PAGE_SIZE) break; // short (or empty) page: no history left
   }
-  await flush(items.length > 0 ? items[items.length - 1].lastVisitTime : undefined);
+  await flush(lastSeenVisitTime);
 }
 
 async function applyRemote(op: OperationOut, payload: unknown): Promise<void> {
