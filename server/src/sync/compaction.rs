@@ -6,8 +6,17 @@
 // signaled `cursor_too_old` by `sync::routes::download` (unchanged by this
 // module) and falls back to snapshot resync via `sync::routes::snapshot`,
 // which is why the snapshot generated here (via `compute_objects`) must
-// always be written *before* the rows it covers are deleted, in the same
-// transaction.
+// always be *durably committed* before the rows it covers are deleted
+// (SRV-2: not necessarily in the same transaction — see `compact_user` /
+// `prune_compacted_operations` below. The invariant that actually matters is
+// commit-order, not statement-grouping: as long as the snapshot's INSERT has
+// committed before a covered row's DELETE commits, a crash or interleaving
+// at any point leaves either "old row still present, no newer snapshot yet"
+// or "row gone, but a snapshot already covers it" — both safe. What would be
+// unsafe is a covered row's DELETE committing before the snapshot that
+// covers it, which can't happen here because the delete phase only ever
+// targets `server_cursor <= ack_boundary` for an `ack_boundary` whose
+// snapshot has already committed by the time the delete phase starts).
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -298,7 +307,11 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
     // The new snapshot supersedes any older one for this user — nothing
     // below `ack_boundary` will remain in `sync_operations` after this run,
     // so an older, lower-cursor snapshot can never be a useful resync base
-    // again.
+    // again. Still grouped into this same transaction as the snapshot
+    // INSERT/`sync_stats` upsert above: it's a single bounded DELETE against
+    // a small table (at most a handful of rows per user), not the
+    // potentially-huge, potentially-slow sweep below, so it doesn't
+    // contribute meaningfully to how long the `sync_stats` row lock is held.
     sqlx::query!(
         "DELETE FROM sync_snapshots WHERE user_id = $1 AND snapshot_cursor < $2",
         user_id,
@@ -307,10 +320,49 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
     .execute(&mut *tx)
     .await?;
 
+    // Commit here — deliberately *before* pruning `sync_operations` below
+    // (SRV-2). Postgres holds a row lock from the statement that acquires it
+    // until COMMIT/ROLLBACK of that same transaction, no matter how early or
+    // late in the transaction the statement runs — so merely moving the
+    // `sync_stats` upsert to a later position in one long transaction would
+    // NOT shrink how long it holds that lock; the lock would still be held
+    // until this transaction's eventual commit, i.e. for the full duration
+    // of the chunked delete loop either way. The only way to actually bound
+    // the hold time is to commit the transaction that touches `sync_stats`
+    // before starting the slow part, which is what this does: by the time
+    // `prune_compacted_operations` runs, this transaction (and its
+    // `sync_stats` row lock) is already gone, so a concurrent
+    // `POST /sync/upload` upserting the same row never blocks on it.
+    tx.commit().await?;
+
+    // Deletes the now-redundant `sync_operations` rows covered by the
+    // snapshot just committed above, in their own short-lived transactions
+    // — never in the same transaction as the `sync_stats` upsert (see the
+    // module doc comment and the commit above for why). Safe to run after
+    // the snapshot's commit specifically because `ack_boundary` is fixed at
+    // this point and every row this deletes satisfies `server_cursor <=
+    // ack_boundary`, i.e. is already represented in the snapshot that's now
+    // durable. If this process crashes partway through, whatever chunks
+    // haven't run yet simply remain in `sync_operations` — safe, and picked
+    // up by the next compaction pass (its `terminal_candidates` query below
+    // is re-derived from current data each run, not from any state carried
+    // over from this one).
+    prune_compacted_operations(state, user_id, ack_boundary).await?;
+
+    Ok(())
+}
+
+/// Deletes `sync_operations` rows already covered by the snapshot at
+/// `ack_boundary` (which must already be durably committed by the caller —
+/// see `compact_user`). Runs as a series of separate, short-lived
+/// transactions rather than one, so no single transaction here ever holds
+/// locks for longer than one chunk's delete, and none of them touch
+/// `sync_stats` at all.
+async fn prune_compacted_operations(state: &AppState, user_id: Uuid, ack_boundary: i64) -> AppResult<()> {
     // docs/protocol.md §9/§11: tombstone-creating operations additionally
     // wait out the configured retention window before their raw log row is
     // deleted. The tombstone's effect (`tombstones.active`, and the
-    // just-persisted snapshot's exclusion of the object) is independently
+    // already-committed snapshot's exclusion of the object) is independently
     // durable and untouched by this deletion — this is a pure audit-trail
     // safety margin, not a correctness requirement.
     let retention_cutoff = Utc::now() - chrono::Duration::seconds(state.config.tombstone_retention_secs);
@@ -325,7 +377,10 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
     // is_terminal_operation` — keeping that function the single source of
     // truth for the actual per-type check below rather than duplicating
     // its match arms in SQL) are ever fetched into the app process. The
-    // DELETE then excludes just that small survivor set.
+    // DELETE then excludes just that small survivor set. Read directly off
+    // the pool (no transaction): this is a plain point-in-time SELECT, and
+    // `ack_boundary` is already fixed by the caller, so there's nothing here
+    // that needs snapshot isolation with the deletes below.
     let terminal_candidates = sqlx::query_as!(
         CompactionCandidate,
         "SELECT id, object_type, operation_type, created_at FROM sync_operations \
@@ -333,7 +388,7 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
         user_id,
         ack_boundary
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(&state.db)
     .await?;
 
     let survivor_ids: Vec<i64> = terminal_candidates
@@ -351,11 +406,16 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
     // first-ever compaction against a large pre-existing backlog, or an
     // account that went uncompacted for a long time. Holding row locks and
     // spiking WAL for the full duration of one giant statement is avoidable
-    // by looping a bounded DELETE instead — still inside this same
-    // transaction, since the snapshot-before-delete invariant this module is
-    // built around (see the module doc comment) requires the delete to
-    // commit atomically with the snapshot write above, not that it happen in
-    // a single statement.
+    // by looping a bounded DELETE instead. Each chunk now additionally gets
+    // its own transaction (SRV-2): the snapshot-before-delete invariant this
+    // module is built around (see the module doc comment) only requires
+    // each delete to commit *after* the snapshot covering it already has —
+    // never that every chunk share one transaction with each other, let
+    // alone with the snapshot write. Splitting them means a concurrent
+    // `sync_stats` upsert from an upload never waits on this loop at all
+    // (it's a separate table, untouched here), and a slow account's sweep
+    // never holds any single set of locks for longer than one 5,000-row
+    // chunk.
     //
     // No ORDER BY needed on the inner LIMIT for correctness: `survivor_ids`
     // rows never satisfy the WHERE clause, so they're never selected by any
@@ -366,6 +426,8 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
     // zero rows, regardless of how large `survivor_ids` is.
     const DELETE_CHUNK_SIZE: i64 = 5_000;
     loop {
+        let mut tx = state.db.begin().await?;
+
         let result = sqlx::query!(
             "DELETE FROM sync_operations WHERE id IN ( \
                 SELECT id FROM sync_operations \
@@ -380,11 +442,12 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
         .execute(&mut *tx)
         .await?;
 
+        tx.commit().await?;
+
         if result.rows_affected() == 0 {
             break;
         }
     }
 
-    tx.commit().await?;
     Ok(())
 }

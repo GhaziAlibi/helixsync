@@ -31,7 +31,7 @@ async fn get_settings(
     user: AnyAuthenticatedUser,
     State(state): State<AppState>,
 ) -> AppResult<Json<UserSettings>> {
-    enforce(&state.rate_limiter, SYNC_SETTINGS_LIMIT, &user.user_id.to_string())?;
+    enforce(&state.rate_limiter, SYNC_SETTINGS_LIMIT, &user.rate_limit_key)?;
 
     let settings = sqlx::query_as!(
         UserSettings,
@@ -70,7 +70,7 @@ async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateSettingsRequest>,
 ) -> AppResult<Json<UserSettings>> {
-    enforce(&state.rate_limiter, SYNC_SETTINGS_LIMIT, &user.user_id.to_string())?;
+    enforce(&state.rate_limiter, SYNC_SETTINGS_LIMIT, &user.rate_limit_key)?;
 
     if let Some(ref p) = req.tab_restore_policy {
         if !VALID_RESTORE_POLICIES.contains(&p.as_str()) {

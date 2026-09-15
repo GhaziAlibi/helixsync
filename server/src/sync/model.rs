@@ -74,6 +74,29 @@ pub struct SnapshotObject {
     pub operation_type: String,
     pub encryption_version: i32,
     pub payload: serde_json::Value,
+    /// When the operation that produced this object's current merged state
+    /// was uploaded (`sync_operations.created_at`) — the same timestamp
+    /// `history_retention_cutoff`/`compute_objects` (`sync::routes`) filter
+    /// `historyVisit` operations against (SRV-1). Carrying it forward here
+    /// is what lets a `historyVisit` object *already folded into a
+    /// persisted snapshot* be re-evaluated against retention on every
+    /// future `compute_objects` call: a historyVisit is immutable (never
+    /// produces a second operation once created), so once one lands in
+    /// `objects` it would otherwise never appear in `new_rows` again to be
+    /// filtered, and would stay embedded in every snapshot forever
+    /// regardless of the configured retention window.
+    ///
+    /// `#[serde(default = "epoch")]` covers every snapshot blob persisted
+    /// before this field existed: it deserializes as the Unix epoch, which
+    /// is older than any configured retention cutoff, so a legacy object is
+    /// treated as immediately eligible for pruning rather than permanently
+    /// un-prunable for lack of a recorded timestamp.
+    #[serde(default = "epoch")]
+    pub created_at: DateTime<Utc>,
+}
+
+fn epoch() -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp(0, 0).expect("0,0 is always a valid unix timestamp")
 }
 
 #[derive(Debug, Serialize)]

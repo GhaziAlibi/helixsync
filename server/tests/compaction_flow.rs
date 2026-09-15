@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum_test::{TestServer, TestServerConfig, Transport};
+use chrono::Utc;
 use helixsync_server::config::Config;
 use helixsync_server::middleware::rate_limit::RateLimiter;
 use helixsync_server::state::AppState;
@@ -753,6 +754,7 @@ async fn snapshot_route_falls_back_to_uncompressed_legacy_data(pool: PgPool) {
         operation_type: "create".to_string(),
         encryption_version: 0,
         payload: json!({ "title": "Legacy bookmark", "url": "https://example.com", "parent": null, "position": "a0" }),
+        created_at: Utc::now(),
     }];
     // Deliberately NOT gzip-compressed — this is exactly the format
     // migration 0008 leaves pre-existing rows in.
@@ -779,6 +781,108 @@ async fn snapshot_route_falls_back_to_uncompressed_legacy_data(pool: PgPool) {
     assert_eq!(objects[0]["objectId"], json!(object_id));
     assert_eq!(objects[0]["payload"]["title"], json!("Legacy bookmark"));
     assert_eq!(snapshot["snapshotCursor"].as_i64().unwrap(), 1);
+}
+
+/// Regression coverage for SRV-1: a `historyVisit` already folded into a
+/// *persisted* `sync_snapshots` row (i.e. it did not arrive as a fresh
+/// `sync_operations` row this call, so the `new_rows` SQL filter in
+/// `compute_objects` never sees it) must still be excluded once it falls
+/// outside the configured retention window. Before this fix, `objects` was
+/// seeded from the base snapshot with no filtering at all — only rows
+/// freshly read from `sync_operations` were checked against
+/// `history_cutoff` — so a historyVisit baked into any snapshot stayed
+/// there forever, regardless of retention, since historyVisit is immutable
+/// (never produces a second operation that could route it back through the
+/// `new_rows` filter).
+///
+/// The base snapshot is inserted directly by raw SQL (uncompressed, same as
+/// `snapshot_route_falls_back_to_uncompressed_legacy_data` above) to
+/// simulate exactly that pre-existing, already-baked-in state without
+/// depending on any particular upload/compaction sequence to produce it.
+#[sqlx::test(migrations = "./migrations")]
+async fn expired_history_visit_baked_into_base_snapshot_is_pruned(pool: PgPool) {
+    let state = state_for(pool.clone());
+    let server = server_for_state(state.clone());
+
+    register_and_login(&server, "juno@example.com").await;
+    let (_device_a, token_a) = register_device(&server, "juno@example.com", "Laptop").await;
+
+    let user_id = user_id_for_email(&pool, "juno@example.com").await;
+
+    server
+        .patch("/api/v1/sync/settings")
+        .authorization_bearer(&token_a)
+        .json(&json!({ "historyRetention": "7d" }))
+        .await
+        .assert_status_ok();
+
+    let old_visit_id = Uuid::now_v7();
+    let recent_visit_id = Uuid::now_v7();
+    let bookmark_id = Uuid::now_v7();
+    let base_objects = vec![
+        SnapshotObject {
+            object_type: "historyVisit".to_string(),
+            object_id: old_visit_id,
+            operation_type: "visit".to_string(),
+            encryption_version: 0,
+            payload: json!({ "url": "https://old.example.com" }),
+            // Well outside the 7d retention window just configured.
+            created_at: Utc::now() - chrono::Duration::days(30),
+        },
+        SnapshotObject {
+            object_type: "historyVisit".to_string(),
+            object_id: recent_visit_id,
+            operation_type: "visit".to_string(),
+            encryption_version: 0,
+            payload: json!({ "url": "https://recent.example.com" }),
+            // Inside the retention window.
+            created_at: Utc::now() - chrono::Duration::days(1),
+        },
+        SnapshotObject {
+            object_type: "bookmark".to_string(),
+            object_id: bookmark_id,
+            operation_type: "create".to_string(),
+            encryption_version: 0,
+            payload: json!({ "title": "Old bookmark", "url": "https://example.com", "parent": null, "position": "a0" }),
+            // Also well outside the retention window — must survive anyway,
+            // since history_cutoff only ever applies to historyVisit.
+            created_at: Utc::now() - chrono::Duration::days(30),
+        },
+    ];
+    let base_bytes = serde_json::to_vec(&base_objects).unwrap();
+
+    sqlx::query(
+        "INSERT INTO sync_snapshots (user_id, snapshot_cursor, encryption_version, data) VALUES ($1, $2, 0, $3)",
+    )
+    .bind(user_id)
+    .bind(1i64)
+    .bind(&base_bytes)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let snapshot_res = server
+        .get("/api/v1/sync/snapshot")
+        .authorization_bearer(&token_a)
+        .await;
+    snapshot_res.assert_status_ok();
+    let snapshot: serde_json::Value = snapshot_res.json();
+    let objects = snapshot["objects"].as_array().unwrap();
+    let object_ids: Vec<serde_json::Value> = objects.iter().map(|o| o["objectId"].clone()).collect();
+
+    assert!(
+        !object_ids.contains(&json!(old_visit_id)),
+        "expired historyVisit baked into the base snapshot must be pruned: {snapshot}"
+    );
+    assert!(
+        object_ids.contains(&json!(recent_visit_id)),
+        "historyVisit still within retention must survive: {snapshot}"
+    );
+    assert!(
+        object_ids.contains(&json!(bookmark_id)),
+        "non-historyVisit object types must never be pruned by history_cutoff: {snapshot}"
+    );
+    assert_eq!(objects.len(), 2);
 }
 
 /// Regression coverage for the `sync_operations` DELETE chunking fix: the
@@ -861,4 +965,118 @@ async fn chunked_delete_drains_backlog_larger_than_one_chunk(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(snapshot_cursor, OP_COUNT);
+}
+
+/// SRV-2 regression: the chunked `sync_operations` delete loop used to run
+/// inside the very same transaction as the `sync_stats` upsert, so any
+/// concurrent upload from another of the user's devices — which also
+/// upserts `sync_stats` (see `sync::routes::process_batch`) — blocked
+/// behind that transaction's commit for as long as the (potentially
+/// multi-second, on a large backlog) delete loop took. After the fix, the
+/// snapshot-writing transaction (the only one touching `sync_stats`) commits
+/// *before* the delete loop starts, and the delete loop's own per-chunk
+/// transactions never touch `sync_stats` at all — so a concurrent upload has
+/// nothing left to wait on.
+///
+/// This can't assert an exact bound on how long a blocked upload would have
+/// taken pre-fix without injecting artificial slowness into the test
+/// database, so treat it as a smoke/regression test (it exercises the exact
+/// concurrent-upload-during-compaction scenario end-to-end and fails loudly
+/// on a deadlock/hang) rather than a timing proof. The final row counts,
+/// though, are asserted exactly and are not timing-dependent: `ack_boundary`
+/// is pinned by both devices' already-recorded cursors before either task
+/// starts, so it can't drift depending on whether the concurrent upload
+/// happens to land before or after compaction reads it.
+#[sqlx::test(migrations = "./migrations")]
+async fn concurrent_upload_is_not_blocked_by_compaction_delete_phase(pool: PgPool) {
+    let state = state_for(pool.clone());
+    let server = server_for_state(state.clone());
+
+    register_and_login(&server, "concurrent@example.com").await;
+    let (device_a, _token_a) = register_device(&server, "concurrent@example.com", "Laptop").await;
+    let (device_b, token_b) = register_device(&server, "concurrent@example.com", "Phone").await;
+
+    let user_id = user_id_for_email(&pool, "concurrent@example.com").await;
+    let device_id: Uuid = device_a.parse().unwrap();
+    let device_b_id: Uuid = device_b.parse().unwrap();
+
+    const OP_COUNT: i64 = 12_000;
+    let object_id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO sync_operations \
+            (operation_id, user_id, device_id, device_sequence, lamport_timestamp, server_cursor, \
+             object_type, object_id, operation_type, encryption_version, payload) \
+         SELECT gen_random_uuid(), $1, $2, seq, seq, seq, 'bookmark', $3, \
+             CASE WHEN seq = 1 THEN 'create' ELSE 'update' END, 0, \
+             CASE WHEN seq = 1 \
+                 THEN jsonb_build_object('title', 'Example', 'url', 'https://example.com', 'parent', NULL, 'position', 'a0') \
+                 ELSE jsonb_build_object('title', 'Title ' || seq) \
+             END \
+         FROM generate_series(1, $4::bigint) AS seq",
+    )
+    .bind(user_id)
+    .bind(device_id)
+    .bind(object_id)
+    .bind(OP_COUNT)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // The backlog above was inserted directly via SQL, bypassing
+    // `sync::routes::process_batch`'s normal cursor allocator — which hands
+    // out fresh `server_cursor` values from a dedicated `sync_cursors` row
+    // keyed by `device_id IS NULL` (see `current_cursor_tx` /
+    // the `cursor_value = cursor_value + count` allocation in
+    // `process_batch`), entirely separate from the per-device ack cursors
+    // below. Without advancing that row to `OP_COUNT` too, the concurrent
+    // upload later in this test would allocate a `server_cursor` starting
+    // back at 1 and collide with the backlog's own row 1.
+    sqlx::query("INSERT INTO sync_cursors (user_id, device_id, cursor_value) VALUES ($1, NULL, $2)")
+        .bind(user_id)
+        .bind(OP_COUNT)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Ack the backlog from both active devices so `ack_boundary` reaches
+    // `OP_COUNT` and compaction actually has something to delete. Both
+    // cursors are written directly, mirroring
+    // `chunked_delete_drains_backlog_larger_than_one_chunk` — going through
+    // the real `/changes` round trip (`sync_device`) would only ack one
+    // `DEFAULT_DOWNLOAD_LIMIT` (500-op) page per call, since this backlog is
+    // far larger than a single page.
+    sqlx::query("INSERT INTO sync_cursors (user_id, device_id, cursor_value) VALUES ($1, $2, $3), ($1, $4, $3)")
+        .bind(user_id)
+        .bind(device_id)
+        .bind(OP_COUNT)
+        .bind(device_b_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(count_operations(&pool, user_id).await, OP_COUNT);
+
+    // Run compaction (spends most of its time in the chunked delete loop)
+    // concurrently with an ordinary upload from device_b.
+    let compaction_state = state.clone();
+    let compaction_task = tokio::spawn(async move { compaction::run_once(&compaction_state).await });
+
+    let upload_op = bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1, "Concurrent upload");
+    let upload_result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        upload(&server, &token_b, upload_op),
+    )
+    .await;
+    assert!(
+        upload_result.is_ok(),
+        "concurrent upload should not be blocked for the duration of compaction's delete phase"
+    );
+
+    compaction_task.await.unwrap().unwrap();
+
+    // Every backlog operation is compacted away; only the concurrent
+    // upload's own operation (whose cursor lands above `ack_boundary`)
+    // survives.
+    assert_eq!(count_operations(&pool, user_id).await, 1);
+    assert_eq!(count_snapshots(&pool, user_id).await, 1);
 }

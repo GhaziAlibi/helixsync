@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT object_type, object_id, operation_type, encryption_version, payload,\n                   lamport_timestamp, device_id, operation_id\n            FROM sync_operations\n            WHERE user_id = $1 AND server_cursor > $2\n              AND (object_type <> 'historyVisit' OR $3::timestamptz IS NULL OR created_at >= $3::timestamptz)\n            ORDER BY server_cursor ASC\n            ",
+  "query": "\n                SELECT object_type, object_id, operation_type, encryption_version, payload,\n                       lamport_timestamp, device_id, operation_id, created_at\n                FROM sync_operations\n                WHERE user_id = $1 AND server_cursor > $2\n                  AND (object_type <> 'historyVisit' OR $3::timestamptz IS NULL OR created_at >= $3::timestamptz)\n                ORDER BY object_type ASC, object_id ASC\n                ",
   "describe": {
     "columns": [
       {
@@ -42,6 +42,11 @@
         "ordinal": 7,
         "name": "operation_id",
         "type_info": "Uuid"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
@@ -59,8 +64,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "63f7c6690f4c6d77b10a0438507646c53641541cd17fdbb9143084b77c4d7a6a"
+  "hash": "25a9bfa6b6f33a42509a976ecc74c9e64fad9048a24c3e3d22b60ab6128fcd4b"
 }

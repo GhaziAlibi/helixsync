@@ -3,9 +3,9 @@
 // Retention/compaction of *sync* history is a server concern
 // (docs/protocol.md §11); this module does not prune the browser's native
 // history, which has its own independent retention already.
-import { createLocalOperationsBatch, registerApplier, registerBatchApplier } from "../sync/engine";
+import { createLocalOperationsBatch, registerApplier, registerBatchApplier, scheduleLocalSync } from "../sync/engine";
 import type { PendingLocalOperation } from "../sync/engine";
-import { getDevice, putRemoteObject, putRemoteObjectsBatch } from "../storage/db";
+import { getDevice, putDevice, putRemoteObject, putRemoteObjectsBatch } from "../storage/db";
 import type { RemoteObjectRecord } from "../storage/db";
 import { createSuppressionGuard } from "../sync/suppress";
 import { createMicroBatchQueue } from "../sync/micro-batch";
@@ -57,6 +57,10 @@ async function flushVisitEvents(items: QueuedVisitEvent[]): Promise<void> {
   // batch — `items` (and therefore `pending`) is in original event-fire
   // order, so the range is assigned in that same chronological order too.
   await createLocalOperationsBatch(pending);
+  // EXT-1: operations are now durably in pending_operations — nudge a sync
+  // cycle instead of leaving them for the next alarm/push (see
+  // scheduleLocalSync's doc comment in sync/engine.ts).
+  scheduleLocalSync();
 }
 
 const enqueueVisitEvent = createMicroBatchQueue<QueuedVisitEvent>(flushVisitEvents);
@@ -124,7 +128,19 @@ async function resolveVisitOps(
 /** One-time import of history that accumulated before HelixSync was
  * installed — chrome.history.onVisited only fires for visits going
  * forward, so the browser's existing history would otherwise never reach
- * the server. */
+ * the server.
+ *
+ * EXT-3 (review.md): resumable via `device.historyBackfillLastVisitTime`
+ * (see its doc comment in storage/db.ts). chrome.history.search returns
+ * items in decreasing lastVisitTime order and this function processes them
+ * in that same order, so `flush` below persists the lastVisitTime of the
+ * last item whose ops it just durably committed to pending_operations as
+ * the new high-water mark, and the search above resumes from it via
+ * `endTime` on the next call. A service worker kill, browser restart, or
+ * thrown error mid-backfill therefore loses at most one
+ * BACKFILL_FLUSH_CHUNK's worth of re-scanned work on the next attempt,
+ * instead of re-scanning — and re-creating fresh-operationId operations
+ * for — the user's entire history from scratch. */
 export async function backfillExisting(): Promise<void> {
   const device = await getDevice();
   if (!device) return;
@@ -133,24 +149,41 @@ export async function backfillExisting(): Promise<void> {
     text: "",
     startTime: 0,
     maxResults: BACKFILL_MAX_RESULTS,
+    ...(device.historyBackfillLastVisitTime !== undefined
+      ? { endTime: device.historyBackfillLastVisitTime }
+      : {}),
   });
 
   let pending: PendingLocalOperation[] = [];
+
+  // Only persists `boundaryVisitTime` once every op up to and including
+  // that boundary item is durably in pending_operations — so a crash
+  // between the batch write and this write just leaves the mark slightly
+  // stale (safe: the next resume re-scans a little more than strictly
+  // necessary, never skips anything not yet processed).
+  async function flush(boundaryVisitTime: number | undefined): Promise<void> {
+    if (pending.length === 0) return;
+    await createLocalOperationsBatch(pending);
+    pending = [];
+    if (boundaryVisitTime === undefined) return;
+    const current = await getDevice();
+    if (current) {
+      await putDevice({ ...current, historyBackfillLastVisitTime: boundaryVisitTime });
+    }
+  }
+
   for (let i = 0; i < items.length; i += BACKFILL_URL_CONCURRENCY) {
     const slice = items.slice(i, i + BACKFILL_URL_CONCURRENCY);
     const opsPerUrl = await Promise.all(slice.map((item) => resolveVisitOps(item, device.deviceId)));
 
-    for (const ops of opsPerUrl) {
-      for (const op of ops) {
-        pending.push(op);
-        if (pending.length >= BACKFILL_FLUSH_CHUNK) {
-          await createLocalOperationsBatch(pending);
-          pending = [];
-        }
+    for (let j = 0; j < opsPerUrl.length; j++) {
+      for (const op of opsPerUrl[j]) pending.push(op);
+      if (pending.length >= BACKFILL_FLUSH_CHUNK) {
+        await flush(slice[j].lastVisitTime);
       }
     }
   }
-  if (pending.length > 0) await createLocalOperationsBatch(pending);
+  await flush(items.length > 0 ? items[items.length - 1].lastVisitTime : undefined);
 }
 
 async function applyRemote(op: OperationOut, payload: unknown): Promise<void> {

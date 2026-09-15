@@ -32,7 +32,7 @@ import {
   type FieldResolution,
   type LocalFieldStateEntry,
 } from "../sync/conflict";
-import { createLocalOperationsBatch, registerApplier } from "../sync/engine";
+import { createLocalOperationsBatch, registerApplier, scheduleLocalSync } from "../sync/engine";
 import type { PendingLocalOperation } from "../sync/engine";
 import { createMicroBatchQueue } from "../sync/micro-batch";
 import { createSuppressionGuard } from "../sync/suppress";
@@ -336,6 +336,10 @@ async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promise<void>
     }
   });
   await recordLocalFieldStatesBatch(fieldStateEntries);
+  // EXT-1: operations are now durably in pending_operations — nudge a sync
+  // cycle instead of leaving them for the next alarm/push (see
+  // scheduleLocalSync's doc comment in sync/engine.ts).
+  scheduleLocalSync();
 }
 
 const enqueueBookmarkEvent = createMicroBatchQueue<QueuedBookmarkEvent>(flushBookmarkEvents);

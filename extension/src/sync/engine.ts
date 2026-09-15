@@ -19,7 +19,14 @@ import {
   tickLamportClock,
 } from "../storage/db";
 import { ApiError, downloadChanges, fetchSnapshot, uploadOperations } from "../api/client";
-import type { LocalOperation, ObjectType, OperationOut, OperationType, SnapshotResponse } from "./types";
+import type {
+  LocalOperation,
+  ObjectType,
+  OperationOut,
+  OperationType,
+  SnapshotResponse,
+  UploadRejection,
+} from "./types";
 import { uuidv7 } from "../util/uuid";
 import { yieldToEventLoop } from "../util/yield";
 
@@ -202,11 +209,46 @@ const MAX_BATCHES_PER_CYCLE = 50;
 // `payload_too_large`) and dropped, every op depending on it requeues as
 // "object_not_found" forever: it keeps the lowest device sequence in the
 // queue, so it's re-fetched at the head of every batch of every cycle
-// (`attempts` already tracks this, previously unread anywhere). This caps
-// it — 20 attempts is a deliberately generous margin over the minutes an
-// actual ordering race takes to resolve itself, so only a genuinely
-// unresolvable op ever hits it.
-const MAX_UPLOAD_ATTEMPTS = 20;
+// (`attempts` tracks this). This caps it — 20 attempts is a deliberately
+// generous margin over the minutes an actual ordering race takes to
+// resolve itself, so only a genuinely unresolvable op ever hits it.
+//
+// Critically, `attempts` only advances when the server has explicitly,
+// individually rejected an operation (the "object_not_found" requeue
+// below, via `requeueInFlight(ids, true)`) — never merely because a whole
+// upload request failed (network error, HTTP 429, HTTP 5xx: see the catch
+// block's plain `requeueInFlight(ids)` call, and `markUploadInFlight` in
+// storage/db.ts). Counting those against this threshold used to mean an
+// extended outage or rate-limit window could permanently delete unsynced
+// local data after ~20 retry cycles despite the server never having
+// rejected a single operation (EXT-2 in review.md).
+//
+// Exported so engine.test.ts can assert against the real threshold instead
+// of duplicating the literal 20.
+export const MAX_UPLOAD_ATTEMPTS = 20;
+
+/** Splits an upload response's per-operation rejections into "requeue" (a
+ * legitimate ordering race — see the comment above MAX_UPLOAD_ATTEMPTS) vs.
+ * "drop permanently" (any other reason the server explicitly rejected this
+ * operation; it will never succeed by retrying as-is). Pulled out as a pure
+ * function, like storage/selectors.ts's selectors, so this classification —
+ * the actual "which failures may eventually delete local data" decision
+ * from EXT-2 in review.md — is unit-testable without a real IndexedDB. */
+export function classifyRejections(rejected: UploadRejection[]): {
+  toRequeue: string[];
+  toRemove: string[];
+} {
+  const toRequeue: string[] = [];
+  const toRemove: string[] = [];
+  for (const rejection of rejected) {
+    if (rejection.reason === "object_not_found") {
+      toRequeue.push(rejection.operationId);
+    } else {
+      toRemove.push(rejection.operationId);
+    }
+  }
+  return { toRequeue, toRemove };
+}
 
 export async function uploadPending(): Promise<void> {
   for (let batch = 0; batch < MAX_BATCHES_PER_CYCLE; batch++) {
@@ -240,27 +282,27 @@ export async function uploadPending(): Promise<void> {
       await removeFromQueue(resolved);
       progressed = progressed || resolved.length > 0;
 
-      const toRequeue: string[] = [];
-      const toRemove: string[] = [];
-
+      const { toRequeue, toRemove } = classifyRejections(response.rejected);
       for (const rejection of response.rejected) {
-        // Permanent client-side errors: drop rather than retry forever.
-        // "object_not_found" can be a legitimate ordering race (an update
-        // uploaded before its create landed) so it's requeued instead.
-        if (rejection.reason === "object_not_found") {
-          toRequeue.push(rejection.operationId);
-        } else {
-          toRemove.push(rejection.operationId);
+        if (rejection.reason !== "object_not_found") {
           console.error("HelixSync: dropping operation after rejection", rejection);
         }
       }
 
-      if (toRequeue.length > 0) await requeueInFlight(toRequeue);
+      // `true`: the server explicitly, individually rejected each of these
+      // operationIds as "object_not_found" — a real per-operation verdict,
+      // so it's fair (and necessary, per MAX_UPLOAD_ATTEMPTS's comment) to
+      // count it as an attempt.
+      if (toRequeue.length > 0) await requeueInFlight(toRequeue, true);
       if (toRemove.length > 0) {
         await removeFromQueue(toRemove);
         progressed = true;
       }
     } catch (err) {
+      // The request itself failed (network error, HTTP 429/5xx, etc.) —
+      // the server never evaluated any of these operations individually,
+      // so this must NOT count toward MAX_UPLOAD_ATTEMPTS (default `false`:
+      // see requeueInFlight's doc comment / EXT-2 in review.md).
       await requeueInFlight(ids);
       throw err;
     }
@@ -831,6 +873,21 @@ export async function runSyncCycle(): Promise<void> {
   } finally {
     syncInFlight = false;
   }
+}
+
+// Debounces bookmark/tab/history flushes into one runSyncCycle() call instead of
+// waiting up to 60s for SYNC_ALARM. Plain setTimeout is fine: the worker is alive
+// right after a flush, and if it's torn down first, pending_operations already
+// has the data for the next alarm/WS/manual trigger to pick up.
+const LOCAL_SYNC_DEBOUNCE_MS = 250;
+let localSyncTimer: ReturnType<typeof setTimeout> | undefined;
+
+export function scheduleLocalSync(delayMs: number = LOCAL_SYNC_DEBOUNCE_MS): void {
+  if (localSyncTimer !== undefined) clearTimeout(localSyncTimer);
+  localSyncTimer = setTimeout(() => {
+    localSyncTimer = undefined;
+    void runSyncCycle();
+  }, delayMs);
 }
 
 export async function getPendingCount(): Promise<number> {

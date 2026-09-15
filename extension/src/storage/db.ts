@@ -35,6 +35,21 @@ export interface DeviceRecord {
   // it runs exactly once per device registration rather than on every
   // service worker restart.
   initialImportCompletedAt?: string;
+  // EXT-3: high-water mark for history/index.ts::backfillExisting's
+  // resumability. chrome.history.search returns items in decreasing
+  // lastVisitTime order and backfillExisting processes them in that same
+  // order, persisting this after each chunk it durably commits to
+  // pending_operations — so it holds the lastVisitTime of the most recent
+  // history item whose visits are all guaranteed already turned into
+  // operations. A service worker restart, browser restart, or thrown error
+  // mid-backfill (before initialImportCompletedAt above ever gets set)
+  // leaves this in place, so the next call to backfillExisting resumes
+  // from here instead of re-scanning — and re-creating operations for —
+  // the user's entire history from scratch. Left as-is once a backfill
+  // fully completes (harmless: chrome.history.search with this as endTime
+  // then returns nothing, so a retry triggered only by e.g. the bookmarks
+  // half failing is a cheap no-op for history).
+  historyBackfillLastVisitTime?: number;
 }
 
 export interface SyncStateRecord {
@@ -449,6 +464,19 @@ export async function countPendingOperations(): Promise<number> {
   return (await getDb()).count("pending_operations");
 }
 
+// `attempts` is NOT bumped here (it used to be, unconditionally — see
+// EXT-2 in review.md). Marking a batch in-flight only means "a request is
+// about to be sent for these"; it says nothing yet about whether the
+// server ever actually evaluated any individual operation. Counting it
+// here meant a whole request-level failure (network error, HTTP 429,
+// HTTP 5xx — none of which reach a per-operation decision on the server)
+// silently advanced every operation in the batch toward
+// MAX_UPLOAD_ATTEMPTS's forced-drop threshold (sync/engine.ts), which
+// could permanently delete unsynced local mutations purely because of a
+// transient outage or rate limit, never because the server rejected them.
+// `attempts` is now only ever incremented by `requeueInFlight`'s
+// `incrementAttempts` flag, at the one call site (sync/engine.ts) where an
+// operation was individually, explicitly rejected by the server.
 export async function markUploadInFlight(operationIds: string[]): Promise<void> {
   const db = await getDb();
   const tx = db.transaction("pending_operations", "readwrite");
@@ -456,7 +484,6 @@ export async function markUploadInFlight(operationIds: string[]): Promise<void> 
     const record = await tx.store.get(id);
     if (record) {
       record.state = "UPLOAD_IN_FLIGHT";
-      record.attempts += 1;
       await tx.store.put(record);
     }
   }
@@ -464,14 +491,29 @@ export async function markUploadInFlight(operationIds: string[]): Promise<void> 
 }
 
 /** Return in-flight operations to LOCAL_QUEUED, e.g. after a failed request
- * (docs/protocol.md §15.2) — retried later with the same operationId. */
-export async function requeueInFlight(operationIds: string[]): Promise<void> {
+ * (docs/protocol.md §15.2) — retried later with the same operationId.
+ *
+ * `incrementAttempts` (default false) controls whether this requeue also
+ * counts toward `MAX_UPLOAD_ATTEMPTS` (sync/engine.ts). It must stay false
+ * for a transient, request-level failure (network error, HTTP 429/5xx) —
+ * the server never got a chance to evaluate these operations individually,
+ * so retrying them costs nothing and must never bring them closer to being
+ * permanently dropped (see EXT-2 in review.md: this was the actual
+ * data-loss bug). It should be true only when the server explicitly,
+ * individually rejected this specific operation (e.g. sync/engine.ts's
+ * "object_not_found" requeue) — that's a real signal the server looked at
+ * this exact operation and couldn't apply it yet. */
+export async function requeueInFlight(
+  operationIds: string[],
+  incrementAttempts = false,
+): Promise<void> {
   const db = await getDb();
   const tx = db.transaction("pending_operations", "readwrite");
   for (const id of operationIds) {
     const record = await tx.store.get(id);
     if (record) {
       record.state = "LOCAL_QUEUED";
+      if (incrementAttempts) record.attempts += 1;
       await tx.store.put(record);
     }
   }
@@ -548,19 +590,46 @@ export async function markAppliedBatch(operationIds: string[]): Promise<void> {
 // before the corresponding server-side data could plausibly still resend.
 const APPLIED_OPERATIONS_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 
+// Caps how many rows a single prune/gc transaction deletes before
+// committing and opening a fresh one for the next chunk — matches this
+// codebase's existing 500-item chunk convention for IndexedDB batch work
+// (history/index.ts's BACKFILL_FLUSH_CHUNK, sync/engine.ts's
+// SNAPSHOT_DISPATCH_CHUNK). Used by `pruneAppliedOperations`,
+// `pruneRemoteObjectsByType`, and `gcFieldStates` below: all three can face
+// tens of thousands of candidate rows (a long-unopened install, or an
+// account with a large synced history), and deleting all of them in one
+// unbroken transaction would hold a write lock on the store for the whole
+// walk — blocking every other operation against it, and risking Chromium
+// aborting the transaction outright on a long enough run. Since this
+// maintenance pass runs at most once a day (`runMaintenanceIfDue`), paying
+// the cost of a few hundred extra transactions to avoid that is cheap.
+const MAINTENANCE_DELETE_CHUNK = 500;
+
 /** Deletes `applied_operations` rows older than the retention window via
  * the `by-applied-at` index, bounding the walk to just the rows actually
- * due for deletion rather than the whole (otherwise never-pruned) store. */
+ * due for deletion rather than the whole (otherwise never-pruned) store.
+ *
+ * Deletes in chunks of `MAINTENANCE_DELETE_CHUNK`, each in its own
+ * transaction: opening a fresh cursor on the same (fixed) cutoff range
+ * after each chunk commits naturally resumes at the next-oldest remaining
+ * row, since everything before it was just deleted — see
+ * `MAINTENANCE_DELETE_CHUNK` for why this can't just be one transaction. */
 export async function pruneAppliedOperations(): Promise<void> {
   const cutoff = new Date(Date.now() - APPLIED_OPERATIONS_RETENTION_MS).toISOString();
   const db = await getDb();
-  const tx = db.transaction("applied_operations", "readwrite");
-  let cursor = await tx.store.index("by-applied-at").openCursor(IDBKeyRange.upperBound(cutoff));
-  while (cursor) {
-    await cursor.delete();
-    cursor = await cursor.continue();
+  const range = IDBKeyRange.upperBound(cutoff);
+  for (;;) {
+    const tx = db.transaction("applied_operations", "readwrite");
+    let cursor = await tx.store.index("by-applied-at").openCursor(range);
+    let deleted = 0;
+    while (cursor && deleted < MAINTENANCE_DELETE_CHUNK) {
+      await cursor.delete();
+      deleted++;
+      cursor = await cursor.continue();
+    }
+    await tx.done;
+    if (deleted < MAINTENANCE_DELETE_CHUNK) break; // fewer than a full chunk left = done
   }
-  await tx.done;
 }
 
 export async function getMappingByLocalId(
@@ -773,25 +842,38 @@ export async function getSyncedHistoryVisits(limit = 20): Promise<HistoryVisitPa
  * gets `deleted: true` and stays forever otherwise, so without this the
  * store only ever grows for the lifetime of the install. Cheap when
  * already under the cap: one `count()` on the index range, no cursor walk
- * at all. */
+ * at all.
+ *
+ * Deletes in chunks of `MAINTENANCE_DELETE_CHUNK`, each committed as its
+ * own transaction rather than one transaction spanning the entire
+ * overage — a large synced-history account can be tens of thousands of
+ * rows over `maxCount`, and re-opening a fresh cursor on the same range
+ * after each chunk commits still walks oldest-first, since every row
+ * deleted so far was strictly older than what remains. See
+ * `MAINTENANCE_DELETE_CHUNK` for why this can't just be one transaction. */
 export async function pruneRemoteObjectsByType(objectType: ObjectType, maxCount: number): Promise<void> {
   const db = await getDb();
-  const tx = db.transaction("remote_objects", "readwrite");
-  const index = tx.store.index("by-type-updated");
   const range = IDBKeyRange.bound([objectType, ""], [objectType, "\uffff"]);
-  const total = await index.count(range);
-  let toDelete = total - maxCount;
-  if (toDelete <= 0) {
+  let toDelete: number;
+  {
+    const tx = db.transaction("remote_objects");
+    toDelete = (await tx.store.index("by-type-updated").count(range)) - maxCount;
     await tx.done;
-    return;
   }
-  let cursor = await index.openCursor(range, "next"); // ascending updatedAt = oldest first
-  while (cursor && toDelete > 0) {
-    await cursor.delete();
-    toDelete--;
-    cursor = await cursor.continue();
+  while (toDelete > 0) {
+    const batchSize = Math.min(MAINTENANCE_DELETE_CHUNK, toDelete);
+    const tx = db.transaction("remote_objects", "readwrite");
+    let cursor = await tx.store.index("by-type-updated").openCursor(range, "next"); // ascending updatedAt = oldest first
+    let deleted = 0;
+    while (cursor && deleted < batchSize) {
+      await cursor.delete();
+      deleted++;
+      cursor = await cursor.continue();
+    }
+    await tx.done;
+    if (deleted === 0) break; // nothing left to delete (shouldn't happen given the count above, but avoid looping forever)
+    toDelete -= deleted;
   }
-  await tx.done;
 }
 
 /** Remote tabs tracked for display but not yet restored as a real local
@@ -915,28 +997,64 @@ const FIELD_STATE_GC_RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days, matchi
  *
  * The actual age filtering is `selectFieldStateGcCandidates` (storage/
  * selectors.ts) — split out, like this module's other selectors, so it can
- * be unit tested without a real IndexedDB. Loads the whole `field_state`
- * store rather than scanning via an index: this only runs roughly once a
- * day (background/index.ts's `runMaintenanceIfDue`) over a table that
- * isn't large (one row per (object, field) pair, only for objects this
- * device has ever seen), so a dedicated `recordedAt`/`value` index isn't
- * worth paying its maintenance cost on every single field_state write.
+ * be unit tested without a real IndexedDB. Still walks the whole
+ * `field_state` store — there's no `field`/`value`/`recordedAt` index to
+ * narrow the scan to just "liveness: deleted" rows, and a dedicated one
+ * isn't worth paying its maintenance cost on every single field_state
+ * write, since this only runs roughly once a day (background/index.ts's
+ * `runMaintenanceIfDue`) — but in `MAINTENANCE_DELETE_CHUNK`-sized pieces
+ * via a cursor rather than one `getAll()` that materializes every row as a
+ * single in-memory array: an install with a lot of bookmark/tab churn can
+ * have a field_state table large enough for that array itself to be a
+ * real memory spike. Candidate objectIds' rows are then deleted in
+ * `MAINTENANCE_DELETE_CHUNK`-sized transactions too, same reasoning as
+ * `pruneAppliedOperations`/`pruneRemoteObjectsByType` above.
  */
 export async function gcFieldStates(): Promise<void> {
   const db = await getDb();
-  const allRecords = await db.getAll("field_state");
   const cutoffMs = Date.now() - FIELD_STATE_GC_RETENTION_MS;
-  const objectIds = selectFieldStateGcCandidates(allRecords, cutoffMs);
-  if (objectIds.length === 0) return;
 
-  const tx = db.transaction("field_state", "readwrite");
-  const index = tx.store.index("by-object-id");
-  for (const objectId of objectIds) {
-    for await (const cursor of index.iterate(objectId)) {
-      await cursor.delete();
+  // Scan phase: bounded cursor walk, `selectFieldStateGcCandidates` called
+  // per chunk rather than once over the whole store.
+  const objectIds = new Set<string>();
+  let scanCursor = await db.transaction("field_state").store.openCursor();
+  let scanChunk: FieldStateRecord[] = [];
+  while (scanCursor) {
+    scanChunk.push(scanCursor.value);
+    if (scanChunk.length >= MAINTENANCE_DELETE_CHUNK) {
+      for (const id of selectFieldStateGcCandidates(scanChunk, cutoffMs)) objectIds.add(id);
+      scanChunk = [];
     }
+    scanCursor = await scanCursor.continue();
   }
-  await tx.done;
+  if (scanChunk.length > 0) {
+    for (const id of selectFieldStateGcCandidates(scanChunk, cutoffMs)) objectIds.add(id);
+  }
+  if (objectIds.size === 0) return;
+
+  // Delete phase: chunked into separate transactions, same as
+  // `pruneAppliedOperations`/`pruneRemoteObjectsByType` — each object only
+  // ever has a handful of fields (title/url/move/liveness), so
+  // `MAINTENANCE_DELETE_CHUNK` objectIds per transaction stays well within
+  // that chunk's row-count intent.
+  let deleteBatch: string[] = [];
+  const flushDeleteBatch = async () => {
+    if (deleteBatch.length === 0) return;
+    const tx = db.transaction("field_state", "readwrite");
+    const index = tx.store.index("by-object-id");
+    for (const objectId of deleteBatch) {
+      for await (const cursor of index.iterate(objectId)) {
+        await cursor.delete();
+      }
+    }
+    await tx.done;
+    deleteBatch = [];
+  };
+  for (const objectId of objectIds) {
+    deleteBatch.push(objectId);
+    if (deleteBatch.length >= MAINTENANCE_DELETE_CHUNK) await flushDeleteBatch();
+  }
+  await flushDeleteBatch();
 }
 
 /** Wipes all per-field provenance (docs/protocol.md §11 snapshot resync

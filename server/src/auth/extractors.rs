@@ -165,6 +165,15 @@ impl FromRequestParts<AppState> for AuthenticatedDevice {
 /// requests aren't cookie-driven, so CSRF doesn't apply to them).
 pub struct AnyAuthenticatedUser {
     pub user_id: uuid::Uuid,
+    /// Key to use for per-caller rate limiting (SRV-5): `device:<device_id>`
+    /// when this request carried a device bearer token, so each of a user's
+    /// devices gets its own bucket instead of all of them starving each
+    /// other on one shared user-level bucket; `user:<user_id>` when it came
+    /// in via web session cookie instead, since the dashboard has no device
+    /// identity to key by. Only the rate-limit key varies this way — the
+    /// resolved `user_id` (and thus the settings data itself) stays the
+    /// same regardless of which credential was used.
+    pub rate_limit_key: String,
 }
 
 #[axum::async_trait]
@@ -178,11 +187,13 @@ impl FromRequestParts<AppState> for AnyAuthenticatedUser {
         if let Ok(device) = AuthenticatedDevice::from_request_parts(parts, state).await {
             return Ok(AnyAuthenticatedUser {
                 user_id: device.user_id,
+                rate_limit_key: format!("device:{}", device.device_id),
             });
         }
         let user = AuthenticatedUser::from_request_parts(parts, state).await?;
         Ok(AnyAuthenticatedUser {
             user_id: user.user_id,
+            rate_limit_key: format!("user:{}", user.user_id),
         })
     }
 }
@@ -196,6 +207,10 @@ impl FromRequestParts<AppState> for AnyAuthenticatedUser {
 /// options both expose the same toggles).
 pub struct AnyAuthorizedMutator {
     pub user_id: uuid::Uuid,
+    /// See `AnyAuthenticatedUser::rate_limit_key` — same device-vs-user
+    /// keying rationale, for the mutating (CSRF-checked-on-cookie-path)
+    /// counterpart.
+    pub rate_limit_key: String,
 }
 
 #[axum::async_trait]
@@ -209,11 +224,13 @@ impl FromRequestParts<AppState> for AnyAuthorizedMutator {
         if let Ok(device) = AuthenticatedDevice::from_request_parts(parts, state).await {
             return Ok(AnyAuthorizedMutator {
                 user_id: device.user_id,
+                rate_limit_key: format!("device:{}", device.device_id),
             });
         }
         let CsrfProtectedUser(user) = CsrfProtectedUser::from_request_parts(parts, state).await?;
         Ok(AnyAuthorizedMutator {
             user_id: user.user_id,
+            rate_limit_key: format!("user:{}", user.user_id),
         })
     }
 }

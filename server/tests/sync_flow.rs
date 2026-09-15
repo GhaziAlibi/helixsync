@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum_test::{TestServer, TestServerConfig, Transport};
 use chrono::{DateTime, Utc};
 use helixsync_server::config::Config;
-use helixsync_server::middleware::rate_limit::RateLimiter;
+use helixsync_server::middleware::rate_limit::{RateLimiter, SYNC_SETTINGS_LIMIT};
 use helixsync_server::state::AppState;
 use helixsync_server::sync::compaction;
 use helixsync_server::websocket::ConnectionRegistry;
@@ -592,6 +592,52 @@ async fn unlimited_history_retention_keeps_old_visits(pool: PgPool) {
     let objects = snapshot["objects"].as_array().unwrap();
     assert_eq!(objects.len(), 1);
     assert_eq!(objects[0]["objectId"], json!(old_object_id));
+}
+
+/// SRV-5 regression: `SYNC_SETTINGS_LIMIT` used to be enforced keyed by
+/// `user.user_id.to_string()`, so every device belonging to one account
+/// shared a single 60 req/min bucket for `/api/v1/sync/settings` — a
+/// handful of concurrently-active devices (e.g. on browser startup, or
+/// when each device's local settings cache TTL expires around the same
+/// time) could trip the shared bucket even though no single device was
+/// misbehaving, and `get_settings` returning 429 makes the extension's
+/// `restorePolicy()` fail closed to `"disabled"`. Settings routes now key
+/// the rate limit by `AnyAuthenticatedUser::rate_limit_key`/
+/// `AnyAuthorizedMutator::rate_limit_key` (`device:<device_id>` for
+/// bearer-token callers), so two devices belonging to the same user must
+/// each be able to spend nearly all of `SYNC_SETTINGS_LIMIT` independently
+/// without affecting the other's quota.
+#[sqlx::test(migrations = "./migrations")]
+async fn sync_settings_rate_limit_is_independent_per_device(pool: PgPool) {
+    let server = server_for(pool);
+    register_and_login(&server, "priya-two-devices@example.com").await;
+    let (_device_a_id, access_token_a) =
+        register_device(&server, "priya-two-devices@example.com", "Laptop").await;
+    let (_device_b_id, access_token_b) =
+        register_device(&server, "priya-two-devices@example.com", "Phone").await;
+
+    // One below SYNC_SETTINGS_LIMIT's 60/60s cap, so each loop alone would
+    // never trip its own device-keyed bucket. If both devices still shared
+    // one user-keyed bucket (the pre-fix behavior), the combined 2*59 = 118
+    // requests would blow well past 60 and start 429ing partway through
+    // device B's loop.
+    let requests_per_device = SYNC_SETTINGS_LIMIT.limit - 1;
+
+    for _ in 0..requests_per_device {
+        server
+            .get("/api/v1/sync/settings")
+            .authorization_bearer(&access_token_a)
+            .await
+            .assert_status_ok();
+    }
+
+    for _ in 0..requests_per_device {
+        server
+            .get("/api/v1/sync/settings")
+            .authorization_bearer(&access_token_b)
+            .await
+            .assert_status_ok();
+    }
 }
 
 #[sqlx::test(migrations = "./migrations")]

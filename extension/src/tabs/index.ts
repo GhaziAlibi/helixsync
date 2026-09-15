@@ -4,7 +4,7 @@
 // tab ONLY when the user has enabled "Restore remote tabs" with an
 // "automatic" policy — otherwise it's tracked for display only. This is
 // what guarantees a remote tab can never destroy an unrelated local tab.
-import { createLocalOperation, createLocalOperationsBatch, registerApplier } from "../sync/engine";
+import { createLocalOperation, createLocalOperationsBatch, registerApplier, scheduleLocalSync } from "../sync/engine";
 import type { PendingLocalOperation } from "../sync/engine";
 import {
   recordLocalFieldState,
@@ -357,6 +357,10 @@ async function flushTabEvents(events: QueuedTabEvent[]): Promise<void> {
     }
   });
   await recordLocalFieldStatesBatch(fieldStateEntries);
+  // EXT-1: operations are now durably in pending_operations — nudge a sync
+  // cycle instead of leaving them for the next alarm/push (see
+  // scheduleLocalSync's doc comment in sync/engine.ts).
+  scheduleLocalSync();
 }
 
 const enqueueTabEvent = createMicroBatchQueue<QueuedTabEvent>(flushTabEvents);

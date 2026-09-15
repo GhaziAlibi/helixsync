@@ -197,6 +197,15 @@ function renderHistoryList(visits: HistoryVisitPayload[]): HTMLElement | null {
   return section;
 }
 
+// A device that synced 150+ open tabs would otherwise force
+// renderPendingTabRestores to build 150+ <li> nodes (and click handlers)
+// just to open the popup — visible jank on every open. Cap the initial
+// render and reveal the rest only on demand via "Show more", same
+// motivation as renderHistoryList's `.slice(0, 5)` cap above, just a
+// higher limit since these rows (title + one button) are cheaper than
+// history rows and users are more likely to want to see most of them.
+const PENDING_RESTORE_PAGE_SIZE = 15;
+
 /** Renders the "ask" restore-policy list: remote tabs tracked but not yet
  * materialized locally, each with a "Restore" button, plus a "Restore all"
  * button. Uses DOM APIs (not innerHTML) for the same remote-content-is-not-
@@ -216,7 +225,8 @@ function renderPendingTabRestores(
 
   const list = document.createElement("ul");
   list.className = "item-list";
-  for (const { objectId, payload } of pending) {
+
+  const appendItem = ({ objectId, payload }: PendingTabRestore) => {
     const item = document.createElement("li");
     item.className = "item restore-item";
 
@@ -232,8 +242,24 @@ function renderPendingTabRestores(
 
     item.append(info, restoreButton);
     list.appendChild(item);
+  };
+
+  for (const entry of pending.slice(0, PENDING_RESTORE_PAGE_SIZE)) {
+    appendItem(entry);
   }
   section.appendChild(list);
+
+  if (pending.length > PENDING_RESTORE_PAGE_SIZE) {
+    const remaining = pending.slice(PENDING_RESTORE_PAGE_SIZE);
+    const showMoreButton = document.createElement("button");
+    showMoreButton.className = "ghost";
+    showMoreButton.textContent = `Show ${remaining.length} more`;
+    showMoreButton.addEventListener("click", () => {
+      for (const entry of remaining) appendItem(entry);
+      showMoreButton.remove();
+    });
+    section.appendChild(showMoreButton);
+  }
 
   const restoreAllButton = document.createElement("button");
   restoreAllButton.textContent = `Restore all (${pending.length})`;

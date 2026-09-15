@@ -275,12 +275,37 @@ interface SettingsCacheEntry {
   expiresAt: number;
 }
 
+// Even with the TTL cache above living in chrome.storage.session so it
+// survives a service worker restart, `readSettingsCache` was still paying
+// for a `chrome.storage.session.get` IPC round trip (extension process ->
+// browser process and back) on every single call — including the hundreds
+// of restorePolicy() calls per download batch (tabs/index.ts) that all land
+// within the same TTL window and would all resolve to the exact same
+// value. Mirroring the entry in a plain module-level variable, the same
+// pattern storage/db.ts's `getDevice` uses for the "device" record, turns
+// every one of those repeat calls into a synchronous lookup and leaves only
+// the first call per service-worker lifetime (or the call right after an
+// invalidation) paying for the IPC. `settingsCacheLoaded` is tracked
+// separately from `memorySettingsCache` because `undefined` is itself a
+// valid loaded state (no cached entry / just invalidated) and must be
+// distinguished from "haven't checked chrome.storage.session yet" — without
+// it, every read after an invalidation would look like a cold start and
+// re-pay for the IPC on every call instead of just the next one.
+let memorySettingsCache: SettingsCacheEntry | undefined;
+let settingsCacheLoaded = false;
+
 async function readSettingsCache(): Promise<SettingsCacheEntry | undefined> {
+  if (settingsCacheLoaded) return memorySettingsCache;
+
   const stored = await chrome.storage.session.get(SETTINGS_CACHE_STORAGE_KEY);
-  return stored[SETTINGS_CACHE_STORAGE_KEY] as SettingsCacheEntry | undefined;
+  memorySettingsCache = stored[SETTINGS_CACHE_STORAGE_KEY] as SettingsCacheEntry | undefined;
+  settingsCacheLoaded = true;
+  return memorySettingsCache;
 }
 
 async function writeSettingsCache(entry: SettingsCacheEntry | undefined): Promise<void> {
+  memorySettingsCache = entry;
+  settingsCacheLoaded = true;
   if (entry) {
     await chrome.storage.session.set({ [SETTINGS_CACHE_STORAGE_KEY]: entry });
   } else {

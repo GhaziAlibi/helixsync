@@ -31,6 +31,18 @@ import type { ObjectType } from "../sync/types";
 import { backfillExisting as backfillBookmarks, registerCapture as registerBookmarkCapture } from "../bookmarks";
 import { backfillExisting as backfillHistory, registerCapture as registerHistoryCapture } from "../history";
 import { registerCapture as registerTabCapture, restoreTab } from "../tabs";
+import { chunk } from "../util/chunk";
+
+// RESTORE_ALL_TABS restores every pending tab from a synced-open-tabs
+// snapshot, which for an active user's other device can easily be 100+
+// tabs. Fully sequential (one `await restoreTab()` at a time) makes that
+// take dozens of seconds with the popup pinned open and unresponsive the
+// whole time. Fully unbounded-parallel (`Promise.all` over everything at
+// once) risks hammering chrome.tabs.create — Chromium throttles/queues tab
+// creation under load and a 100+-wide burst is exactly the kind of thing
+// that trips it up. A small bounded batch size gets most of the wall-clock
+// win without that risk.
+const RESTORE_ALL_CONCURRENCY = 6;
 
 const SYNC_ALARM = "helixsync-periodic-sync";
 const SYNC_INTERVAL_MINUTES = 1;
@@ -218,8 +230,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       }
       case "RESTORE_ALL_TABS": {
         const pending = await getPendingTabRestores();
-        for (const { objectId } of pending) {
-          await restoreTab(objectId);
+        for (const batch of chunk(pending, RESTORE_ALL_CONCURRENCY)) {
+          await Promise.all(batch.map(({ objectId }) => restoreTab(objectId)));
         }
         await updateBadge();
         sendResponse({ ok: true });

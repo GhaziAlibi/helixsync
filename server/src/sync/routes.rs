@@ -8,6 +8,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -786,6 +787,11 @@ struct SnapshotSourceRow {
     lamport_timestamp: i64,
     device_id: Uuid,
     operation_id: Uuid,
+    // Carried into the resulting `SnapshotObject` (SRV-1) so a historyVisit
+    // folded into a future base snapshot can still be re-evaluated against
+    // `history_cutoff` on a later `compute_objects` call — see
+    // `SnapshotObject::created_at`'s doc comment.
+    created_at: DateTime<Utc>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -831,6 +837,17 @@ fn combine_object(
         }
         payloads.extend(new_ops_ascending.iter().map(|op| op.payload.clone()));
         if let Some(merged) = super::conflict::merge_bookmark_fields(&payloads) {
+            // Field-merge object types (bookmark/bookmarkFolder) are never
+            // subject to `history_cutoff` pruning, but `SnapshotObject`
+            // still needs a `created_at` — the latest contributing
+            // operation's upload time is the most meaningful value to carry
+            // forward here.
+            let created_at = new_ops_ascending
+                .iter()
+                .map(|op| op.created_at)
+                .chain(base.as_ref().map(|b| b.created_at))
+                .max()
+                .expect("new_ops_ascending checked non-empty above");
             return Some(SnapshotObject {
                 object_type,
                 object_id,
@@ -840,6 +857,7 @@ fn combine_object(
                 operation_type: "create".to_string(),
                 encryption_version: 0,
                 payload: merged,
+                created_at,
             });
         }
     }
@@ -858,7 +876,74 @@ fn combine_object(
         operation_type: winner.operation_type,
         encryption_version: winner.encryption_version,
         payload: winner.payload,
+        created_at: winner.created_at,
     })
+}
+
+/// Sorts one object's accumulated new-operation rows into `OrderingKey`
+/// order and folds them into `objects` via [`combine_object`] — the unit of
+/// work [`fold_new_rows_into_objects`] performs once per distinct
+/// `(object_type, object_id)` group as it streams through `new_rows`
+/// (SRV-3), so that a group's rows can be dropped from memory the instant
+/// the next group starts rather than staying resident until every group
+/// has been read.
+fn flush_object_group(
+    object_type: String,
+    object_id: Uuid,
+    mut ops: Vec<SnapshotSourceRow>,
+    objects: &mut HashMap<(String, Uuid), SnapshotObject>,
+) {
+    // Rows arrive in `(object_type, object_id)` order (the query's `ORDER
+    // BY` — see `compute_objects`), not `OrderingKey` order —
+    // `combine_object` requires the latter (see its doc comment), so
+    // restore it here, per object, before handing the group off.
+    ops.sort_by_key(|row| super::conflict::OrderingKey {
+        lamport_timestamp: row.lamport_timestamp,
+        device_id: row.device_id,
+        operation_id: row.operation_id,
+    });
+    let base_entry = objects.remove(&(object_type.clone(), object_id));
+    if let Some(combined) = combine_object(object_type.clone(), object_id, base_entry, ops) {
+        objects.insert((object_type, object_id), combined);
+    }
+}
+
+/// Streams `rows` — already ordered by `(object_type, object_id)`, see the
+/// `ORDER BY` on both `new_rows` queries in [`compute_objects`] — and folds
+/// each group into `objects` via [`flush_object_group`] as soon as the next
+/// group's first row arrives (SRV-3).
+///
+/// This is what makes `.fetch()` (a `Stream`) actually cheaper than
+/// `.fetch_all()` (a `Vec`) here: naively streaming rows one at a time
+/// without also reordering the query would still require buffering a
+/// `HashMap<(String, Uuid), Vec<SnapshotSourceRow>>` of *every* group
+/// before any of them could be merged, since `combine_object` needs a
+/// group's rows together — no smaller in peak memory than the `Vec` it
+/// replaced. Grouping the query itself means only the *current* group's
+/// rows are ever buffered at once: peak memory is bounded by one object's
+/// operation count since the last snapshot/compaction, not the account's
+/// entire new-row count.
+async fn fold_new_rows_into_objects(
+    mut rows: impl futures::Stream<Item = Result<SnapshotSourceRow, sqlx::Error>> + Unpin,
+    objects: &mut HashMap<(String, Uuid), SnapshotObject>,
+) -> AppResult<()> {
+    let mut current_key: Option<(String, Uuid)> = None;
+    let mut group: Vec<SnapshotSourceRow> = Vec::new();
+
+    while let Some(row) = rows.try_next().await? {
+        let key = (row.object_type.clone(), row.object_id);
+        if current_key.as_ref() != Some(&key) {
+            if let Some((object_type, object_id)) = current_key.take() {
+                flush_object_group(object_type, object_id, std::mem::take(&mut group), objects);
+            }
+            current_key = Some(key);
+        }
+        group.push(row);
+    }
+    if let Some((object_type, object_id)) = current_key {
+        flush_object_group(object_type, object_id, group, objects);
+    }
+    Ok(())
 }
 
 /// Resolves the account's `history_retention` setting (docs stored/
@@ -876,12 +961,14 @@ fn combine_object(
 /// clock effectively starts at upload time rather than each visit's real
 /// historical date.
 ///
-/// Known limitation: this only ever filters raw `sync_operations` rows
-/// (via [`compute_objects`]'s `new_rows` query) before they're folded into
-/// a `sync_snapshots` row — it does not retroactively strip already-expired
-/// `historyVisit` objects out of a snapshot that was persisted before this
-/// filtering existed. Such an account converges to the configured
-/// retention window only for visits compacted going forward.
+/// This cutoff is applied twice in [`compute_objects`]: once via SQL against
+/// raw `sync_operations` rows (the `new_rows` query), and once more in
+/// memory (SRV-1) against `objects` after the base snapshot and `new_rows`
+/// are merged — the latter is what lets a `historyVisit` already folded
+/// into a previously persisted `sync_snapshots` row (an immutable object
+/// type, so it can never reappear in `new_rows` to be re-filtered) still
+/// converge to the configured retention window on every future call,
+/// instead of remaining embedded in every snapshot forever.
 pub(super) async fn history_retention_cutoff(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
@@ -1039,72 +1126,85 @@ pub(super) async fn compute_objects(
     // age) and is a no-op when `history_cutoff` is None ("unlimited"
     // retention or no settings row — see `history_retention_cutoff`).
     //
-    // `ORDER BY server_cursor` (not `OrderingKey`) is what `idx_sync_operations_user_cursor
-    // (user_id, server_cursor)` can satisfy as a pure index scan — no
-    // separate sort of the whole (potentially huge, full-JSONB-payload)
-    // result set. `server_cursor` order is server-arrival order across the
-    // *entire account*, not the per-object `OrderingKey` order that
-    // `combine_object` requires, so it is re-established below via a small
-    // in-memory sort per `(object_type, object_id)` group instead — bounded
-    // by one object's operation count since the last snapshot/compaction,
-    // not the whole account's.
-    let new_rows: Vec<SnapshotSourceRow> = match ceiling {
-        Some(c) => sqlx::query_as!(
-            SnapshotSourceRow,
-            r#"
-            SELECT object_type, object_id, operation_type, encryption_version, payload,
-                   lamport_timestamp, device_id, operation_id
-            FROM sync_operations
-            WHERE user_id = $1 AND server_cursor > $2 AND server_cursor <= $3
-              AND (object_type <> 'historyVisit' OR $4::timestamptz IS NULL OR created_at >= $4::timestamptz)
-            ORDER BY server_cursor ASC
-            "#,
-            user_id,
-            base_cursor,
-            c,
-            history_cutoff
-        )
-        .fetch_all(&mut **tx)
-        .await?,
-        None => sqlx::query_as!(
-            SnapshotSourceRow,
-            r#"
-            SELECT object_type, object_id, operation_type, encryption_version, payload,
-                   lamport_timestamp, device_id, operation_id
-            FROM sync_operations
-            WHERE user_id = $1 AND server_cursor > $2
-              AND (object_type <> 'historyVisit' OR $3::timestamptz IS NULL OR created_at >= $3::timestamptz)
-            ORDER BY server_cursor ASC
-            "#,
-            user_id,
-            base_cursor,
-            history_cutoff
-        )
-        .fetch_all(&mut **tx)
-        .await?,
-    };
-
-    let mut new_groups: HashMap<(String, Uuid), Vec<SnapshotSourceRow>> = HashMap::new();
-    for row in new_rows {
-        new_groups
-            .entry((row.object_type.clone(), row.object_id))
-            .or_default()
-            .push(row);
+    // SRV-3: for an active account (or right after a large initial client
+    // backfill), this can be tens of thousands of rows — including full
+    // JSONB `payload` blobs — so the rows are streamed via `.fetch()`
+    // rather than materialized into a `Vec` with `.fetch_all()`.
+    // `combine_object` still needs *all* of a given object's new operations
+    // together (see [`fold_new_rows_into_objects`]), so `ORDER BY
+    // object_type, object_id` (not `server_cursor`) is what makes streaming
+    // actually reduce peak memory rather than just avoiding one Vec
+    // allocation: it groups every row for the same object contiguously, so
+    // `fold_new_rows_into_objects` only ever needs to buffer the *current*
+    // group before merging it into `objects` and moving on — bounded by one
+    // object's operation count since the last snapshot/compaction, not the
+    // whole account's new-row count. The existing `idx_sync_operations_object
+    // (user_id, object_type, object_id)` index satisfies this ordering as a
+    // plain index scan (server_cursor range/`history_cutoff` are applied as
+    // a filter during the scan), so this needs no new index and no
+    // in-database sort. Per-object `OrderingKey` order (which
+    // `combine_object` actually requires) is unrelated to this SQL
+    // ordering and is restored separately, per group, in
+    // `flush_object_group`. `resolved_cursor` above is computed from a
+    // `MAX(server_cursor)` aggregate, independent of this query's row
+    // order, so reordering it doesn't affect that.
+    match ceiling {
+        Some(c) => {
+            let rows = sqlx::query_as!(
+                SnapshotSourceRow,
+                r#"
+                SELECT object_type, object_id, operation_type, encryption_version, payload,
+                       lamport_timestamp, device_id, operation_id, created_at
+                FROM sync_operations
+                WHERE user_id = $1 AND server_cursor > $2 AND server_cursor <= $3
+                  AND (object_type <> 'historyVisit' OR $4::timestamptz IS NULL OR created_at >= $4::timestamptz)
+                ORDER BY object_type ASC, object_id ASC
+                "#,
+                user_id,
+                base_cursor,
+                c,
+                history_cutoff
+            )
+            .fetch(&mut **tx);
+            fold_new_rows_into_objects(rows, &mut objects).await?;
+        }
+        None => {
+            let rows = sqlx::query_as!(
+                SnapshotSourceRow,
+                r#"
+                SELECT object_type, object_id, operation_type, encryption_version, payload,
+                       lamport_timestamp, device_id, operation_id, created_at
+                FROM sync_operations
+                WHERE user_id = $1 AND server_cursor > $2
+                  AND (object_type <> 'historyVisit' OR $3::timestamptz IS NULL OR created_at >= $3::timestamptz)
+                ORDER BY object_type ASC, object_id ASC
+                "#,
+                user_id,
+                base_cursor,
+                history_cutoff
+            )
+            .fetch(&mut **tx);
+            fold_new_rows_into_objects(rows, &mut objects).await?;
+        }
     }
 
-    for ((object_type, object_id), mut ops) in new_groups {
-        // Rows arrived in `server_cursor` order, not `OrderingKey` order —
-        // `combine_object` requires the latter (see its doc comment), so
-        // restore it here, per object, before handing the group off.
-        ops.sort_by_key(|row| super::conflict::OrderingKey {
-            lamport_timestamp: row.lamport_timestamp,
-            device_id: row.device_id,
-            operation_id: row.operation_id,
-        });
-        let base_entry = objects.remove(&(object_type.clone(), object_id));
-        if let Some(combined) = combine_object(object_type.clone(), object_id, base_entry, ops) {
-            objects.insert((object_type, object_id), combined);
-        }
+    // SRV-1: the `new_rows` query's `history_cutoff` filter above only ever
+    // excludes historyVisit operations still sitting in `sync_operations` —
+    // it can't do anything about a historyVisit that was already folded
+    // into `base_row` by an earlier snapshot/compaction pass. historyVisit
+    // is immutable (never produces a second operation once created), so
+    // such an object can never reappear in `new_rows` to be re-filtered;
+    // without this pass it would stay embedded in `objects` — and therefore
+    // in every snapshot derived from it — forever, no matter how far past
+    // `history_cutoff` it falls. `SnapshotObject::created_at` (added for
+    // this) is what makes re-evaluating it here possible.
+    //
+    // Deliberately run *after* the `new_rows` merge above, not before: a
+    // historyVisit still within the retention window needs the chance to
+    // combine with any newer op first, rather than being evaluated (and
+    // potentially removed pre-merge) against a stale `created_at`.
+    if let Some(cutoff) = history_cutoff {
+        objects.retain(|_, obj| obj.object_type != "historyVisit" || obj.created_at >= cutoff);
     }
 
     Ok((resolved_cursor, objects))
