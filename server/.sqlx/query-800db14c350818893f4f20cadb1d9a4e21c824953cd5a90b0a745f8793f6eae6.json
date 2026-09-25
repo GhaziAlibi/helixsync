@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT hour, visits FROM history_visit_hours WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hour",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 1,
+        "name": "visits",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "800db14c350818893f4f20cadb1d9a4e21c824953cd5a90b0a745f8793f6eae6"
+}

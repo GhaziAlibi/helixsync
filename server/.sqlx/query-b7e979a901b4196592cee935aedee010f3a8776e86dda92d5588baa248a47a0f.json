@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO tombstones (user_id, object_type, object_id, deleted_at_cursor, active, created_at, lamport_timestamp, device_id, operation_id) VALUES ($1, $2, gen_random_uuid(), 1, true, $3, 1, gen_random_uuid(), gen_random_uuid()) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b7e979a901b4196592cee935aedee010f3a8776e86dda92d5588baa248a47a0f"
+}

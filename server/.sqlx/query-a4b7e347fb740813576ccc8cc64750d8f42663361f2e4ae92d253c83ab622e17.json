@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tombstones SET created_at = $1 WHERE user_id = $2 AND object_type = 'tab' AND object_id = $3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a4b7e347fb740813576ccc8cc64750d8f42663361f2e4ae92d253c83ab622e17"
+}

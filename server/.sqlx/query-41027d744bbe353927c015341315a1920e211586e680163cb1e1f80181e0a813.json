@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO tombstones\n                    (user_id, object_type, object_id, deleted_at_cursor, active,\n                     lamport_timestamp, device_id, operation_id)\n                SELECT $1, u.object_type, u.object_id, u.cursor, true, u.lamport_timestamp, $6, u.operation_id\n                FROM UNNEST($2::text[], $3::uuid[], $4::bigint[], $5::bigint[], $7::uuid[])\n                    AS u(object_type, object_id, cursor, lamport_timestamp, operation_id)\n                ON CONFLICT (user_id, object_type, object_id)\n                DO UPDATE SET deleted_at_cursor = EXCLUDED.deleted_at_cursor, active = true,\n                    lamport_timestamp = EXCLUDED.lamport_timestamp,\n                    device_id = EXCLUDED.device_id,\n                    operation_id = EXCLUDED.operation_id\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "UuidArray",
+        "Int8Array",
+        "Int8Array",
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "41027d744bbe353927c015341315a1920e211586e680163cb1e1f80181e0a813"
+}

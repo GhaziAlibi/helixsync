@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO web_sessions (user_id, session_hash, expires_at) VALUES ($1, 'hash', $2) RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9d655c84beaaed0e77ab89e6c460d0dde9c991e7c4a2ad35ea40a1aa6a3d94e0"
+}

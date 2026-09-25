@@ -1,0 +1,300 @@
+// Client-side deterministic conflict resolution per docs/protocol.md §8.
+// This is THE place both bookmarks/history/tabs modules must go through to
+// decide whether an incoming remote field value should actually be applied
+// — never call chrome.* mutators directly from a downloaded operation
+// without going through here, or server_cursor delivery order (which is
+// NOT causal order, docs/protocol.md §4.3) can silently produce
+// non-deterministic results that diverge between devices.
+import type { IDBPTransaction } from "idb";
+import {
+  fieldStateKey,
+  getDb,
+  getFieldState,
+  putFieldState,
+  putFieldStatesBatch,
+  type FieldStateRecord,
+  type HelixSyncDB,
+} from "../storage/db";
+import type { OperationType } from "./types";
+
+export interface OrderingKey {
+  lamportTimestamp: number;
+  deviceId: string;
+  operationId: string;
+}
+
+/** docs/protocol.md §8.1 universal ordering: (lamportTimestamp, deviceId,
+ * operationId) compared lexicographically, higher wins. Returns >0 if a
+ * wins, <0 if b wins, 0 only if truly identical (same operationId). */
+export function compareOrderingKey(a: OrderingKey, b: OrderingKey): number {
+  if (a.lamportTimestamp !== b.lamportTimestamp) {
+    return a.lamportTimestamp - b.lamportTimestamp;
+  }
+  if (a.deviceId !== b.deviceId) {
+    return a.deviceId < b.deviceId ? -1 : 1;
+  }
+  if (a.operationId !== b.operationId) {
+    return a.operationId < b.operationId ? -1 : 1;
+  }
+  return 0;
+}
+
+export interface IncomingField extends OrderingKey {
+  operationType: OperationType;
+  value: unknown;
+}
+
+export interface ResolveResult {
+  applied: boolean;
+  value: unknown;
+}
+
+type FieldStateTx = IDBPTransaction<HelixSyncDB, ["field_state"], "readwrite">;
+
+// Pure arbitration core: same §8.1 LWW + liveness exceptions as before,
+// but with no IndexedDB I/O so bulk callers can run it over an in-memory
+// snapshot. `recordedAt` stays a write-only bookkeeping stamp (see below).
+function buildNextState(
+  objectId: string,
+  field: string,
+  incoming: IncomingField,
+  recordedAt: number,
+): FieldStateRecord {
+  return { key: fieldStateKey(objectId, field), objectId, field, ...incoming, recordedAt } as FieldStateRecord;
+}
+
+function arbitrateField(
+  current: FieldStateRecord | undefined,
+  objectId: string,
+  field: string,
+  incoming: IncomingField,
+  recordedAt: number,
+): { result: ResolveResult; next: FieldStateRecord | undefined } {
+  if (!current) {
+    const next = buildNextState(objectId, field, incoming, recordedAt);
+    return { result: { applied: true, value: incoming.value }, next };
+  }
+
+  if (field === "liveness") {
+    if (incoming.operationType === "delete" && current.operationType === "move") {
+      const next = buildNextState(objectId, field, incoming, recordedAt);
+      return { result: { applied: true, value: incoming.value }, next };
+    }
+    if (incoming.operationType === "move" && current.value === "deleted") {
+      return { result: { applied: false, value: current.value }, next: undefined };
+    }
+  }
+
+  const cmp = compareOrderingKey(incoming, {
+    lamportTimestamp: current.lamportTimestamp,
+    deviceId: current.deviceId,
+    operationId: current.operationId,
+  });
+
+  if (cmp > 0) {
+    const next = buildNextState(objectId, field, incoming, recordedAt);
+    return { result: { applied: true, value: incoming.value }, next };
+  }
+  return { result: { applied: false, value: current.value }, next: undefined };
+}
+
+/**
+ * Resolve a single (objectId, field) slot against its current provenance,
+ * against an already-open transaction — the shared core behind both
+ * `resolveField` (opens its own single-field transaction) and
+ * `resolveFields` (resolves several fields in one transaction). See
+ * `resolveField`'s docs for the actual arbitration rules; this only
+ * factors out where the IndexedDB reads/writes happen.
+ */
+async function resolveFieldInTx(
+  tx: FieldStateTx,
+  objectId: string,
+  field: string,
+  incoming: IncomingField,
+): Promise<ResolveResult> {
+  const store = tx.objectStore("field_state");
+  const key = fieldStateKey(objectId, field);
+  const current = await store.get(key);
+
+  // `recordedAt` is a wall-clock bookkeeping stamp only, read solely by
+  // storage/db.ts's `gcFieldStates` — it plays no part in the arbitration
+  // below (which stays purely Lamport-ordered, docs/protocol.md §8.1) and
+  // must never be compared against `current.recordedAt` or otherwise used
+  // to influence a win/lose decision here.
+  const recordedAt = Date.now();
+  const { result, next } = arbitrateField(current, objectId, field, incoming, recordedAt);
+  if (next) await store.put(next);
+  return result;
+}
+
+// Parallel I/O core for `resolveFields`/`resolveFieldsBatch`: one batched
+// read phase + in-memory wire-order walk + one batched write phase, all in a
+// single transaction (same atomicity as the old sequential loop, but ~N
+// sequential round trips collapse to 2 parallel batches). Repeated
+// (objectId, field) entries still observe earlier entries' writes via the
+// in-memory `currentByKey` map, exactly as sequential calls would.
+async function resolveEntriesInTx(
+  tx: FieldStateTx,
+  entries: BatchFieldResolution[],
+): Promise<ResolveResult[]> {
+  const store = tx.objectStore("field_state");
+  const keys = entries.map((e) => fieldStateKey(e.objectId, e.field));
+  const distinctKeys = [...new Set(keys)];
+
+  // Batched reads (not one unbounded Promise.all): a 50-op slice with up to
+  // 4 fields each is ~200 parallel gets — chunked to bound promise churn
+  // and time holding the single shared transaction open.
+  const IDB_READ_CHUNK = 200;
+  const currentByKey = new Map<string, FieldStateRecord | undefined>();
+  for (let i = 0; i < distinctKeys.length; i += IDB_READ_CHUNK) {
+    const slice = distinctKeys.slice(i, i + IDB_READ_CHUNK);
+    const fetched = await Promise.all(slice.map((k) => store.get(k)));
+    fetched.forEach((rec, j) => currentByKey.set(slice[j], rec));
+  }
+
+  const results: ResolveResult[] = [];
+  const pendingWrites = new Map<string, FieldStateRecord>();
+  const recordedAt = Date.now();
+  for (let i = 0; i < entries.length; i++) {
+    const { objectId, field, incoming } = entries[i];
+    const key = keys[i];
+    const current = currentByKey.get(key);
+    const { result, next } = arbitrateField(current, objectId, field, incoming, recordedAt);
+    results.push(result);
+    if (next) {
+      currentByKey.set(key, next);
+      pendingWrites.set(key, next);
+    }
+  }
+
+  // Batched writes for winners only. Collapsing repeat wins
+  // for the same key to one put (latest timestamp) is equivalent: only the
+  // final record is observable after the transaction, and `recordedAt` is
+  // never an arbitration input.
+  const pendingList = [...pendingWrites.values()];
+  for (let i = 0; i < pendingList.length; i += IDB_READ_CHUNK) {
+    await Promise.all(pendingList.slice(i, i + IDB_READ_CHUNK).map((rec) => store.put(rec)));
+  }
+  return results;
+}
+
+/**
+ * Resolve a single (objectId, field) slot against its current provenance.
+ *
+ * Every mutable field (title, url, the compound move field, and the
+ * special "liveness" field used to arbitrate create/update/move/delete/
+ * restore per docs/protocol.md §8.2) goes through the same generic
+ * §8.1 LWW rule, with one documented asymmetric exception for `liveness`:
+ * "Delete vs move: delete wins" unconditionally (unlike "Delete vs
+ * update", which is ordering-dependent), so that one case is
+ * special-cased rather than falling through to plain §8.1 compare.
+ */
+export async function resolveField(
+  objectId: string,
+  field: string,
+  incoming: IncomingField,
+): Promise<ResolveResult> {
+  const db = await getDb();
+  const tx = db.transaction("field_state", "readwrite");
+  const result = await resolveFieldInTx(tx, objectId, field, incoming);
+  await tx.done;
+  return result;
+}
+
+export interface FieldResolution {
+  field: string;
+  incoming: IncomingField;
+}
+
+/**
+ * Batch counterpart to `resolveField`: resolves several (objectId, field)
+ * slots in one IndexedDB transaction instead of one per field, cutting the
+ * number of committed transactions an applier needs for e.g. a bookmark
+ * `create` (title + url + move + liveness) from 4 to 1. Only safe — and
+ * only used — where nothing needs to observe one field's resolution
+ * before another is resolved; in particular, callers must not put a
+ * chrome.* mutation between entries, since each field's own LWW result
+ * never depends on another field's, only on its own prior state. Results
+ * are returned in the same order as `entries`.
+ */
+export async function resolveFields(
+  objectId: string,
+  entries: FieldResolution[],
+): Promise<ResolveResult[]> {
+  const db = await getDb();
+  const tx = db.transaction("field_state", "readwrite");
+  const results = await resolveEntriesInTx(
+    tx,
+    entries.map(({ field, incoming }) => ({ objectId, field, incoming })),
+  );
+  await tx.done;
+  return results;
+}
+
+export interface BatchFieldResolution {
+  objectId: string;
+  field: string;
+  incoming: IncomingField;
+}
+
+/**
+ * Batch counterpart to `resolveFields`: resolves (objectId, field) slots for
+ * many *different* objects in one IndexedDB transaction instead of one
+ * transaction per object. Used by the remote-apply batch paths (tabs/
+ * windows/groups, bookmarks), which otherwise paid one `resolveFields`
+ * transaction per downloaded operation — a 500-op page cost ~500 sequential
+ * transactions purely for LWW bookkeeping.
+ *
+ * Entries are resolved strictly in array order, so callers must pass them in
+ * wire order: a repeated (objectId, field) later in the array observes the
+ * earlier entry's write within the same transaction, exactly as if the two
+ * had been resolved by sequential `resolveFields` calls. Results are
+ * returned in the same order as `entries`. Only safe where no chrome.*
+ * mutation is needed between entries — callers resolve first, then apply
+ * the winners' browser mutations afterwards (each field's LWW result only
+ * depends on its own prior state, never on another field's or another
+ * object's).
+ */
+export async function resolveFieldsBatch(entries: BatchFieldResolution[]): Promise<ResolveResult[]> {
+  if (entries.length === 0) return [];
+  const db = await getDb();
+  const tx = db.transaction("field_state", "readwrite");
+  const results = await resolveEntriesInTx(tx, entries);
+  await tx.done;
+  return results;
+}
+
+/** Seed field provenance for an operation this device just originated. Our
+ * own writes participate in the same §8.1 arbitration domain as remote
+ * ones — without this, a remote operation with a lower ordering key could
+ * later be compared against nothing and incorrectly "win" against a
+ * pending local change that hasn't round-tripped through the server yet. */
+export async function recordLocalFieldState(
+  objectId: string,
+  field: string,
+  key: OrderingKey & { operationType: OperationType },
+  value: unknown,
+): Promise<void> {
+  await putFieldState({ objectId, field, ...key, value });
+}
+
+export interface LocalFieldStateEntry {
+  objectId: string;
+  field: string;
+  key: OrderingKey & { operationType: OperationType };
+  value: unknown;
+}
+
+/** Batch counterpart to `recordLocalFieldState` — one transaction for the
+ * whole array instead of one per (objectId, field) pair. Used by
+ * bookmarks/index.ts's backfill, which otherwise recorded 4 field_state
+ * rows (title/url/move/liveness) per node via 4 separate transactions. */
+export async function recordLocalFieldStatesBatch(entries: LocalFieldStateEntry[]): Promise<void> {
+  await putFieldStatesBatch(entries.map(({ objectId, field, key, value }) => ({ objectId, field, ...key, value })));
+}
+
+export function isLive(objectId: string): Promise<ResolveResult | undefined> {
+  return getFieldState(objectId, "liveness").then((s) =>
+    s ? { applied: true, value: s.value } : undefined,
+  );
+}

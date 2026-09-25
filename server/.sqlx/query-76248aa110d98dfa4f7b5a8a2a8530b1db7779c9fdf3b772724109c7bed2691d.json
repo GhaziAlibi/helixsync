@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tombstones SET created_at = now() - INTERVAL '31 days' WHERE user_id = $1 AND object_type = 'tab'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "76248aa110d98dfa4f7b5a8a2a8530b1db7779c9fdf3b772724109c7bed2691d"
+}

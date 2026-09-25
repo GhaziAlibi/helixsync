@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO sync_objects (user_id, object_type, object_id)\n                SELECT $1, 'historyVisit', u.object_id\n                FROM UNNEST($2::uuid[]) AS u(object_id)\n                ON CONFLICT DO NOTHING\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "414ece3df95b2ecc0b5500db70e1a2afff902744a2c0d8445169f4aa1e983ca0"
+}

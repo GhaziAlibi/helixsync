@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT cursor_value FROM sync_cursors WHERE user_id = (SELECT id FROM users WHERE email = 'finn@example.com') AND device_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cursor_value",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "496b7c7085b1a0d791d48b29fe7a1855c64a4f60f063ea8d70b30ddee59b7666"
+}

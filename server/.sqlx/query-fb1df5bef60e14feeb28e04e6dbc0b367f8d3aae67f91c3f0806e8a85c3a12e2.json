@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO sync_operations\n                (operation_id, user_id, device_id, device_sequence, lamport_timestamp,\n                 server_cursor, object_type, object_id, operation_type, encryption_version, payload, visit_count)\n            SELECT u.operation_id, $1, $2, u.device_sequence, u.lamport_timestamp,\n                   u.server_cursor, u.object_type, u.object_id, u.operation_type,\n                   u.encryption_version, u.payload, u.visit_count\n            FROM UNNEST(\n                $3::uuid[], $4::bigint[], $5::bigint[], $6::bigint[],\n                $7::text[], $8::uuid[], $9::text[], $10::int[], $11::jsonb[], $12::int[]\n            ) AS u(operation_id, device_sequence, lamport_timestamp, server_cursor,\n                   object_type, object_id, operation_type, encryption_version, payload, visit_count)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "UuidArray",
+        "Int8Array",
+        "Int8Array",
+        "Int8Array",
+        "TextArray",
+        "UuidArray",
+        "TextArray",
+        "Int4Array",
+        "JsonbArray",
+        "Int4Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fb1df5bef60e14feeb28e04e6dbc0b367f8d3aae67f91c3f0806e8a85c3a12e2"
+}

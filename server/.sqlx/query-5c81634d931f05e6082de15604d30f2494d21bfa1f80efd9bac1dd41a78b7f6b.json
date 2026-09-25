@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO sync_objects (user_id, object_type, object_id) VALUES ($1, 'bookmark', $2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5c81634d931f05e6082de15604d30f2494d21bfa1f80efd9bac1dd41a78b7f6b"
+}

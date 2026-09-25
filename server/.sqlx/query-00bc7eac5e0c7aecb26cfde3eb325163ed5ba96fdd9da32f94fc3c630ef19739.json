@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO history_visit_hours (user_id, hour, visits) VALUES ($1, $2, $3)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "00bc7eac5e0c7aecb26cfde3eb325163ed5ba96fdd9da32f94fc3c630ef19739"
+}

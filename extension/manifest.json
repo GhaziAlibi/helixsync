@@ -1,0 +1,44 @@
+{
+  "manifest_version": 3,
+  "name": "HelixSync",
+  "version": "0.2.7",
+  "description": "Self-hosted, privacy-first browser synchronization for Helium and other Chromium browsers.",
+  "minimum_chrome_version": "116",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "HelixSync",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "bookmarks",
+    "history",
+    "tabs",
+    "alarms"
+  ],
+  "optional_permissions": [
+    "tabGroups"
+  ],
+  "optional_host_permissions": [
+    "*://*/*",
+    "ws://*/*",
+    "wss://*/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}

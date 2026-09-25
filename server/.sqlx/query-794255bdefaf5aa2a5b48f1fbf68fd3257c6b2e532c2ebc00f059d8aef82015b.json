@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    INSERT INTO sync_objects (user_id, object_type, object_id)\n                    SELECT $1, u.object_type, u.object_id\n                    FROM UNNEST($2::text[], $3::uuid[]) AS u(object_type, object_id)\n                    ON CONFLICT DO NOTHING\n                    RETURNING object_type, object_id\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "object_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "794255bdefaf5aa2a5b48f1fbf68fd3257c6b2e532c2ebc00f059d8aef82015b"
+}

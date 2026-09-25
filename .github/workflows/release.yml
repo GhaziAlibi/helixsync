@@ -1,0 +1,236 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # Computes the release version for this run. On a push to main:
+  #   - if VERSION was changed by this push (i.e. bumped by hand), that
+  #     value is used as-is and tagged.
+  #   - otherwise the patch component is bumped automatically, committed
+  #     back to main, and tagged.
+  # On pull requests, nothing is committed/tagged — VERSION is only read,
+  # for build-only validation.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.final.outputs.version }}
+      owner: ${{ steps.owner.outputs.lc }}
+      extension_changed: ${{ steps.changes.outputs.extension }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: owner
+        run: echo "lc=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Detect extension changes
+        id: changes
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            extension:
+              - 'extension/**'
+
+      - name: Check whether VERSION was manually bumped in this push
+        id: diff
+        if: github.event_name == 'push'
+        run: |
+          before="${{ github.event.before }}"
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$before" "${{ github.sha }}" | grep -qx 'VERSION'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Auto-bump patch version
+        if: github.event_name == 'push' && steps.diff.outputs.changed == 'false'
+        run: |
+          current=$(tr -d '[:space:]' < VERSION)
+          IFS='.' read -r major minor patch <<< "$current"
+          new_version="$major.$minor.$((patch + 1))"
+          echo "$new_version" > VERSION
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "chore: bump version to $new_version"
+          git push origin HEAD:main
+
+      - name: Sync manifest version with VERSION
+        if: github.event_name == 'push'
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          current=$(jq -r '.version' extension/manifest.json)
+          if [ "$current" != "$version" ]; then
+            jq --arg v "$version" '.version = $v' extension/manifest.json > extension/manifest.json.tmp
+            mv extension/manifest.json.tmp extension/manifest.json
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add extension/manifest.json
+            git commit -m "chore: sync manifest version to $version"
+            git push origin HEAD:main
+          fi
+
+      - name: Tag release
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          version=$(tr -d '[:space:]' < VERSION)
+          tag="v$version"
+          if git rev-parse "$tag" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists, skipping"
+          else
+            git tag "$tag"
+            git push origin "$tag"
+          fi
+
+      - name: Set output version
+        id: final
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+  server:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push server image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ needs.version.outputs.owner }}/helixsync-server:latest
+            ${{ env.REGISTRY }}/${{ needs.version.outputs.owner }}/helixsync-server:${{ needs.version.outputs.version }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
+
+  web:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push web image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./web
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ needs.version.outputs.owner }}/helixsync-web:latest
+            ${{ env.REGISTRY }}/${{ needs.version.outputs.owner }}/helixsync-web:${{ needs.version.outputs.version }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  extension:
+    needs: version
+    if: needs.version.outputs.extension_changed == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    env:
+      CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
+      CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
+      CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
+      CHROME_PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
+      CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Stamp manifest version
+        run: |
+          jq --arg v "${{ needs.version.outputs.version }}" '.version = $v' manifest.json > manifest.json.tmp
+          mv manifest.json.tmp manifest.json
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+      - name: Package extension
+        run: |
+          cd dist
+          zip -r ../helixsync-extension-${{ needs.version.outputs.version }}.zip .
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helixsync-extension
+          path: extension/helixsync-extension-${{ needs.version.outputs.version }}.zip
+          retention-days: 30
+
+      - name: Attach to GitHub Release
+        if: github.event_name != 'pull_request'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.version.outputs.version }}
+          files: extension/helixsync-extension-${{ needs.version.outputs.version }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushes this version to the Chrome Web Store. Only runs once the
+      # required secrets exist (CHROME_EXTENSION_ID etc.) — a no-op
+      # otherwise, so this step is safe to ship before that one-time OAuth
+      # setup (see PRIVACY.md / docs) is done. The item must already exist
+      # in the Web Store dashboard from a prior manual submission; this API
+      # can only publish updates to it, not create it the first time.
+      - name: Publish to Chrome Web Store
+        if: github.event_name != 'pull_request' && env.CHROME_EXTENSION_ID != ''
+        run: |
+          access_token=$(curl -sf "https://oauth2.googleapis.com/token" \
+            -d "client_id=$CHROME_CLIENT_ID" \
+            -d "client_secret=$CHROME_CLIENT_SECRET" \
+            -d "refresh_token=$CHROME_REFRESH_TOKEN" \
+            -d "grant_type=refresh_token" | jq -r '.access_token')
+
+          curl -sf -H "Authorization: Bearer $access_token" -X POST \
+            -T "helixsync-extension-${{ needs.version.outputs.version }}.zip" \
+            "https://chromewebstore.googleapis.com/upload/v2/publishers/$CHROME_PUBLISHER_ID/items/$CHROME_EXTENSION_ID:upload"
+
+          curl -sf -H "Authorization: Bearer $access_token" -X POST \
+            "https://chromewebstore.googleapis.com/v2/publishers/$CHROME_PUBLISHER_ID/items/$CHROME_EXTENSION_ID:publish"

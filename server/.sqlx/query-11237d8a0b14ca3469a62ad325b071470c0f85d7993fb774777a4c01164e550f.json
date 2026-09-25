@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT object_type FROM sync_objects WHERE user_id = $1 ORDER BY object_type",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_type",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "11237d8a0b14ca3469a62ad325b071470c0f85d7993fb774777a4c01164e550f"
+}

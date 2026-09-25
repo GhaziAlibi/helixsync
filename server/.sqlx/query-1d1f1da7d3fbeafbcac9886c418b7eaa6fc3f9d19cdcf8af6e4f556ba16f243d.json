@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE sync_stats SET history_hours_seed_before = now() WHERE user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1d1f1da7d3fbeafbcac9886c418b7eaa6fc3f9d19cdcf8af6e4f556ba16f243d"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM sync_objects so USING UNNEST($1::uuid[], $2::text[], $3::uuid[]) AS u(user_id, object_type, object_id) WHERE so.user_id = u.user_id AND so.object_type = u.object_type AND so.object_id = u.object_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "TextArray",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "deda03b0e51e3e371f5282cc4488b88e24f18a2aa04b0348bc59c4302d4833bc"
+}

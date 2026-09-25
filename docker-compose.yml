@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-helixsync}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-helixsync}
+    volumes:
+      - helixsync_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-helixsync} -d ${POSTGRES_DB:-helixsync}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - helixsync
+
+  server:
+    build: ./server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-helixsync}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-helixsync}
+      BIND_ADDR: 0.0.0.0:8080
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY}
+      REQUIRE_ENCRYPTION: ${REQUIRE_ENCRYPTION:-true}
+      # Always true here: per the comment below, `server` has no published
+      # port and is only ever reached through `web`'s nginx, which sets
+      # X-Real-IP/X-Forwarded-For (web/nginx.conf). This tells the rate
+      # limiter (server/src/middleware/client_ip.rs) to trust those headers
+      # for the real client IP instead of the raw connection address, which
+      # in this topology is always nginx's own container IP.
+      BEHIND_PROXY: "true"
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      ACCESS_TOKEN_TTL_SECS: ${ACCESS_TOKEN_TTL_SECS:-900}
+      REFRESH_TOKEN_TTL_SECS: ${REFRESH_TOKEN_TTL_SECS:-2592000}
+      WEB_SESSION_TTL_SECS: ${WEB_SESSION_TTL_SECS:-1209600}
+      COMPACTION_INTERVAL_SECS: ${COMPACTION_INTERVAL_SECS:-3600}
+      TOMBSTONE_RETENTION_SECS: ${TOMBSTONE_RETENTION_SECS:-2592000}
+      RUST_LOG: ${RUST_LOG:-info}
+    # No `ports:` mapping — the backend is never reachable from outside the
+    # docker network. `web`'s nginx (web/nginx.conf) proxies /api/* to it
+    # over the internal `helixsync` network instead.
+    networks:
+      - helixsync
+
+  web:
+    build:
+      context: ./web
+      # VITE_API_BASE_URL is compiled into the static JS bundle by Vite at
+      # build time, not read at container runtime — it must be a build arg,
+      # not an `environment:` entry (docker compose does not evaluate
+      # `environment:` until the container starts, by which point the
+      # bundle is already frozen). Left empty by default so the bundle
+      # calls same-origin relative paths (e.g. `/api/v1/...`), which
+      # nginx then proxies to `server` — set it only if the API is ever
+      # served from a genuinely different origin than the web dashboard.
+      args:
+        VITE_API_BASE_URL: ${WEB_API_BASE_URL:-}
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "${WEB_PORT:-5173}:80"
+    networks:
+      - helixsync
+
+volumes:
+  helixsync_postgres_data:
+
+networks:
+  helixsync:

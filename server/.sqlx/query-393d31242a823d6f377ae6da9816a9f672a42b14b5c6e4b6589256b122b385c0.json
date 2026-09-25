@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO user_settings (user_id, history_retention) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET history_retention = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "393d31242a823d6f377ae6da9816a9f672a42b14b5c6e4b6589256b122b385c0"
+}

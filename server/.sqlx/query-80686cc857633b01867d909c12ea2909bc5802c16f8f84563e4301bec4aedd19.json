@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT object_type, object_id FROM tombstones\n                WHERE user_id = $1 AND active = true\n                AND (object_type, object_id) IN (SELECT * FROM UNNEST($2::text[], $3::uuid[]))\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "object_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "80686cc857633b01867d909c12ea2909bc5802c16f8f84563e4301bec4aedd19"
+}

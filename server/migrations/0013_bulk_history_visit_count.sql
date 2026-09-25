@@ -1,0 +1,11 @@
+-- Versioned migration: 0013_bulk_history_visit_count
+--
+-- Single-operation history import (historyVisit / bulkImport): one op carries
+-- N visits, so per-op counting (one row == one visit) no longer holds.
+-- `visit_count` records how many plaintext visits a `sync_operations` row
+-- represents: set for `historyVisit`/`bulkImport` rows, NULL otherwise.
+--
+-- Nullable (not defaulted): NULL unambiguously means "legacy single-visit
+-- row" — every pre-feature row is exactly one visit, so readers use
+-- `COALESCE(visit_count, 1)` / `unwrap_or(1)` and need no backfill.
+ALTER TABLE sync_operations ADD COLUMN visit_count INTEGER NULL;

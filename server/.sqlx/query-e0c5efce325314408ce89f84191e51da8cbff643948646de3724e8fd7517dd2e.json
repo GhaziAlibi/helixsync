@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT bookmark_count, history_visit_count, tab_count FROM sync_stats WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bookmark_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "history_visit_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "tab_count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "e0c5efce325314408ce89f84191e51da8cbff643948646de3724e8fd7517dd2e"
+}

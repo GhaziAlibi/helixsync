@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM sync_objects WHERE user_id = $1 AND object_type = 'historyVisit' AND object_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1db7176c89863e599b00ec4cf8c463d672c6fac414d7660e7477ccbd12f4c055"
+}

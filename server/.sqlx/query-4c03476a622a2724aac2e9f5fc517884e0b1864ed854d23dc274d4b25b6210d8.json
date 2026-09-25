@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) FROM web_sessions WHERE user_id = $1 AND expires_at < now() - INTERVAL '5 days'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4c03476a622a2724aac2e9f5fc517884e0b1864ed854d23dc274d4b25b6210d8"
+}
