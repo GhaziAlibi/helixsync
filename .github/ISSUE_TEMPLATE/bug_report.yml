@@ -1,0 +1,64 @@
+name: Bug report
+description: Something doesn't work the way the documentation says it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. **Security problems do not belong here**: report them privately through
+        [the security advisory form](https://github.com/GhaziAlibi/helixsync/security/advisories/new).
+
+        Please do not paste passwords, tokens, your `.env`, or synced browsing data. Redact server URLs if you prefer.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Browser extension
+        - Web dashboard
+        - Server (API / sync)
+        - Docker / deployment
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: HelixSync version
+      description: The extension version (from the popup or the extensions page) and the server image tag or commit.
+      placeholder: "extension 0.3.0, server ghcr.io/ghazialibi/helixsync-server:0.3.0"
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser and OS
+      description: Browser and version, and operating system. Relevant for extension and dashboard problems.
+      placeholder: "Helium 0.4 / Chromium 130, Ubuntu 24.04"
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and errors
+      description: Server logs, the browser console of the extension's service worker, or the popup's error text. Remove secrets first.
+      render: text
+  - type: textarea
+    id: setup
+    attributes:
+      label: Deployment details
+      description: How the server is deployed (Compose from source, prebuilt images, behind which reverse proxy), and whether `REQUIRE_ENCRYPTION` or `ALLOW_REGISTRATION` were changed.

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT SUM(visits)::bigint FROM history_visit_hours\n        WHERE user_id = $1 AND ($2::timestamptz IS NULL OR hour >= date_trunc('hour', $2::timestamptz))\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sum",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "093fcc66bc8dd0379012df23e583c0e425201059311a32b8f2ff3532ca495b97"
+}

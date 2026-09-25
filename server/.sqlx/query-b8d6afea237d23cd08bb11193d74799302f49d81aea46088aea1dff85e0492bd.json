@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO history_visit_hours (user_id, hour, visits)\n                SELECT $1, u.hour, u.visits\n                FROM UNNEST($2::timestamptz[], $3::bigint[]) AS u(hour, visits)\n                ON CONFLICT (user_id, hour) DO UPDATE SET visits = history_visit_hours.visits + EXCLUDED.visits\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TimestamptzArray",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b8d6afea237d23cd08bb11193d74799302f49d81aea46088aea1dff85e0492bd"
+}

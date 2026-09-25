@@ -1,0 +1,11 @@
+[advisories]
+ignore = [
+    # `rsa` (Marvin timing side channel) is compiled in as a dependency of
+    # `jsonwebtoken`'s `rust_crypto` backend, which jsonwebtoken 11 needs in
+    # order to sign and verify anything. The server only issues and verifies
+    # HS256 (HMAC) tokens (src/auth/tokens.rs) and never loads an RSA key, so
+    # the vulnerable code is not reachable. It is also in Cargo.lock through
+    # the optional `sqlx-mysql` driver, which is not enabled. No fixed `rsa`
+    # release exists. Re-check this if RSA keys are ever used.
+    "RUSTSEC-2023-0071",
+]

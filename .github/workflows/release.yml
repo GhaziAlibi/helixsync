@@ -1,0 +1,390 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions: {}
+
+# Serialisation is per job (see each job's `concurrency`), not per workflow
+# run: the `publish-chrome-web-store` job waits for a human approval, and a
+# workflow-level group would keep the whole run — and everything queued behind
+# it — occupied for as long as that approval is pending.
+
+env:
+  REGISTRY: ghcr.io
+
+# Every third-party action is pinned to a full commit SHA (the trailing
+# comment names the release it is), and none runs in a job that can write to
+# the repository or holds publishing secrets. `${{ }}` expressions never go
+# into a `run:` script; they are passed through `env:` and read as "$VAR".
+jobs:
+  # Nothing below that tags, pushes an image or publishes an extension runs
+  # until this passes. Pull requests skip it: ci.yml already runs for them, and
+  # a PR build pushes and publishes nothing.
+  ci:
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  # Computes the release version for this run. On a push to main:
+  #   - if VERSION was changed by this push (i.e. bumped by hand), that
+  #     value is used as-is and tagged.
+  #   - otherwise the patch component is bumped automatically, committed
+  #     back to main, and tagged.
+  # On pull requests, nothing is committed/tagged — VERSION is only read,
+  # for build-only validation. On pushes this runs after `ci`, so a tag and
+  # a bump commit only ever follow a green build.
+  version:
+    needs: ci
+    if: ${{ !cancelled() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-version
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.final.outputs.version }}
+      owner: ${{ steps.owner.outputs.lc }}
+      extension_changed: ${{ steps.changes.outputs.extension }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - id: owner
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: echo "lc=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      # Plain git instead of a path-filter action: this job can write to the
+      # repository, so it runs no third-party code.
+      - name: Detect extension changes
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          extension_changed() {
+            git diff --name-only "$1" HEAD | grep -q '^extension/'
+          }
+          case "$EVENT_NAME" in
+            push)
+              # A new branch or a force push leaves no usable "before"; build.
+              if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+                || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+                changed=true
+              elif extension_changed "$BEFORE"; then
+                changed=true
+              else
+                changed=false
+              fi
+              ;;
+            pull_request)
+              if extension_changed "$BASE_SHA"; then changed=true; else changed=false; fi
+              ;;
+            *)
+              # A manual run is a deliberate request to build everything.
+              changed=true
+              ;;
+          esac
+          echo "extension=$changed" >> "$GITHUB_OUTPUT"
+
+      - name: Check whether VERSION was manually bumped in this push
+        id: diff
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          elif git diff --name-only "$BEFORE" "$AFTER" | grep -qx 'VERSION'; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Auto-bump patch version
+        if: github.event_name == 'push' && steps.diff.outputs.changed == 'false'
+        run: |
+          current=$(tr -d '[:space:]' < VERSION)
+          IFS='.' read -r major minor patch <<< "$current"
+          new_version="$major.$minor.$((patch + 1))"
+          echo "$new_version" > VERSION
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add VERSION
+          git commit -m "chore: bump version to $new_version"
+          git push origin HEAD:main
+
+      - name: Sync manifest version with VERSION
+        if: github.event_name == 'push'
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          current=$(jq -r '.version' extension/manifest.json)
+          if [ "$current" != "$version" ]; then
+            jq --arg v "$version" '.version = $v' extension/manifest.json > extension/manifest.json.tmp
+            mv extension/manifest.json.tmp extension/manifest.json
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add extension/manifest.json
+            git commit -m "chore: sync manifest version to $version"
+            git push origin HEAD:main
+          fi
+
+      - name: Tag release
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          version=$(tr -d '[:space:]' < VERSION)
+          tag="v$version"
+          if git rev-parse "$tag" >/dev/null 2>&1 || git ls-remote --exit-code --tags origin "$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists, skipping"
+          else
+            git tag "$tag"
+            git push origin "$tag"
+          fi
+
+      - name: Set output version
+        id: final
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
+
+  server:
+    needs: [ci, version]
+    # Pushed images require a green `ci`; a PR build pushes nothing.
+    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.ci.result == 'success' || github.event_name == 'pull_request') }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-server
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push server image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: ./server
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ needs.version.outputs.owner }}/helixsync-server:latest
+            ${{ env.REGISTRY }}/${{ needs.version.outputs.owner }}/helixsync-server:${{ needs.version.outputs.version }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,mode=max,scope=server
+
+  web:
+    needs: [ci, version]
+    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.ci.result == 'success' || github.event_name == 'pull_request') }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-web
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push web image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: ./web
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ needs.version.outputs.owner }}/helixsync-web:latest
+            ${{ env.REGISTRY }}/${{ needs.version.outputs.owner }}/helixsync-web:${{ needs.version.outputs.version }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  # Builds the extension zip. Read-only and holds no secrets: it runs
+  # `npm ci` (and so install scripts), which is why releasing and publishing
+  # are separate jobs that never install or build anything.
+  extension:
+    needs: [ci, version]
+    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.ci.result == 'success' || github.event_name == 'pull_request') && needs.version.outputs.extension_changed == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Stamp manifest version
+        run: |
+          jq --arg v "$VERSION" '.version = $v' manifest.json > manifest.json.tmp
+          mv manifest.json.tmp manifest.json
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+      - name: Package extension
+        run: |
+          cd dist
+          zip -r "../helixsync-extension-${VERSION}.zip" .
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: helixsync-extension
+          path: extension/helixsync-extension-${{ needs.version.outputs.version }}.zip
+          retention-days: 30
+
+  # Attaches the built zip to the GitHub release. Can write to the repository,
+  # so it only downloads the artifact and calls the preinstalled `gh`: no
+  # install step, no third-party action.
+  release-extension:
+    needs: [ci, version, extension]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-extension
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+      TARGET_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: helixsync-extension
+
+      - name: Attach to GitHub Release
+        run: |
+          tag="v${VERSION}"
+          zip="helixsync-extension-${VERSION}.zip"
+          # The release normally exists already (the version job pushed the
+          # tag); create it if not, and replace the asset on a re-run.
+          gh release create "$tag" "$zip" --target "$TARGET_SHA" --title "$tag" --generate-notes \
+            || gh release upload "$tag" "$zip" --clobber
+
+  # Pushes this version to the Chrome Web Store. Holds the CHROME_* secrets, so
+  # it is deliberately tiny: read-only token, a protected `chrome-web-store`
+  # environment (put the secrets there and require a reviewer, see
+  # docs/releasing.md), and it only downloads the already-built zip. It
+  # installs and builds nothing, so no package install script ever runs next
+  # to these secrets.
+  #
+  # The environment should also restrict deployment branches to `main`
+  # (repo Settings -> Environments). Repo-level secrets of the same names are
+  # still readable from here, so the job works before that is set up.
+  #
+  # Skips itself while CHROME_EXTENSION_ID is unset, so this is safe to ship
+  # before the one-time OAuth setup. The item must already exist in the Web
+  # Store dashboard from a prior manual submission; this API can only publish
+  # updates to it, not create it the first time.
+  publish-chrome-web-store:
+    needs: [ci, version, extension]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' }}
+    runs-on: ubuntu-latest
+    environment: chrome-web-store
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: helixsync-extension
+
+      - name: Publish to Chrome Web Store
+        env:
+          CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
+          CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
+          CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
+          CHROME_PUBLISHER_ID: ${{ secrets.CHROME_PUBLISHER_ID }}
+          CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+        run: |
+          if [ -z "$CHROME_EXTENSION_ID" ]; then
+            echo "CHROME_EXTENSION_ID not set, skipping Web Store publish"
+            exit 0
+          fi
+
+          # Prints the response body on failure (still fails the step via
+          # `exit 1`, since -f alone would swallow it silently) so a
+          # rejected upload/publish is diagnosable from the CI log.
+          call() {
+            local method="$1" url="$2"
+            shift 2
+            local status
+            status=$(curl -s -o /tmp/cws_response.json -w '%{http_code}' -X "$method" "$@" "$url")
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+              # Diagnostics go to stderr: callers either capture this
+              # function's stdout into a variable or redirect it to
+              # /dev/null, either of which would otherwise swallow the
+              # error silently.
+              echo "Chrome Web Store API call failed: $method $url (HTTP $status)" >&2
+              cat /tmp/cws_response.json >&2
+              exit 1
+            fi
+            cat /tmp/cws_response.json
+          }
+
+          token_response=$(call POST "https://oauth2.googleapis.com/token" \
+            -d "client_id=$CHROME_CLIENT_ID" \
+            -d "client_secret=$CHROME_CLIENT_SECRET" \
+            -d "refresh_token=$CHROME_REFRESH_TOKEN" \
+            -d "grant_type=refresh_token")
+          access_token=$(echo "$token_response" | jq -r '.access_token')
+          if [ -z "$access_token" ] || [ "$access_token" = "null" ]; then
+            echo "Failed to obtain an access token"
+            exit 1
+          fi
+
+          call POST "https://chromewebstore.googleapis.com/upload/v2/publishers/$CHROME_PUBLISHER_ID/items/$CHROME_EXTENSION_ID:upload" \
+            -H "Authorization: Bearer $access_token" \
+            -T "helixsync-extension-${VERSION}.zip" > /dev/null
+
+          # STAGED_PUBLISH: once the store approves the upload it is staged,
+          # not released. Publishing it is a manual click in the Web Store
+          # dashboard, so a pipeline compromise cannot ship to users alone.
+          call POST "https://chromewebstore.googleapis.com/v2/publishers/$CHROME_PUBLISHER_ID/items/$CHROME_EXTENSION_ID:publish" \
+            -H "Authorization: Bearer $access_token" \
+            -H "Content-Type: application/json" \
+            -d '{"publishType":"STAGED_PUBLISH"}' > /dev/null

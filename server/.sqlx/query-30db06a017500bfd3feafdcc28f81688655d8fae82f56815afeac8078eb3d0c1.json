@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT bookmark_count, tab_count, storage_bytes, history_hours_seed_before FROM sync_stats WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bookmark_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "tab_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "storage_bytes",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "history_hours_seed_before",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "30db06a017500bfd3feafdcc28f81688655d8fae82f56815afeac8078eb3d0c1"
+}

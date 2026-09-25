@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/GhaziAlibi/helixsync/security/advisories/new
+    about: Please report vulnerabilities privately here. Do not open a public issue for them.
+  - name: Read the documentation
+    url: https://github.com/GhaziAlibi/helixsync/tree/main/docs
+    about: Deployment, protocol, encryption and security docs. Many setup questions are answered there.

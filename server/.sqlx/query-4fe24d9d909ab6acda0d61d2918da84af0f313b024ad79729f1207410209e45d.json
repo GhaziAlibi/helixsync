@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT so.object_type, so.object_id\n            FROM sync_objects so\n            JOIN UNNEST($1::text[], $2::uuid[]) AS lookup(object_type, object_id)\n              ON so.object_type = lookup.object_type AND so.object_id = lookup.object_id\n            WHERE so.user_id = $3\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "object_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "UuidArray",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "4fe24d9d909ab6acda0d61d2918da84af0f313b024ad79729f1207410209e45d"
+}
