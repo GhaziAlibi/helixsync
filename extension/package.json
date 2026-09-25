@@ -1,0 +1,24 @@
+{
+  "name": "helixsync-extension",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite build --watch",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "idb": "^8.0.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.3.0",
+    "fake-indexeddb": "^6.2.5",
+    "typescript": "^5.6.3",
+    "vite": "^6.4.3",
+    "vitest": "^5.0.2"
+  }
+}

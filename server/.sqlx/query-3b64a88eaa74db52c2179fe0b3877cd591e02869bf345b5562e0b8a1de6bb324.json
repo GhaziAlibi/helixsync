@@ -1,0 +1,56 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO users (email, password_hash, kdf_salt, kdf_params, wrapped_account_key)\n        VALUES ($1, $2, $3, $4, $5)\n        RETURNING id, email, kdf_salt, kdf_params, wrapped_account_key, account_key_version\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "kdf_salt",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "kdf_params",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "wrapped_account_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "account_key_version",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Jsonb",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "3b64a88eaa74db52c2179fe0b3877cd591e02869bf345b5562e0b8a1de6bb324"
+}

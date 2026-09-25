@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT sync_bookmarks, sync_history, sync_tabs, sync_tab_groups, sync_extensions,\n               tab_restore_policy, history_retention, require_encryption,\n               extension_storage_allowlist, extension_storage_denylist\n        FROM user_settings WHERE user_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sync_bookmarks",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "sync_history",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 2,
+        "name": "sync_tabs",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 3,
+        "name": "sync_tab_groups",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "sync_extensions",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "tab_restore_policy",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "history_retention",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "require_encryption",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "extension_storage_allowlist",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 9,
+        "name": "extension_storage_denylist",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c3e801f1dac324340a743463c6ac2d56dec3a0c00f9815c5f452f1b8afe3dc0d"
+}

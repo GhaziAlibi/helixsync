@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM history_visit_hours\n            WHERE (user_id, hour) IN (\n                SELECT hvh.user_id, hvh.hour\n                FROM history_visit_hours hvh\n                JOIN user_settings us ON us.user_id = hvh.user_id\n                WHERE us.history_retention IN ('7d', '30d', '90d', '1y')\n                  AND hvh.hour < now() - (\n                      CASE us.history_retention\n                          WHEN '7d' THEN INTERVAL '7 days'\n                          WHEN '30d' THEN INTERVAL '30 days'\n                          WHEN '90d' THEN INTERVAL '90 days'\n                          WHEN '1y' THEN INTERVAL '365 days'\n                      END + INTERVAL '1 day'\n                  )\n                ORDER BY hvh.hour ASC\n                LIMIT $1\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "be6b2bff17815f2c5dd596321323db787a2392ec91859ecb6392459f22339505"
+}
