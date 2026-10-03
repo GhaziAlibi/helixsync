@@ -1360,18 +1360,27 @@ async fn upload_semaphore_acquire_timeout_rejects_busy_request(pool: PgPool) {
 /// fires first.
 #[sqlx::test(migrations = "./migrations")]
 async fn route_level_timeout_cuts_off_a_slow_request(pool: PgPool) {
-    let config = Config {
-        // Much longer than the route timeout.
-        upload_semaphore_acquire_timeout_secs: 60,
-        request_timeout_secs: 1,
-        ..test_config()
-    };
-    let state = state_for_config(pool, config);
-    let server = server_for_state(state.clone());
+    let state = state_for_config(pool, test_config());
 
-    register_and_login(&server, "slow@example.com").await;
-    let (device_id, access_token) = register_device(&server, "slow@example.com", "Laptop").await;
+    // Registering runs Argon2, which is slow in an unoptimized test build and
+    // can exceed a 1s route timeout. Set up through an app with the normal
+    // timeout, then send only the upload through the 1s one. Both share every
+    // field of `state` except `config`.
+    let setup_server = server_for_state(state.clone());
+    register_and_login(&setup_server, "slow@example.com").await;
+    let (device_id, access_token) =
+        register_device(&setup_server, "slow@example.com", "Laptop").await;
     let device_uuid: Uuid = device_id.parse().unwrap();
+
+    let server = server_for_state(AppState {
+        config: Arc::new(Config {
+            // Much longer than the route timeout.
+            upload_semaphore_acquire_timeout_secs: 60,
+            request_timeout_secs: 1,
+            ..test_config()
+        }),
+        ..state.clone()
+    });
 
     let held_semaphore = Arc::new(tokio::sync::Semaphore::new(1));
     let _held_permit = held_semaphore.clone().try_acquire_owned().unwrap();
