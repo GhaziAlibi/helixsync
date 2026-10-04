@@ -300,10 +300,12 @@ If E2E encryption (`docs/encryption.md`) is enabled, `sync_operations.payload`
 and `sync_snapshots.data` contain only opaque encrypted blobs — the database
 backup alone is sufficient for disaster recovery of the encrypted data. The
 backup holds each account's key only in wrapped form, encrypted under a key
-derived from the account password, which the server never sees. A restored
-database is therefore only readable by someone who knows the password: if a
-user loses it, their data is unrecoverable by design (docs/encryption.md §5) —
-this is not a backup gap, it's the point of E2E encryption. Keep database
+derived from the account password, and in a second copy under a key derived
+from the user's recovery code; the server never sees either. A restored
+database is therefore only readable by someone who knows the password or the
+recovery code: if a user loses both, their data is unrecoverable by design
+(docs/encryption.md §9) — this is not a backup gap, it's the point of E2E
+encryption. Keep database
 backups as private as the database itself, since they also hold the account
 metadata (emails, device names) in the clear.
 
@@ -385,3 +387,23 @@ user's already-signed-in browser and connected extensions keep working until
 those expire. Audit-log rows for the account stay, with the account columns
 nulled. Deleting by hand skips the `account_deleted` audit event the API
 writes.
+
+## Deleting an account for a user who lost their password
+
+A user who forgot their password resets it themselves with their recovery
+code (**Forgot your password?** on the sign-in page). If they lost the code
+too, their data on the server can't be decrypted by anyone, and the account
+blocks their email from registering again. Delete it from the server host:
+
+```bash
+docker compose exec server /app/helixsync-server delete-account user@example.com
+```
+
+(Option E: run `helixsync-server delete-account user@example.com` with the
+server's environment.) The command asks you to type `delete`, removes the
+account and everything under it exactly like the dashboard's account
+deletion, and records `account_deleted_by_operator` in the audit log. The
+server sends no email, so make sure the request really comes from the
+account's owner first. The account's sessions and devices stop working within
+30 seconds. The user can then register again; their browsers upload their
+bookmarks and history again when reconnected.

@@ -12,11 +12,13 @@ import {
   fetchTabRestorePolicy,
   invalidatePolicyMemory,
   invalidateSettingsMemory,
+  listAuthRequests,
   type UserSettingsDto,
 } from "../api/client";
 import {
   disconnect as disconnectWebSocket,
   ensureConnected as ensureWebSocketConnected,
+  onAuthRequest,
   onChangesAvailable,
 } from "../api/websocket";
 import {
@@ -91,6 +93,14 @@ onChangesAvailable(() => {
   void updateBadge().catch((e) => console.error("HelixSync: WebSocket-triggered badge update failed", e));
 });
 
+// A login-with-device request was created or answered: recount right away,
+// since a request expires in 15 minutes.
+onAuthRequest(() => {
+  void refreshPendingAuthRequests()
+    .then((changed) => (changed ? updateBadge(true) : undefined))
+    .catch((e) => console.error("HelixSync: sign-in request badge update failed", e));
+});
+
 // Recounting walks every live remote tab and this runs on every tick and
 // push, so a fresh count is reused for one alarm interval. Must stay >= the
 // alarm interval or every tick recounts.
@@ -98,19 +108,51 @@ let lastBadgeAt = 0;
 let lastBadgeText = "";
 const BADGE_THROTTLE_MS = SYNC_INTERVAL_MINUTES * 60_000;
 
+// Sign-in requests waiting for this account's approval (docs/protocol.md
+// §7.4), as of the last check. The popup lists and answers them.
+let pendingAuthRequestCount = 0;
+const AUTH_REQUEST_BADGE = "!";
+
 export function resetBadgeStateForTesting(): void {
   lastBadgeAt = 0;
   lastBadgeText = "";
+  pendingAuthRequestCount = 0;
 }
 
-/** Shows the number of not-yet-restored remote tabs under the "ask" policy,
- * and clears the badge otherwise. Best-effort: failures keep the previous
- * badge. */
+/** Re-checks the account's waiting sign-in requests. Runs on the WebSocket
+ * hint and on every periodic sync, since a hint can be missed. Returns
+ * whether the count changed. */
+async function refreshPendingAuthRequests(): Promise<boolean> {
+  if (!(await getDevice())) return false;
+  let count: number;
+  try {
+    count = (await listAuthRequests()).length;
+  } catch (e) {
+    console.warn("HelixSync: could not check for sign-in requests", e);
+    return false;
+  }
+  const changed = count !== pendingAuthRequestCount;
+  pendingAuthRequestCount = count;
+  return changed;
+}
+
+/** Shows "!" while a sign-in request waits for approval; otherwise the
+ * number of not-yet-restored remote tabs under the "ask" policy, and clears
+ * the badge otherwise. Best-effort: failures keep the previous badge. */
 export async function updateBadge(force = false): Promise<void> {
   try {
     // Throttled before any IPC.
     const now = Date.now();
     if (!force && now - lastBadgeAt < BADGE_THROTTLE_MS) {
+      return;
+    }
+    // A waiting sign-in request outranks the tab count: it expires soon.
+    if (pendingAuthRequestCount > 0) {
+      lastBadgeAt = now;
+      if (lastBadgeText !== AUTH_REQUEST_BADGE || force) {
+        lastBadgeText = AUTH_REQUEST_BADGE;
+        await chrome.action.setBadgeText({ text: AUTH_REQUEST_BADGE });
+      }
       return;
     }
     const tabRestorePolicy = await fetchTabRestorePolicy();
@@ -277,7 +319,7 @@ async function runPeriodicSync(): Promise<void> {
   void ensureWebSocketConnected();
   try {
     await runSyncCycle();
-    await updateBadge();
+    await updateBadge(await refreshPendingAuthRequests());
     await runMaintenanceIfDue().catch((e) =>
       console.error("HelixSync: storage maintenance failed", e),
     );

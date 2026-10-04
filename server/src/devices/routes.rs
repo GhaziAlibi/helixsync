@@ -35,12 +35,20 @@ pub fn router() -> Router<AppState> {
         // Static segments win over `/:id/...` in the router, so "self" is
         // never parsed as a device id.
         .route("/self/revoke", post(revoke_self))
+        .route(
+            "/auth-requests",
+            get(crate::auth::requests::list_auth_requests),
+        )
+        .route(
+            "/auth-requests/{id}/respond",
+            post(crate::auth::requests::respond_auth_request),
+        )
 }
 
 /// Longest device name accepted, in bytes.
 const MAX_DEVICE_NAME_LEN: usize = 200;
 
-fn validate_device_name(name: &str) -> AppResult<()> {
+pub(crate) fn validate_device_name(name: &str) -> AppResult<()> {
     if name.trim().is_empty() || name.len() > MAX_DEVICE_NAME_LEN {
         return Err(AppError::Validation("invalid device name".into()));
     }
@@ -123,28 +131,16 @@ async fn register_device(
         return Err(AppError::Unauthorized);
     }
 
-    // Count and insert in one transaction under a per-user advisory lock
-    // (tag 2), so concurrent registrations can't exceed the device cap.
-    // A failed insert also rolls back the device row.
     let mut tx = state.db.begin().await?;
 
-    sqlx::query!(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1, 2))",
-        user.id.to_string()
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    // Only active devices count, so revoking old ones frees up slots.
-    let active_device_count = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM devices WHERE user_id = $1 AND revoked_at IS NULL",
-        user.id
-    )
-    .fetch_one(&mut *tx)
-    .await?
-    .unwrap_or(0);
-
-    if active_device_count >= state.config.max_devices_per_account {
+    let new_device = NewDevice {
+        name: req.name,
+        browser: req.browser,
+        browser_version: req.browser_version,
+        platform: req.platform,
+        extension_version: req.extension_version,
+    };
+    let Some(issued) = insert_device(&state, &mut tx, user.id, new_device).await? else {
         // Nothing written yet; roll back explicitly since we exit early.
         tx.rollback().await?;
         crate::audit::log(
@@ -155,6 +151,79 @@ async fn register_device(
         )
         .await;
         return Err(AppError::Conflict("device_limit_reached".into()));
+    };
+
+    tx.commit().await?;
+
+    crate::audit::log(
+        &state,
+        Some(user.id),
+        Some(issued.device_id),
+        "device_registered",
+    )
+    .await;
+
+    Ok(Json(RegisterDeviceResponse {
+        device_id: issued.device_id,
+        access_token: issued.access_token,
+        refresh_token: issued.refresh_token,
+        access_token_expires_at: issued.access_token_expires_at,
+        api_version: "v1",
+        protocol_version: state.config.protocol_version,
+        minimum_supported_protocol_version: state.config.minimum_supported_protocol_version,
+        wrapped_account_key: user.wrapped_account_key,
+        account_key_version: user.account_key_version,
+    }))
+}
+
+/// What a browser reports about itself when it registers.
+pub(crate) struct NewDevice {
+    pub name: String,
+    pub browser: Option<String>,
+    pub browser_version: Option<String>,
+    pub platform: Option<String>,
+    pub extension_version: Option<String>,
+}
+
+/// A freshly registered device's id and first credentials.
+pub(crate) struct IssuedDevice {
+    pub device_id: Uuid,
+    pub access_token: String,
+    pub refresh_token: String,
+    pub access_token_expires_at: chrono::DateTime<Utc>,
+}
+
+/// Inserts a device for `user_id` and issues its first credentials inside
+/// `tx`. Shared by `register_device` and an approved login-with-device
+/// request (`auth::requests`). Returns `None`, with nothing written, when the
+/// account already has `max_devices_per_account` active devices; the caller
+/// rolls back.
+pub(crate) async fn insert_device(
+    state: &AppState,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    device: NewDevice,
+) -> AppResult<Option<IssuedDevice>> {
+    // Count and insert under a per-user advisory lock (tag 2), so concurrent
+    // registrations can't exceed the device cap.
+    sqlx::query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 2))",
+        user_id.to_string()
+    )
+    .execute(&mut **tx)
+    .await?;
+
+    // Only active devices count, so revoking old ones frees up slots.
+    let active_device_count = sqlx::query_scalar!(
+        "SELECT COUNT(*) FROM devices WHERE user_id = $1 AND revoked_at IS NULL",
+        user_id
+    )
+    .fetch_one(&mut **tx)
+    .await?
+    .unwrap_or(0);
+
+    if active_device_count >= state.config.max_devices_per_account {
+        return Ok(None);
     }
 
     let device_id = sqlx::query_scalar!(
@@ -163,33 +232,24 @@ async fn register_device(
         VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING id
         "#,
-        user.id,
-        req.name,
-        req.browser,
-        req.browser_version,
-        req.platform,
-        req.extension_version,
+        user_id,
+        device.name,
+        device.browser,
+        device.browser_version,
+        device.platform,
+        device.extension_version,
     )
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut **tx)
     .await?;
 
-    let (access_token, refresh_token, expires_at) =
-        issue_credentials(&state, &mut *tx, device_id, user.id).await?;
+    let (access_token, refresh_token, access_token_expires_at) =
+        issue_credentials(state, &mut **tx, device_id, user_id).await?;
 
-    tx.commit().await?;
-
-    crate::audit::log(&state, Some(user.id), Some(device_id), "device_registered").await;
-
-    Ok(Json(RegisterDeviceResponse {
+    Ok(Some(IssuedDevice {
         device_id,
         access_token,
         refresh_token,
-        access_token_expires_at: expires_at,
-        api_version: "v1",
-        protocol_version: state.config.protocol_version,
-        minimum_supported_protocol_version: state.config.minimum_supported_protocol_version,
-        wrapped_account_key: user.wrapped_account_key,
-        account_key_version: user.account_key_version,
+        access_token_expires_at,
     }))
 }
 

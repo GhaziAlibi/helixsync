@@ -36,3 +36,17 @@ pub fn test_kdf_params() -> serde_json::Value {
 pub fn test_wrapped_ak() -> &'static str {
     "test-wrapped-account-key"
 }
+
+/// The `recoveryAuthKey` every test registration uses. Like `authKey`, any
+/// 32 bytes of base64url pass; a test that recovers an account derives
+/// other codes with `test_auth_key`.
+#[allow(dead_code)]
+pub fn test_recovery_auth_key() -> String {
+    test_auth_key("test recovery code")
+}
+
+/// Placeholder `recoveryWrappedAk` for tests — opaque to the server.
+#[allow(dead_code)]
+pub fn test_recovery_wrapped_ak() -> &'static str {
+    "test-recovery-wrapped-account-key"
+}

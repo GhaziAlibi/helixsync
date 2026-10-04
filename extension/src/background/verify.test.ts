@@ -102,6 +102,7 @@ vi.mock("../api/client", () => ({
   }),
   invalidateSettingsMemory: vi.fn(),
   invalidatePolicyMemory: vi.fn(),
+  listAuthRequests: vi.fn(async () => []),
 }));
 
 vi.mock("../api/websocket", () => ({
@@ -110,6 +111,7 @@ vi.mock("../api/websocket", () => ({
   onChangesAvailable: vi.fn((cb: () => void) => {
     changesListener = cb;
   }),
+  onAuthRequest: vi.fn(),
 }));
 
 // Stateful device mirror (rather than a fixed object `getDevice` always

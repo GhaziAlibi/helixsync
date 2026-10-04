@@ -15,8 +15,9 @@ implementations of the primitives below may be used:
   `getrandom`/`OsRng`). The server only ever runs these on `authKey` (§2) —
   never on the account password, which it never receives.
 - TypeScript/extension and web dashboard: WebCrypto (`crypto.subtle`) for
-  HKDF-SHA256 key derivation, plus `@noble/ciphers` (XChaCha20-Poly1305) and
-  `@noble/hashes` (Argon2id, CSPRNG) — independently audited, pure-TypeScript
+  HKDF-SHA256 key derivation, SHA-256, and ECDH P-256 (login with device,
+  §9.2), plus `@noble/ciphers` (XChaCha20-Poly1305) and `@noble/hashes`
+  (Argon2id, CSPRNG) — independently audited, pure-TypeScript
   implementations. Both clients implement the same derive/wrap/unwrap
   primitives (`extension/src/crypto/index.ts`, `web/src/crypto/index.ts`),
   so an account created on one is fully usable from the other.
@@ -37,6 +38,14 @@ Password (never leaves the client, never sent anywhere)
                                                             +-- wraps/unwraps --> Account key (AK)
                                                                                      |
                                                                                      +-- HKDF "helixsync-sdek-v<N>" --> SDEK_v(N), actually encrypts payloads
+
+Recovery code (160 random bits, shown once, never sent anywhere)
+   |
+   +-- HKDF "helixsync-recovery-auth-v1" --> recoveryAuthKey (sent to the server, stored only as SHA-256)
+   |
+   +-- HKDF "helixsync-recovery-kek-v1"  --> recoveryKek (never leaves the client)
+                                                |
+                                                +-- wraps/unwraps --> the same Account key (AK)
 ```
 
 - **Master key (M)**: derived client-side from the account password via
@@ -57,6 +66,11 @@ Password (never leaves the client, never sent anywhere)
   (KEK-encrypted) form — opaque to the server, which cannot unwrap it
   without `KEK`, which it never has. AK — not a password-derived value — is
   the root every `SDEK_v(N)` derives from.
+- **Recovery code**: 20 random bytes the dashboard generates at
+  registration and shows once (§9.1). Being high-entropy, it goes straight
+  into HKDF with no Argon2 step. Its `recoveryAuthKey` lets the server
+  check the code without seeing it, and its `recoveryKek` wraps a second
+  copy of AK, so the code can set a new password without losing data.
 - **SDEK**: the key that actually encrypts operation payloads. `SDEK_v1` is
   derived from AK via HKDF-SHA256 with a per-key-version `info` string
   (`"helixsync-sdek-v" || keyVersion`). Rotation (§4) introduces `SDEK_v2`,
@@ -64,10 +78,13 @@ Password (never leaves the client, never sent anywhere)
 
 The server persists, per user: `kdf_salt` (the Argon2id salt for deriving
 `M`), `kdf_params` (Argon2id cost, opaque JSON the server never interprets),
-`wrapped_account_key` (AK, encrypted under a KEK the server never has), and
-`account_key_version`. Never the password, never `M`, never `KEK`, never
-plaintext AK — the server cannot derive the encryption key under any of
-these fields, even with full database and process access.
+`wrapped_account_key` (AK, encrypted under a KEK the server never has),
+`recovery_auth_hash` (SHA-256 of `recoveryAuthKey`),
+`recovery_wrapped_account_key` (AK, encrypted under a `recoveryKek` the
+server never has), and `account_key_version`. Never the password, never the
+recovery code, never `M`, never a KEK, never plaintext AK — the server
+cannot derive the encryption key under any of these fields, even with full
+database and process access.
 
 ---
 
@@ -82,8 +99,13 @@ accounts, only registers devices on an existing one):
 2. Client derives M = Argon2id(password, kdfSalt, kdfParams), then
    authKey = HKDF(M, "helixsync-auth-v1") and KEK = HKDF(M, "helixsync-kek-v1").
 3. Client generates AK (32 random bytes) and wrappedAK = wrap(KEK, AK).
-4. Client calls POST /api/v1/auth/register with
-   { email, authKey, kdfSalt, kdfParams, wrappedAK } — never the password.
+4. Client generates a recovery code and derives recoveryAuthKey and
+   recoveryKek from it (§9.1); recoveryWrappedAK = wrap(recoveryKek, AK).
+5. Client calls POST /api/v1/auth/register with
+   { email, authKey, kdfSalt, kdfParams, wrappedAK, recoveryAuthKey,
+   recoveryWrappedAK } — never the password, never the recovery code.
+6. The dashboard shows the recovery code once and won't continue until the
+   user confirms they saved it.
 ```
 
 **Login (web) / device registration (extension)** — every device after the
@@ -135,7 +157,9 @@ third device is sufficient to resume decrypting all synced data.
 There is no separate step: §2 already covers it. A new device registers
 with the account's email + password like any other device, prelogin-fetches
 the same `kdfSalt`/`kdfParams`, and unwraps the same AK on the spot. No
-confirmation from an already-connected device is required or possible.
+confirmation from an already-connected device is required. A device can
+instead join without the password by having a connected extension approve
+it (login with device, §9.2), but that is an alternative, not a gate.
 
 This trades the "explicit per-device trust decision" property of a
 device-to-device key-grant scheme for operational simplicity: anyone who
@@ -171,7 +195,8 @@ every `SDEK_v(N)` derived from it, is unchanged. Every device just needs to
 sign in again with the new password to unwrap the same AK — no reconnect,
 no data becomes unreadable. As part of the same call, the server also
 revokes every other active web session for the account (a stolen session
-cookie must not keep working after the password changes).
+cookie must not keep working after the password changes). The recovery
+code's wrap of AK is untouched, so the same recovery code keeps working.
 
 **Account key rotation** — generating a genuinely *new* AK — is a distinct,
 more disruptive operation for when the old password (or a device) may be
@@ -432,3 +457,132 @@ with it decrypt your data. The extension doesn't have this problem: its
 code comes from the extension install, not the server.
 
 Only use the dashboard on a server you trust.
+
+---
+
+## 9. Account Recovery
+
+A forgotten password can't be reset by the server, which never has the
+password, AK, or anything that unwraps AK. HelixSync offers the same kinds
+of way back as Bitwarden, a widely used end-to-end encrypted password
+manager, adapted to a self-hosted server that sends no email:
+
+| If you still have | What to use | Data kept? |
+|---|---|---|
+| Your recovery code | Reset the password with it (§9.1) | Yes |
+| A browser where the extension is still connected | Approve a new browser or a dashboard sign-in from it (§9.2) | Yes |
+| Neither | Ask the operator to delete the account, then register again (§9.3) | Only what your browsers still hold |
+
+### 9.1 Recovery code
+
+The recovery code is 20 random bytes (160 bits), shown as eight groups of
+four Crockford base32 characters (`XXXX-XXXX-…`). Crockford's alphabet has
+no I, L, O or U; typed input is uppercased, spaces and dashes are dropped,
+and I/L read as 1 and O as 0, so a code copied by hand still works.
+
+From the code's bytes the client derives, with the same HKDF-SHA256 as the
+password path:
+
+- `recoveryAuthKey = HKDF(code, "helixsync-recovery-auth-v1")`, the only
+  value derived from the code that is ever sent. The server stores
+  `hash_token(recoveryAuthKey)` (SHA-256, like refresh tokens and session
+  ids) and compares in constant time. Argon2 isn't needed: the input has
+  160 bits of entropy.
+- `recoveryKek = HKDF(code, "helixsync-recovery-kek-v1")`, which never
+  leaves the client and wraps the second copy of AK (the same envelope as
+  the password wrap).
+
+**Resetting the password** (dashboard: *Forgot your password?*):
+
+```text
+1. POST /api/v1/auth/recover/prepare { email, recoveryAuthKey }
+   -> { recoveryWrappedAk }. An unknown email and a wrong code are the same 401.
+2. Client unwraps AK with recoveryKek.
+3. Client picks a new kdfSalt, derives the new authKey/KEK from the new
+   password, and wraps AK under the new KEK. It also generates a NEW
+   recovery code and wraps AK under its recoveryKek.
+4. POST /api/v1/auth/recover/complete { email, recoveryAuthKey, newAuthKey,
+   newKdfSalt, newKdfParams, newWrappedAk, newRecoveryAuthKey,
+   newRecoveryWrappedAk }. The server checks the code again and, in one
+   transaction, swaps in every new field and revokes every web session.
+5. The dashboard shows the new recovery code once.
+```
+
+Each code works once: the completion matches on the old code's hash, so
+even two racing completions can't both use it. AK, and so every SDEK, is
+unchanged, exactly as with a password change (§4); device credentials keep
+working.
+
+**Regenerating the code** (`PATCH /api/v1/auth/recovery-code`, dashboard:
+Security page) needs the current password: the dashboard unwraps AK with it
+and sends the current `authKey`, so a stolen session cookie alone can't
+replace the code with one the attacker knows.
+
+The recovery code is as powerful as the password: anyone who has it and the
+email can set a new password and decrypt the account's data. The dashboard
+asks the user to keep it offline.
+
+### 9.2 Login with device
+
+Modeled on Bitwarden's "Log in with device". A browser that has no
+password at hand asks to sign in, and the HelixSync extension on a browser
+that's already connected approves. Only extensions can approve: they are the
+only clients that hold AK.
+
+```text
+1. The requester creates a one-time ECDH P-256 key pair (WebCrypto) and
+   sends POST /api/v1/auth/requests { email, kind, publicKey, deviceName? }.
+   kind is "web" (a dashboard sign-in) or "device" (a new extension).
+   The response carries { id, secret, expiresAt }; requests expire after 15
+   minutes. The server pushes {"type":"auth_request"} to the account's
+   connected extensions.
+2. Both sides show the fingerprint phrase:
+   SHA-256("helixsync-auth-request-v1" || requesterPublicKey), first 80 bits,
+   in Crockford base32 as XXXX-XXXX-XXXX-XXXX. The user approves only if the
+   two match.
+3. The approving extension answers through
+   POST /api/v1/devices/auth-requests/{id}/respond. For a "device" request
+   it creates its own one-time key pair, computes
+   key = HKDF(ECDH(approverPrivate, requesterPublic), "helixsync-auth-request-v1"),
+   and sends encryptedAccountKey = XChaCha20-Poly1305(key, AK) with the
+   request id as associated data, plus its public key. A "web" approval
+   carries no key: the dashboard never holds AK.
+4. The requester polls POST /api/v1/auth/requests/{id}/poll { secret }. An
+   approval is handed out once: for "web" it starts a web session; for
+   "device" it registers the device and returns its credentials,
+   encryptedAccountKey and approverPublicKey. The new extension derives the
+   same key from its private key and decrypts AK.
+```
+
+The fingerprint is what keeps the server out: a server that swapped in its
+own public key would change the phrase the approver sees. The associated
+data stops the server from handing one approval's ciphertext to another
+request. The requester's private key never leaves its browser; while it
+waits, the extension keeps it in `chrome.storage.session` (memory only),
+like the password draft.
+
+Logging in with a device doesn't reset a forgotten password: as in
+Bitwarden, changing the password still needs the current one. It keeps a
+new browser or the dashboard usable until the password is reset with the
+recovery code.
+
+### 9.3 Operator account delete
+
+When both the password and the recovery code are gone, the data on the
+server can't be decrypted by anyone. The operator can then delete the
+account so its email can register again:
+
+```bash
+docker compose exec server /app/helixsync-server delete-account user@example.com
+```
+
+The server sends no email, so unlike Bitwarden's email-confirmed deletion,
+the operator is the one who checks who's asking. The command asks for
+confirmation, deletes the account exactly like `DELETE /auth/account`, and
+audits it as `account_deleted_by_operator`. It runs as a separate process,
+so the running server keeps accepting the account's cached sessions and
+device tokens for up to 30 seconds (the cache lifetime).
+
+Nothing in the browsers is deleted. After registering again, connecting a
+browser uploads its bookmarks and history through the extension's initial
+import, as far back as the browser itself still keeps them.

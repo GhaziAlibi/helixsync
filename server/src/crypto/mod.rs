@@ -108,6 +108,38 @@ pub fn validate_auth_key(auth_key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether `token` hashes to `stored_hash` (a [`hash_token`] value),
+/// compared in constant time. For secrets checked after a lookup by some
+/// other key (an email, a request id) rather than by the hash itself.
+pub fn token_hash_matches(token: &str, stored_hash: &str) -> bool {
+    let computed = hash_token(token);
+    computed.len() == stored_hash.len()
+        && computed
+            .bytes()
+            .zip(stored_hash.bytes())
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            == 0
+}
+
+/// A login-with-device public key (docs/encryption.md §9.2) must be an
+/// uncompressed ECDH P-256 point as WebCrypto exports it in `raw` format:
+/// 65 bytes starting with `0x04`, base64url-encoded with no padding. Only
+/// the shape is checked; the clients import it and would reject a point
+/// that isn't on the curve.
+pub fn validate_ecdh_public_key(public_key: &str) -> anyhow::Result<()> {
+    let decoded = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        public_key,
+    )
+    .map_err(|_| anyhow::anyhow!("publicKey must be base64url-encoded"))?;
+    if decoded.len() != 65 || decoded[0] != 0x04 {
+        return Err(anyhow::anyhow!(
+            "publicKey must be an uncompressed P-256 point (65 bytes)"
+        ));
+    }
+    Ok(())
+}
+
 /// Domain-separation label for the key behind `fake_kdf_salt_for_unknown_email`.
 /// Changing it changes every fake salt, which would make an unknown email's
 /// salt differ between releases; bump the `-v1` suffix only deliberately.
@@ -182,6 +214,29 @@ mod tests {
         .is_err());
         // A plausible raw password must never pass as an authKey.
         assert!(validate_auth_key("correct horse battery staple").is_err());
+    }
+
+    #[test]
+    fn token_hash_matches_only_the_hashed_token() {
+        let (token, hash) = generate_opaque_token();
+        assert!(token_hash_matches(&token, &hash));
+        assert!(!token_hash_matches("some-other-token", &hash));
+        assert!(!token_hash_matches(&token, ""));
+    }
+
+    #[test]
+    fn ecdh_public_key_validation_accepts_only_uncompressed_p256_points() {
+        let encode = |bytes: &[u8]| {
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
+        };
+        let mut point = [7u8; 65];
+        point[0] = 0x04;
+        assert!(validate_ecdh_public_key(&encode(&point)).is_ok());
+        // Compressed form, wrong prefix, and non-base64url input.
+        assert!(validate_ecdh_public_key(&encode(&point[..33])).is_err());
+        point[0] = 0x02;
+        assert!(validate_ecdh_public_key(&encode(&point)).is_err());
+        assert!(validate_ecdh_public_key("not base64!").is_err());
     }
 
     #[test]

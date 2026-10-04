@@ -67,8 +67,14 @@ fn state_for(pool: PgPool) -> AppState {
 async fn create_user(pool: &PgPool, email: &str) -> Uuid {
     sqlx::query_scalar!(
         r#"
-        INSERT INTO users (email, password_hash, kdf_salt, kdf_params, wrapped_account_key)
-        VALUES ($1, 'hash', 'salt', '{"m":19456,"t":2,"p":1}'::jsonb, 'wrapped-account-key')
+        INSERT INTO users (
+            email, password_hash, kdf_salt, kdf_params, wrapped_account_key,
+            recovery_auth_hash, recovery_wrapped_account_key
+        )
+        VALUES (
+            $1, 'hash', 'salt', '{"m":19456,"t":2,"p":1}'::jsonb, 'wrapped-account-key',
+            'recovery-hash', 'recovery-wrapped-account-key'
+        )
         RETURNING id
         "#,
         email

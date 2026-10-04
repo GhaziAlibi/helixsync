@@ -273,6 +273,104 @@ export async function registerDevice(params: RegisterDeviceParams): Promise<Regi
   return res.json();
 }
 
+// --- Login with device (docs/protocol.md §7.4) ---
+
+export interface AuthRequestCreated {
+  id: string;
+  secret: string;
+  expiresAt: string;
+}
+
+/** Asks to connect this browser without the password; a connected
+ * extension on the account approves. `publicKey` is this request's one-time
+ * key (crypto::generateAuthRequestKeyPair). */
+export async function createAuthRequest(
+  serverUrl: string,
+  email: string,
+  publicKey: string,
+  deviceName: string,
+): Promise<AuthRequestCreated> {
+  const res = await fetchWithTimeout(`${serverUrl}/api/v1/auth/requests`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, kind: "device", publicKey, deviceName }),
+  });
+  if (!res.ok) {
+    throw await buildApiError(res, `request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+/** What an approved new-browser request hands back, once: the device's
+ * credentials, plus the account key encrypted to this request's public key
+ * (crypto::decryptAccountKeyFromApproval). */
+export interface DeviceApproval {
+  status: "approved";
+  deviceId: string;
+  accessToken: string;
+  refreshToken: string;
+  accessTokenExpiresAt: string;
+  encryptedAccountKey: string;
+  approverPublicKey: string;
+  accountKeyVersion: number;
+}
+
+export type AuthRequestPoll = { status: "pending" | "denied" | "expired" } | DeviceApproval;
+
+export async function pollAuthRequest(
+  serverUrl: string,
+  id: string,
+  secret: string,
+  details: { browser?: string; extensionVersion?: string },
+): Promise<AuthRequestPoll> {
+  const res = await fetchWithTimeout(`${serverUrl}/api/v1/auth/requests/${encodeURIComponent(id)}/poll`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ secret, ...details }),
+  });
+  if (!res.ok) {
+    throw await buildApiError(res, `request check failed (${res.status})`);
+  }
+  return res.json();
+}
+
+/** A sign-in request waiting for this account's approval. */
+export interface PendingAuthRequest {
+  id: string;
+  kind: "web" | "device";
+  publicKey: string;
+  deviceName: string | null;
+  requestIp: string | null;
+  userAgent: string | null;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export async function listAuthRequests(): Promise<PendingAuthRequest[]> {
+  const res = await authedFetch("/api/v1/devices/auth-requests");
+  if (!res.ok) {
+    throw await buildApiError(res, `listing sign-in requests failed (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Approving a new browser must carry the account key encrypted to its
+ * request (crypto::encryptAccountKeyForRequest); a dashboard approval and a
+ * denial carry nothing. */
+export async function respondAuthRequest(
+  id: string,
+  answer: { approve: boolean; encryptedAccountKey?: string; approverPublicKey?: string },
+): Promise<void> {
+  const res = await authedFetch(`/api/v1/devices/auth-requests/${encodeURIComponent(id)}/respond`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(answer),
+  });
+  if (!res.ok) {
+    throw await buildApiError(res, `answering the sign-in request failed (${res.status})`);
+  }
+}
+
 /** `timeoutMs` is raised only for the bulk history import, whose single op
  * can be large enough to outlast the standard timeout. */
 export async function uploadOperations(operations: LocalOperation[], timeoutMs?: number): Promise<UploadResponse> {

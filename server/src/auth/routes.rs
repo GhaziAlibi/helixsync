@@ -1,6 +1,6 @@
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::routing::post;
+use axum::routing::{patch, post};
 use axum::{Json, Router};
 use axum_extra::extract::CookieJar;
 use chrono::{DateTime, Utc};
@@ -8,15 +8,17 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+use crate::auth::account::delete_user;
 use crate::auth::normalize_email;
 use crate::crypto::{
-    fake_kdf_salt_for_unknown_email, hash_password_async, validate_auth_key, verify_password_async,
+    fake_kdf_salt_for_unknown_email, hash_password_async, hash_token, token_hash_matches,
+    validate_auth_key, verify_password_async,
 };
 use crate::error::{AppError, AppResult};
 use crate::middleware::client_ip::{client_ip, rate_limit_ip_key};
 use crate::middleware::rate_limit::{
     enforce, ACCOUNT_DELETE_LIMIT, LOGIN_EMAIL_LIMIT, LOGIN_LIMIT, PRELOGIN_EMAIL_LIMIT,
-    PRELOGIN_LIMIT, REGISTER_LIMIT,
+    PRELOGIN_LIMIT, RECOVERY_CODE_LIMIT, RECOVER_EMAIL_LIMIT, RECOVER_LIMIT, REGISTER_LIMIT,
 };
 use crate::state::AppState;
 
@@ -34,18 +36,27 @@ pub fn router() -> Router<AppState> {
         .route("/me", axum::routing::get(me))
         // Documented as PATCH (docs/encryption.md §4); POST kept for old clients.
         .route("/password", post(change_password).patch(change_password))
+        .route("/recovery-code", patch(regenerate_recovery_code))
         .route("/sessions", axum::routing::get(list_sessions))
         .route("/sessions/{id}/revoke", post(revoke_session_route))
         .route("/account", axum::routing::delete(delete_account))
 }
 
-/// Routes whose response contains the CSRF token. `crate::app` mounts them
-/// outside `CompressionLayer` to avoid BREACH-style attacks.
+/// Routes whose response contains the CSRF token or other secret material.
+/// `crate::app` mounts them outside `CompressionLayer` to avoid BREACH-style
+/// attacks.
 pub fn sensitive_router() -> Router<AppState> {
     Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
         .route("/prelogin", post(prelogin))
+        .route("/recover/prepare", post(recover_prepare))
+        .route("/recover/complete", post(recover_complete))
+        .route("/requests", post(super::requests::create_auth_request))
+        .route(
+            "/requests/{id}/poll",
+            post(super::requests::poll_auth_request),
+        )
 }
 
 /// Default Argon2id cost for a fresh `kdfParams`, returned for prelogin's
@@ -125,11 +136,16 @@ struct RegisterRequest {
     kdf_salt: String,
     kdf_params: serde_json::Value,
     wrapped_ak: String,
+    /// Derived from the recovery code the dashboard shows once at
+    /// registration (docs/encryption.md §9.1), stored as `hash_token`.
+    recovery_auth_key: String,
+    /// The account key wrapped under the recovery code's `recoveryKek`.
+    recovery_wrapped_ak: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct AuthResponse {
+pub(super) struct AuthResponse {
     user: UserPublic,
     csrf_token: String,
     wrapped_ak: String,
@@ -159,6 +175,7 @@ async fn register(
         return Err(AppError::Validation("invalid email".into()));
     }
     validate_request_auth_key(&req.auth_key)?;
+    validate_request_auth_key(&req.recovery_auth_key)?;
 
     let email = normalize_email(&req.email);
 
@@ -170,8 +187,11 @@ async fn register(
 
     let insert_result = sqlx::query!(
         r#"
-        INSERT INTO users (email, password_hash, kdf_salt, kdf_params, wrapped_account_key)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO users (
+            email, password_hash, kdf_salt, kdf_params, wrapped_account_key,
+            recovery_auth_hash, recovery_wrapped_account_key
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id, email, kdf_salt, kdf_params, wrapped_account_key, account_key_version
         "#,
         email.clone(),
@@ -179,6 +199,8 @@ async fn register(
         req.kdf_salt,
         req.kdf_params,
         req.wrapped_ak,
+        hash_token(&req.recovery_auth_key),
+        req.recovery_wrapped_ak,
     )
     .fetch_one(&mut *tx)
     .await;
@@ -294,8 +316,10 @@ async fn login(
     .await
 }
 
+/// Starts a web session and builds the login response. Shared by register,
+/// login, and an approved login-with-device request (`super::requests`).
 #[allow(clippy::too_many_arguments)]
-async fn finish_login(
+pub(super) async fn finish_login(
     state: &AppState,
     jar: CookieJar,
     headers: HeaderMap,
@@ -360,11 +384,9 @@ struct DeleteAccountRequest {
 ///
 /// Needs a session with a valid CSRF token *and* the current `authKey`: a
 /// stolen session cookie alone must not be enough to destroy the account.
-/// Every other table references `users` with `ON DELETE CASCADE` (audit rows
-/// are `SET NULL`, so the event trail survives without the user id), so
-/// deleting the one row is the whole database cleanup. What the cascade can't
-/// reach is process memory, which is purged afterwards so no cached session
-/// or device token keeps working for up to its cache TTL.
+/// The database side is [`delete_user`]. What the cascade can't reach is
+/// process memory, which is purged afterwards so no cached session or device
+/// token keeps working for up to its cache TTL.
 async fn delete_account(
     CsrfProtectedUser(user): CsrfProtectedUser,
     State(state): State<AppState>,
@@ -391,58 +413,19 @@ async fn delete_account(
         return Err(AppError::Unauthorized);
     }
 
-    let mut tx = state.db.begin().await?;
-
-    // Lock the user row first. Inserting a session or device takes a
-    // FOR KEY SHARE lock on it through the foreign key, so a login or device
-    // registration racing with this delete either lands before the lock (and
-    // shows up in the lists below) or waits and then fails its foreign key.
-    // Without it, the lists could miss a row that the cascade then deletes.
-    let locked = sqlx::query!(
-        "SELECT id FROM users WHERE id = $1 FOR UPDATE",
-        user.user_id
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-    if locked.is_none() {
+    let Some(deleted) = delete_user(&state.db, user.user_id, "account_deleted").await? else {
         // A concurrent delete of this same account won the race.
         return Err(AppError::Unauthorized);
-    }
-
-    let session_hashes = sqlx::query_scalar!(
-        "SELECT session_hash FROM web_sessions WHERE user_id = $1",
-        user.user_id
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-
-    let device_ids = sqlx::query_scalar!("SELECT id FROM devices WHERE user_id = $1", user.user_id)
-        .fetch_all(&mut *tx)
-        .await?;
-
-    // Written in the same transaction as the delete, so the event exists
-    // exactly when the account is gone. The cascade nulls its `user_id`.
-    sqlx::query!(
-        "INSERT INTO audit_logs (user_id, device_id, event_type) VALUES ($1, NULL, 'account_deleted')",
-        user.user_id
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query!("DELETE FROM users WHERE id = $1", user.user_id)
-        .execute(&mut *tx)
-        .await?;
-
-    tx.commit().await?;
+    };
 
     // Tombstones, not removals, with an `as_of` taken after the commit: a
     // slower in-flight auth check that read the rows before the delete must
     // not be able to re-cache them as valid (same rule as `revoke_session`).
     let purged_at = std::time::Instant::now();
-    for session_hash in session_hashes {
+    for session_hash in deleted.session_hashes {
         write_web_session_cache_entry(&state.web_session_cache, session_hash, purged_at, None);
     }
-    for device_id in device_ids {
+    for device_id in deleted.device_ids {
         write_device_revocation_cache_entry(
             &state.device_revocation_cache,
             device_id,
@@ -596,6 +579,255 @@ async fn change_password(
     crate::audit::log(&state, Some(user.user_id), None, "password_changed").await;
 
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegenerateRecoveryCodeRequest {
+    current_auth_key: String,
+    recovery_auth_key: String,
+    recovery_wrapped_ak: String,
+}
+
+/// Replaces the recovery code (docs/encryption.md §9.1): the dashboard
+/// generated a new one, derived its `recoveryAuthKey`/`recoveryKek`, and
+/// re-wrapped the account key it unwrapped with the current password. Needs
+/// the current `authKey` as well as the session, like `change_password`, so
+/// a stolen session cookie can't swap in a code the attacker knows. The old
+/// code stops working.
+async fn regenerate_recovery_code(
+    CsrfProtectedUser(user): CsrfProtectedUser,
+    State(state): State<AppState>,
+    Json(req): Json<RegenerateRecoveryCodeRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    enforce(
+        &state.rate_limiter,
+        RECOVERY_CODE_LIMIT,
+        &user.user_id.to_string(),
+    )?;
+
+    validate_request_auth_key(&req.current_auth_key)?;
+    validate_request_auth_key(&req.recovery_auth_key)?;
+
+    let row = sqlx::query!(
+        "SELECT password_hash FROM users WHERE id = $1",
+        user.user_id
+    )
+    .fetch_one(&state.db)
+    .await?;
+
+    if !verify_password_async(
+        req.current_auth_key,
+        row.password_hash,
+        &state.argon2_semaphore,
+    )
+    .await
+    {
+        crate::audit::log(
+            &state,
+            Some(user.user_id),
+            None,
+            "recovery_code_regenerate_failed",
+        )
+        .await;
+        return Err(AppError::Unauthorized);
+    }
+
+    sqlx::query!(
+        r#"
+        UPDATE users
+        SET recovery_auth_hash = $1, recovery_wrapped_account_key = $2, updated_at = now()
+        WHERE id = $3
+        "#,
+        hash_token(&req.recovery_auth_key),
+        req.recovery_wrapped_ak,
+        user.user_id
+    )
+    .execute(&state.db)
+    .await?;
+
+    crate::audit::log(
+        &state,
+        Some(user.user_id),
+        None,
+        "recovery_code_regenerated",
+    )
+    .await;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// The account behind `email` if `recovery_auth_key` matches its recovery
+/// code, or `None` for an unknown email and a wrong code alike. A failure on
+/// a real account is audited against it.
+struct RecoveryAccount {
+    id: Uuid,
+    recovery_auth_hash: String,
+    recovery_wrapped_account_key: String,
+}
+
+async fn verify_recovery_code(
+    state: &AppState,
+    email: &str,
+    recovery_auth_key: &str,
+) -> AppResult<Option<RecoveryAccount>> {
+    let account = sqlx::query_as!(
+        RecoveryAccount,
+        "SELECT id, recovery_auth_hash, recovery_wrapped_account_key FROM users WHERE email = $1",
+        email
+    )
+    .fetch_optional(&state.db)
+    .await?;
+
+    match account {
+        Some(account) if token_hash_matches(recovery_auth_key, &account.recovery_auth_hash) => {
+            Ok(Some(account))
+        }
+        other => {
+            crate::audit::log(
+                state,
+                other.map(|account| account.id),
+                None,
+                "password_recovery_failed",
+            )
+            .await;
+            Ok(None)
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoverPrepareRequest {
+    email: String,
+    recovery_auth_key: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoverPrepareResponse {
+    recovery_wrapped_ak: String,
+}
+
+/// Step 1 of a password reset with the recovery code (docs/encryption.md
+/// §9.1): hands back the account key wrapped under the code's
+/// `recoveryKek`, so the dashboard can unwrap it locally. An unknown email
+/// and a wrong code are the same `401`.
+async fn recover_prepare(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<RecoverPrepareRequest>,
+) -> AppResult<Json<RecoverPrepareResponse>> {
+    let ip = client_ip(&headers, addr, state.config.behind_proxy);
+    enforce(&state.rate_limiter, RECOVER_LIMIT, &rate_limit_ip_key(ip))?;
+
+    let email = normalize_email(&req.email);
+    enforce(&state.rate_limiter, RECOVER_EMAIL_LIMIT, &email)?;
+
+    validate_request_auth_key(&req.recovery_auth_key)?;
+
+    let Some(account) = verify_recovery_code(&state, &email, &req.recovery_auth_key).await? else {
+        return Err(AppError::Unauthorized);
+    };
+
+    Ok(Json(RecoverPrepareResponse {
+        recovery_wrapped_ak: account.recovery_wrapped_account_key,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoverCompleteRequest {
+    email: String,
+    recovery_auth_key: String,
+    new_auth_key: String,
+    new_kdf_salt: String,
+    new_kdf_params: serde_json::Value,
+    new_wrapped_ak: String,
+    new_recovery_auth_key: String,
+    new_recovery_wrapped_ak: String,
+}
+
+/// Step 2 of a password reset with the recovery code: checks the code again
+/// (nothing is kept between the two steps), then in one transaction swaps
+/// in the new password's fields **and a new recovery code** (each code works
+/// once) and revokes every web session. The account key itself is unchanged,
+/// so all synced data stays readable. Device credentials are left alone, as
+/// on a password change.
+async fn recover_complete(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<RecoverCompleteRequest>,
+) -> AppResult<StatusCode> {
+    let ip = client_ip(&headers, addr, state.config.behind_proxy);
+    enforce(&state.rate_limiter, RECOVER_LIMIT, &rate_limit_ip_key(ip))?;
+
+    let email = normalize_email(&req.email);
+    enforce(&state.rate_limiter, RECOVER_EMAIL_LIMIT, &email)?;
+
+    validate_request_auth_key(&req.recovery_auth_key)?;
+    validate_request_auth_key(&req.new_auth_key)?;
+    validate_request_auth_key(&req.new_recovery_auth_key)?;
+
+    let Some(account) = verify_recovery_code(&state, &email, &req.recovery_auth_key).await? else {
+        return Err(AppError::Unauthorized);
+    };
+
+    let new_hash = hash_password_async(req.new_auth_key, &state.argon2_semaphore)
+        .await
+        .map_err(AppError::Internal)?;
+
+    let mut tx = state.db.begin().await?;
+
+    // Matching on the old recovery hash makes the code single-use even when
+    // two completions race: only the first one finds the row.
+    let updated = sqlx::query!(
+        r#"
+        UPDATE users
+        SET password_hash = $1, kdf_salt = $2, kdf_params = $3, wrapped_account_key = $4,
+            recovery_auth_hash = $5, recovery_wrapped_account_key = $6, updated_at = now()
+        WHERE id = $7 AND recovery_auth_hash = $8
+        "#,
+        new_hash,
+        req.new_kdf_salt,
+        req.new_kdf_params,
+        req.new_wrapped_ak,
+        hash_token(&req.new_recovery_auth_key),
+        req.new_recovery_wrapped_ak,
+        account.id,
+        account.recovery_auth_hash
+    )
+    .execute(&mut *tx)
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(AppError::Unauthorized);
+    }
+
+    let revoked_sessions = sqlx::query_scalar!(
+        r#"
+        UPDATE web_sessions
+        SET revoked_at = now()
+        WHERE user_id = $1 AND revoked_at IS NULL
+        RETURNING session_hash
+        "#,
+        account.id
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    // Tombstones, not removals; see `revoke_session`.
+    let revoked_at = std::time::Instant::now();
+    for session_hash in revoked_sessions {
+        write_web_session_cache_entry(&state.web_session_cache, session_hash, revoked_at, None);
+    }
+
+    crate::audit::log(&state, Some(account.id), None, "password_recovered").await;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Serialize)]

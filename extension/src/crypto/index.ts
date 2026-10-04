@@ -382,3 +382,120 @@ export async function decryptPayload(
   const key = await getSdek(akB64, envelope.keyVersion);
   return decryptWithSdek(envelope, key, aad);
 }
+
+// --- Login with device (docs/encryption.md §9.2) ---------------------------
+// A new browser asks to join without the password; a connected extension
+// approves by encrypting the account key to the request's one-time ECDH
+// P-256 public key (WebCrypto), with a key derived by HKDF and the same
+// XChaCha20-Poly1305 used everywhere else. The server only relays it.
+
+const AUTH_REQUEST_LABEL = "helixsync-auth-request-v1";
+const ECDH_P256 = { name: "ECDH", namedCurve: "P-256" } as const;
+
+/** A requester's one-time key pair. The private key is a JWK so the popup
+ * can park it in chrome.storage.session while it waits: Chrome destroys the
+ * popup whenever it loses focus. */
+export interface AuthRequestKeyPair {
+  publicKey: string;
+  privateKeyJwk: JsonWebKey;
+}
+
+export async function generateAuthRequestKeyPair(): Promise<AuthRequestKeyPair> {
+  const keyPair = await crypto.subtle.generateKey(ECDH_P256, true, ["deriveBits"]);
+  return {
+    publicKey: toB64(new Uint8Array(await crypto.subtle.exportKey("raw", keyPair.publicKey))),
+    privateKeyJwk: await crypto.subtle.exportKey("jwk", keyPair.privateKey),
+  };
+}
+
+// Crockford base32, as in the dashboard's recovery codes: no I, L, O or U.
+const CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/** The phrase both sides of a request show, so the user can tell their own
+ * request from someone else's, or from a key a hostile server swapped in:
+ * SHA-256 of a fixed label and the requester's public key, first 80 bits,
+ * as `XXXX-XXXX-XXXX-XXXX`. Mirrors web/src/crypto/index.ts. */
+export async function authRequestFingerprint(publicKeyB64: string): Promise<string> {
+  const label = sharedTextEncoder.encode(AUTH_REQUEST_LABEL);
+  const publicKey = fromB64(publicKeyB64);
+  const input = new Uint8Array(label.length + publicKey.length);
+  input.set(label);
+  input.set(publicKey, label.length);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
+  let bits = 0;
+  let value = 0;
+  let text = "";
+  for (const byte of digest.subarray(0, 10)) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      text += CROCKFORD_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  return text.match(/.{4}/g)!.join("-");
+}
+
+async function authRequestKey(privateKey: CryptoKey, peerPublicKeyB64: string): Promise<Uint8Array> {
+  const peer = await crypto.subtle.importKey(
+    "raw",
+    fromB64(peerPublicKeyB64).buffer as ArrayBuffer,
+    ECDH_P256,
+    false,
+    [],
+  );
+  const shared = await crypto.subtle.deriveBits({ name: "ECDH", public: peer }, privateKey, 256);
+  return hkdfSha256(new Uint8Array(shared), AUTH_REQUEST_LABEL);
+}
+
+interface AuthRequestKeyEnvelope {
+  v: 1;
+  alg: "xchacha20poly1305";
+  nonce: string;
+  ciphertext: string;
+}
+
+/** Approver side: encrypts the account key to a new browser's request. The
+ * request id is the associated data, so the server can't hand this
+ * ciphertext to a different request. */
+export async function encryptAccountKeyForRequest(
+  accountKeyB64: string,
+  requesterPublicKeyB64: string,
+  requestId: string,
+): Promise<{ encryptedAccountKey: string; approverPublicKey: string }> {
+  const approver = await crypto.subtle.generateKey(ECDH_P256, false, ["deriveBits"]);
+  const key = await authRequestKey(approver.privateKey, requesterPublicKeyB64);
+  const nonce = randomBytes(24);
+  const ciphertext = xchacha20poly1305(key, nonce, sharedTextEncoder.encode(requestId)).encrypt(
+    fromB64(accountKeyB64),
+  );
+  const envelope: AuthRequestKeyEnvelope = {
+    v: 1,
+    alg: "xchacha20poly1305",
+    nonce: toB64(nonce),
+    ciphertext: toB64(ciphertext),
+  };
+  return {
+    encryptedAccountKey: JSON.stringify(envelope),
+    approverPublicKey: toB64(new Uint8Array(await crypto.subtle.exportKey("raw", approver.publicKey))),
+  };
+}
+
+/** Requester side: recovers the account key from an approval. Throws if the
+ * ciphertext, the approver's key or the request id doesn't match. */
+export async function decryptAccountKeyFromApproval(
+  privateKeyJwk: JsonWebKey,
+  approverPublicKeyB64: string,
+  encryptedAccountKey: string,
+  requestId: string,
+): Promise<Uint8Array> {
+  const privateKey = await crypto.subtle.importKey("jwk", privateKeyJwk, ECDH_P256, false, ["deriveBits"]);
+  const key = await authRequestKey(privateKey, approverPublicKeyB64);
+  const envelope = JSON.parse(encryptedAccountKey) as AuthRequestKeyEnvelope;
+  if (envelope.v !== 1 || envelope.alg !== "xchacha20poly1305") {
+    throw new Error("unsupported encrypted account key");
+  }
+  return xchacha20poly1305(key, fromB64(envelope.nonce), sharedTextEncoder.encode(requestId)).decrypt(
+    fromB64(envelope.ciphertext),
+  );
+}

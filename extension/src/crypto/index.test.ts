@@ -3,6 +3,10 @@ import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import {
   activeB64ImplForTesting,
   assertSupportedEnvelopeVersion,
+  authRequestFingerprint,
+  decryptAccountKeyFromApproval,
+  encryptAccountKeyForRequest,
+  generateAuthRequestKeyPair,
   buildOperationAad,
   DEFAULT_KDF_PARAMS,
   decryptPayload,
@@ -503,5 +507,66 @@ describe("native base64 self-check dispatch", () => {
     expect(standard.endsWith("=")).toBe(true); // sanity: this input does pad
     expect(fromB64(unpadded)).toEqual(bytes);
     expect(fromB64(standard)).toEqual(bytes);
+  });
+});
+
+describe("login with device (docs/encryption.md §9.2)", () => {
+  const REQUEST_ID = "0b6c4f4e-6a3c-4c39-9a51-0f5b4b1e2d77";
+
+  it("hands the account key from the approver to the requester", async () => {
+    const requester = await generateAuthRequestKeyPair();
+    const accountKey = generateAccountKey();
+
+    const approval = await encryptAccountKeyForRequest(toB64(accountKey), requester.publicKey, REQUEST_ID);
+    expect(JSON.stringify(approval)).not.toContain(toB64(accountKey));
+
+    const received = await decryptAccountKeyFromApproval(
+      requester.privateKeyJwk,
+      approval.approverPublicKey,
+      approval.encryptedAccountKey,
+      REQUEST_ID,
+    );
+    expect(received).toEqual(accountKey);
+  });
+
+  it("refuses a ciphertext moved to another request", async () => {
+    const requester = await generateAuthRequestKeyPair();
+    const approval = await encryptAccountKeyForRequest(toB64(generateAccountKey()), requester.publicKey, REQUEST_ID);
+
+    await expect(
+      decryptAccountKeyFromApproval(
+        requester.privateKeyJwk,
+        approval.approverPublicKey,
+        approval.encryptedAccountKey,
+        "another-request-id",
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("refuses an approval encrypted to someone else's key, or with a swapped approver key", async () => {
+    const requester = await generateAuthRequestKeyPair();
+    const attacker = await generateAuthRequestKeyPair();
+    const approval = await encryptAccountKeyForRequest(toB64(generateAccountKey()), requester.publicKey, REQUEST_ID);
+
+    await expect(
+      decryptAccountKeyFromApproval(attacker.privateKeyJwk, approval.approverPublicKey, approval.encryptedAccountKey, REQUEST_ID),
+    ).rejects.toThrow();
+    await expect(
+      decryptAccountKeyFromApproval(requester.privateKeyJwk, attacker.publicKey, approval.encryptedAccountKey, REQUEST_ID),
+    ).rejects.toThrow();
+  });
+
+  it("derives the same fingerprint as the dashboard", async () => {
+    // 0x04 followed by bytes 1..64; web/src/crypto/index.test.ts pins the same answer.
+    const knownPublicKey = toB64(Uint8Array.from({ length: 65 }, (_, i) => (i === 0 ? 4 : i)));
+    expect(await authRequestFingerprint(knownPublicKey)).toBe("CX9R-59WY-AVWD-TVDM");
+  });
+
+  it("gives every key pair its own fingerprint", async () => {
+    const a = await generateAuthRequestKeyPair();
+    const b = await generateAuthRequestKeyPair();
+    expect(fromB64(a.publicKey)).toHaveLength(65);
+    expect(await authRequestFingerprint(a.publicKey)).toMatch(/^([0-9A-HJKMNP-TV-Z]{4}-){3}[0-9A-HJKMNP-TV-Z]{4}$/);
+    expect(await authRequestFingerprint(a.publicKey)).not.toBe(await authRequestFingerprint(b.publicKey));
   });
 });

@@ -6,8 +6,11 @@ import {
   deriveAuthKey,
   deriveKek,
   deriveMasterKey,
+  deriveRecoveryKeys,
   generateAccountKey,
   generateKdfSalt,
+  generateRecoveryCode,
+  parseRecoveryCode,
   unwrapAccountKey,
   wrapAccountKey,
   type KdfParams,
@@ -107,20 +110,115 @@ export async function login(email: string, password: string): Promise<AuthRespon
   return { user: result.user, csrfToken: result.csrfToken };
 }
 
-export async function register(email: string, password: string): Promise<AuthResponse> {
+/** A fresh recovery code and what the server stores for it: the hash input
+ * `recoveryAuthKey`, and `accountKey` wrapped under the code's KEK
+ * (docs/encryption.md §9.1). */
+async function newRecoveryCode(
+  accountKey: Uint8Array,
+): Promise<{ code: string; recoveryAuthKey: string; recoveryWrappedAk: string }> {
+  const code = generateRecoveryCode();
+  const { authKey, kek } = await deriveRecoveryKeys(parseRecoveryCode(code));
+  return { code, recoveryAuthKey: authKey, recoveryWrappedAk: wrapAccountKey(kek, accountKey) };
+}
+
+export interface RegisterResponse extends AuthResponse {
+  /** Shown to the user once; the server keeps only a hash of what it
+   * derives. */
+  recoveryCode: string;
+}
+
+export async function register(email: string, password: string): Promise<RegisterResponse> {
   const kdfSalt = generateKdfSalt();
   const kdfParams = DEFAULT_KDF_PARAMS;
   const masterKey = await deriveMasterKey(password, kdfSalt, kdfParams);
   const authKey = await deriveAuthKey(masterKey);
   const kek = await deriveKek(masterKey);
-  const wrappedAk = wrapAccountKey(kek, generateAccountKey());
+  const accountKey = generateAccountKey();
+  const wrappedAk = wrapAccountKey(kek, accountKey);
+  const recovery = await newRecoveryCode(accountKey);
 
   const result = await request<WireAuthResponse>("/api/v1/auth/register", {
     method: "POST",
-    body: JSON.stringify({ email, authKey, kdfSalt, kdfParams, wrappedAk }),
+    body: JSON.stringify({
+      email,
+      authKey,
+      kdfSalt,
+      kdfParams,
+      wrappedAk,
+      recoveryAuthKey: recovery.recoveryAuthKey,
+      recoveryWrappedAk: recovery.recoveryWrappedAk,
+    }),
   });
   setCsrfToken(result.csrfToken);
-  return { user: result.user, csrfToken: result.csrfToken };
+  return { user: result.user, csrfToken: result.csrfToken, recoveryCode: recovery.code };
+}
+
+/** Resets a forgotten password with the recovery code (docs/encryption.md
+ * §9.1): unwraps the account key with the code, wraps it under the new
+ * password and under a new recovery code, and returns that new code (each
+ * code works once). Every web session ends; sign in again afterwards. */
+export async function recoverAccount(email: string, recoveryCode: string, newPassword: string): Promise<string> {
+  const { authKey: recoveryAuthKey, kek: recoveryKek } = await deriveRecoveryKeys(parseRecoveryCode(recoveryCode));
+
+  const prepared = await request<{ recoveryWrappedAk: string }>("/api/v1/auth/recover/prepare", {
+    method: "POST",
+    body: JSON.stringify({ email, recoveryAuthKey }),
+  });
+  const accountKey = unwrapAccountKey(recoveryKek, prepared.recoveryWrappedAk);
+
+  const newKdfSalt = generateKdfSalt();
+  const newKdfParams = DEFAULT_KDF_PARAMS;
+  const newMasterKey = await deriveMasterKey(newPassword, newKdfSalt, newKdfParams);
+  const newAuthKey = await deriveAuthKey(newMasterKey);
+  const newWrappedAk = wrapAccountKey(await deriveKek(newMasterKey), accountKey);
+  const next = await newRecoveryCode(accountKey);
+
+  await request("/api/v1/auth/recover/complete", {
+    method: "POST",
+    body: JSON.stringify({
+      email,
+      recoveryAuthKey,
+      newAuthKey,
+      newKdfSalt,
+      newKdfParams,
+      newWrappedAk,
+      newRecoveryAuthKey: next.recoveryAuthKey,
+      newRecoveryWrappedAk: next.recoveryWrappedAk,
+    }),
+  });
+  return next.code;
+}
+
+export interface AuthRequestCreated {
+  id: string;
+  secret: string;
+  expiresAt: string;
+}
+
+/** Asks to sign in to the dashboard without the password, approved from a
+ * connected HelixSync extension (docs/protocol.md §7.4). `publicKey` comes
+ * from `generateAuthRequestPublicKey`; both sides show its fingerprint. */
+export async function createAuthRequest(email: string, publicKey: string): Promise<AuthRequestCreated> {
+  return request("/api/v1/auth/requests", {
+    method: "POST",
+    body: JSON.stringify({ email, kind: "web", publicKey }),
+  });
+}
+
+export type AuthRequestPoll = { status: "pending" | "denied" | "expired" } | { status: "approved"; user: UserPublic };
+
+/** Checks on a request from `createAuthRequest`. An approval starts the web
+ * session (cookies set by the response) and is handed out once. */
+export async function pollAuthRequest(id: string, secret: string): Promise<AuthRequestPoll> {
+  const result = await request<{ status: AuthRequestPoll["status"] } & Partial<WireAuthResponse>>(
+    `/api/v1/auth/requests/${encodeURIComponent(id)}/poll`,
+    { method: "POST", body: JSON.stringify({ secret }) },
+  );
+  if (result.status === "approved") {
+    setCsrfToken(result.csrfToken!);
+    return { status: "approved", user: result.user! };
+  }
+  return { status: result.status };
 }
 
 export async function logout(): Promise<void> {
@@ -254,6 +352,33 @@ export async function changePassword(currentPassword: string, newPassword: strin
     method: "POST",
     body: JSON.stringify({ currentAuthKey, newAuthKey, newKdfSalt, newKdfParams, newWrappedAk }),
   });
+}
+
+/** Replaces the recovery code (docs/encryption.md §9.1) and returns the new
+ * one. Needs the current password, both to unwrap the account key for the
+ * new wrap and because the server checks it: a session alone can't swap the
+ * code. The old code stops working. */
+export async function regenerateRecoveryCode(currentPassword: string): Promise<string> {
+  const current = await currentKeyMaterial();
+  const masterKey = await deriveMasterKey(currentPassword, current.kdfSalt, current.kdfParams);
+  const currentAuthKey = await deriveAuthKey(masterKey);
+  let accountKey: Uint8Array;
+  try {
+    accountKey = unwrapAccountKey(await deriveKek(masterKey), current.wrappedAk);
+  } catch {
+    throw new ApiError("current password is incorrect", 401, "unauthorized");
+  }
+  const next = await newRecoveryCode(accountKey);
+
+  await request("/api/v1/auth/recovery-code", {
+    method: "PATCH",
+    body: JSON.stringify({
+      currentAuthKey,
+      recoveryAuthKey: next.recoveryAuthKey,
+      recoveryWrappedAk: next.recoveryWrappedAk,
+    }),
+  });
+  return next.code;
 }
 
 /** Permanently deletes the signed-in account and everything stored under it

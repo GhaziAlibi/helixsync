@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE auth_requests\n        SET status = $1, responded_by_device_id = $2, responded_at = now(),\n            encrypted_account_key = $3, approver_public_key = $4\n        WHERE id = $5 AND user_id = $6 AND status = 'pending' AND expires_at > now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2fc29e6fe80d51d9059a3c7d0b602a2437b8a16ba56f1b43268f8a3d9a7f0ddb"
+}

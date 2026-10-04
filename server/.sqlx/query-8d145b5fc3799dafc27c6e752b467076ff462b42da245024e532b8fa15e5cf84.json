@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE users\n        SET recovery_auth_hash = $1, recovery_wrapped_account_key = $2, updated_at = now()\n        WHERE id = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8d145b5fc3799dafc27c6e752b467076ff462b42da245024e532b8fa15e5cf84"
+}

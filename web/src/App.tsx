@@ -3,6 +3,7 @@ import { AuthProvider } from "./auth/context";
 import ProtectedRoute from "./components/ProtectedRoute";
 import Layout from "./components/Layout";
 import Login from "./pages/Login";
+import Recover from "./pages/Recover";
 import Dashboard from "./pages/Dashboard";
 import Devices from "./pages/Devices";
 import Sync from "./pages/Sync";
@@ -14,6 +15,7 @@ export default function App() {
       <AuthProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
+          <Route path="/recover" element={<Recover />} />
           <Route
             element={
               <ProtectedRoute>

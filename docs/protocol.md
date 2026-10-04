@@ -277,11 +277,12 @@ state rather than being silently dropped (never silently discard).
    the credentials in IndexedDB (never uploaded, never in payload logs).
 ```
 
-There is no separate device key-upload step and no per-device authorization
+There is no separate device key-upload step and no required authorization
 by another device: `kdfSalt`/`kdfParams`/`wrappedAccountKey` are the same
 for every device on the account, so any device that successfully
 authenticates unwraps the same account key independently
-(docs/encryption.md §2-3).
+(docs/encryption.md §2-3). A device without the password can instead be
+approved by a connected one (§7.4).
 
 All subsequent sync/API/WebSocket calls from the extension use
 `Authorization: Bearer <deviceAccessToken>`, never the web session cookie.
@@ -346,6 +347,107 @@ All of the account's devices, credentials, operations, snapshots, objects,
 tombstones, settings and sessions are deleted, and the account's session and
 device tokens stop working immediately; WebSocket connections are closed. The
 `account_deleted` audit event is kept with its user reference nulled.
+
+The operator can delete an account without its password from the server's
+command line (`helixsync-server delete-account <email>`, docs/encryption.md
+§9.3), for an owner who lost both the password and the recovery code.
+
+### 7.4 Login with device
+
+A dashboard or a new extension signs in without the password, approved by an
+extension that is already connected to the account (docs/encryption.md §9.2).
+
+```http
+POST /api/v1/auth/requests
+Content-Type: application/json
+
+{ "email": "...", "kind": "web" | "device", "publicKey": "<raw P-256 point, base64url>",
+  "deviceName": "<kind = device only>" }
+```
+
+`200` with `{ id, secret, expiresAt }`. Requests expire after 15 minutes. An
+unknown email gets the same response with nothing stored. `publicKey` must be
+an uncompressed P-256 point (65 bytes starting `0x04`); `deviceName` is
+required for `device` and follows the device-name rules. `400` on either,
+`429` past 10 per minute per IP or 3 per 10 minutes per email. The server
+pushes `{"type":"auth_request"}` to the account's WebSockets (§12).
+
+```http
+GET /api/v1/devices/auth-requests
+Authorization: Bearer <deviceAccessToken>
+```
+
+The account's unanswered, unexpired requests:
+`[{ id, kind, publicKey, deviceName, requestIp, userAgent, createdAt, expiresAt }]`.
+
+```http
+POST /api/v1/devices/auth-requests/{id}/respond
+Authorization: Bearer <deviceAccessToken>
+Content-Type: application/json
+
+{ "approve": true, "encryptedAccountKey": "...", "approverPublicKey": "..." }
+```
+
+Approving a `device` request requires both key fields; a `web` approval and
+any denial must leave them out (`400` otherwise). `404` once the request is
+answered, expired, or belongs to another account. Every answer also pushes
+`{"type":"auth_request"}`, so the account's other extensions drop it.
+
+```http
+POST /api/v1/auth/requests/{id}/poll
+Content-Type: application/json
+
+{ "secret": "...", "browser": "...", "extensionVersion": "..." }
+```
+
+`{ "status": "pending" | "denied" | "expired" }`, where an unknown id or a
+wrong secret also reads `pending`. An approval is handed out once (afterwards
+`expired`):
+
+- `web`: sets the session and CSRF cookies and returns the login response
+  (`user`, `csrfToken`, ...) with `"status": "approved"`.
+- `device`: registers the device under the requested name (the optional
+  `browser`/`browserVersion`/`platform`/`extensionVersion` fill in its row)
+  and returns `{ status, deviceId, accessToken, refreshToken,
+  accessTokenExpiresAt, apiVersion, protocolVersion,
+  minimumSupportedProtocolVersion, encryptedAccountKey, approverPublicKey,
+  accountKeyVersion }`. At the device cap this is `409 device_limit_reached`
+  and the approval stays collectable until the request expires.
+
+`429` past 120 polls per minute per IP.
+
+### 7.5 Password recovery
+
+Resetting a forgotten password with the recovery code (docs/encryption.md
+§9.1). Both steps are unauthenticated and limited to 10 per minute per IP
+and per email.
+
+```http
+POST /api/v1/auth/recover/prepare
+{ "email": "...", "recoveryAuthKey": "<base64url, 32 bytes>" }
+```
+
+`200 { recoveryWrappedAk }`; `401` for an unknown email or a wrong code alike.
+
+```http
+POST /api/v1/auth/recover/complete
+{ "email": "...", "recoveryAuthKey": "...", "newAuthKey": "...", "newKdfSalt": "...",
+  "newKdfParams": {...}, "newWrappedAk": "...", "newRecoveryAuthKey": "...",
+  "newRecoveryWrappedAk": "..." }
+```
+
+`204` after swapping in the new password and the new recovery code and
+revoking every web session; `401` for a wrong or already-used code. Device
+credentials are unaffected.
+
+```http
+PATCH /api/v1/auth/recovery-code
+Cookie + X-CSRF-Token, as in §7.3
+{ "currentAuthKey": "...", "recoveryAuthKey": "...", "recoveryWrappedAk": "..." }
+```
+
+Replaces the recovery code from a signed-in dashboard; `401` for a wrong
+`currentAuthKey`, `429` past 5 per minute per account.
 
 ---
 
@@ -814,7 +916,15 @@ sync payloads itself.
 { "type": "changes_available", "cursor": 1847 }
 ```
 
-On receipt, the client calls the normal download API (§10.1). If the
+On receipt, the client calls the normal download API (§10.1).
+
+```json
+{ "type": "auth_request" }
+```
+
+The account's login-with-device requests changed: one was created, or a
+device answered one (§7.4). Extensions re-fetch
+`GET /api/v1/devices/auth-requests`, and also check on every periodic sync. If the
 WebSocket is unavailable or disconnects, the client falls back to periodic
 polling of §10.1 — synchronization correctness never depends on WebSocket
 delivery. Authentication uses the device access token (query-string tokens

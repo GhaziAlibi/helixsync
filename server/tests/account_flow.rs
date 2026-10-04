@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use axum_test::{TestServer, TestServerConfig, Transport};
+use helixsync_server::auth::account::delete_user_by_email;
 use helixsync_server::auth::extractors::{CSRF_COOKIE_NAME, SESSION_COOKIE_NAME};
 use helixsync_server::config::Config;
 use helixsync_server::middleware::rate_limit::{RateLimiter, ACCOUNT_DELETE_LIMIT, REGISTER_LIMIT};
@@ -92,6 +93,8 @@ fn register_json(email: &str, password_seed: &str) -> serde_json::Value {
         "kdfSalt": common::test_kdf_salt(),
         "kdfParams": common::test_kdf_params(),
         "wrappedAk": common::test_wrapped_ak(),
+        "recoveryAuthKey": common::test_recovery_auth_key(),
+        "recoveryWrappedAk": common::test_recovery_wrapped_ak(),
     })
 }
 
@@ -279,6 +282,8 @@ async fn disabled_registration_is_refused_before_validation_and_hashing(pool: Pg
             "kdfSalt": "x",
             "kdfParams": {},
             "wrappedAk": "x",
+            "recoveryAuthKey": "x",
+            "recoveryWrappedAk": "x",
         }))
         .await;
     res.assert_status(StatusCode::FORBIDDEN);
@@ -859,4 +864,50 @@ async fn delete_account_attempts_are_rate_limited(pool: PgPool) {
         .await
         .assert_status_ok();
     assert_eq!(count_users(&pool).await, 1);
+}
+
+// --- Operator delete (`helixsync-server delete-account <email>`) ---
+
+#[sqlx::test(migrations = "./migrations")]
+async fn operator_delete_removes_the_account_and_frees_the_email(pool: PgPool) {
+    let state = state_for(pool.clone(), test_config());
+    let server = browser(&state);
+    register(&server, "forgotten@example.com").await;
+    let device = register_device(&server, "forgotten@example.com", "Laptop").await;
+    upload_one_op(&server, &device.access_token).await;
+    let user_id = user_id_for(&pool, "forgotten@example.com").await;
+
+    // Looked up like every other email: trimmed and lowercased.
+    let deleted = delete_user_by_email(&pool, "  Forgotten@Example.com ")
+        .await
+        .unwrap()
+        .expect("the account exists");
+
+    assert_eq!(deleted.device_ids, vec![device.device_id]);
+    assert_eq!(deleted.session_hashes.len(), 1);
+    assert!(
+        rows_owned_by(&pool, user_id)
+            .await
+            .iter()
+            .all(|(_, n)| *n == 0),
+        "{:?}",
+        rows_owned_by(&pool, user_id).await
+    );
+    assert_eq!(audit_count(&pool, "account_deleted_by_operator").await, 1);
+
+    // The owner can start over with the same email.
+    register(&browser(&state), "forgotten@example.com").await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn operator_delete_of_an_unknown_email_deletes_nothing(pool: PgPool) {
+    let state = state_for(pool.clone(), test_config());
+    register(&browser(&state), "someone@example.com").await;
+
+    assert!(delete_user_by_email(&pool, "nobody@example.com")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(count_users(&pool).await, 1);
+    assert_eq!(audit_count(&pool, "account_deleted_by_operator").await, 0);
 }

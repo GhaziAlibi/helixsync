@@ -11,6 +11,7 @@ import { getDevice } from "../storage/db";
 import { fetchSettings, invalidateSettingsCache, refreshAccessToken } from "./client";
 
 type ChangesAvailableHandler = () => void;
+type AuthRequestHandler = () => void;
 
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 60_000;
@@ -36,6 +37,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
 let reconnectBlockedUntil = 0;
 let changesHandler: ChangesAvailableHandler | undefined;
+let authRequestHandler: AuthRequestHandler | undefined;
 let disconnectRequested = false;
 
 const RECONNECT_DELAY_STORAGE_KEY = "reconnectDelayMs";
@@ -78,6 +80,12 @@ function setReconnectBlockedUntil(value: number): Promise<void> {
 
 export function onChangesAvailable(handler: ChangesAvailableHandler): void {
   changesHandler = handler;
+}
+
+/** Called when the account's login-with-device requests changed: one was
+ * created, or another extension answered one (docs/protocol.md §12). */
+export function onAuthRequest(handler: AuthRequestHandler): void {
+  authRequestHandler = handler;
 }
 
 function wsUrlFor(serverUrl: string): string {
@@ -191,6 +199,8 @@ async function connect(): Promise<void> {
       receivedConnected = true;
     } else if (type === "changes_available") {
       changesHandler?.();
+    } else if (type === "auth_request") {
+      authRequestHandler?.();
     } else if (type === "auth_error") {
       // The token is likely stale. fetchSettings would be served from its
       // cache and never hit the 401 -> refresh path, so clear the cache

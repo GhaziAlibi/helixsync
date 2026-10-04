@@ -464,6 +464,58 @@ pub const DEVICE_REGISTER_EMAIL_LIMIT: RateLimitConfig = RateLimitConfig {
     window: Duration::from_secs(60),
     partition: RateLimitPartition::Untrusted,
 };
+// Password recovery with the recovery code (`/auth/recover/*`). Same shape
+// as LOGIN_LIMIT/LOGIN_EMAIL_LIMIT; one recovery is two calls (prepare and
+// complete), both counted.
+pub const RECOVER_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "recover",
+    limit: 10,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Untrusted,
+};
+pub const RECOVER_EMAIL_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "recover_email",
+    limit: 10,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Untrusted,
+};
+// Regenerating the recovery code re-verifies the password hash (Argon2).
+// Keyed by user id, like ACCOUNT_DELETE_LIMIT.
+pub const RECOVERY_CODE_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "recovery_code",
+    limit: 5,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
+// Creating a login-with-device request. The per-email bucket also caps how
+// many approval prompts anyone can push to an account's extensions.
+pub const AUTH_REQUEST_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "auth_request",
+    limit: 10,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Untrusted,
+};
+pub const AUTH_REQUEST_EMAIL_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "auth_request_email",
+    limit: 3,
+    window: Duration::from_secs(10 * 60),
+    partition: RateLimitPartition::Untrusted,
+};
+// A waiting requester polls every few seconds for up to 15 minutes; several
+// can share one IP.
+pub const AUTH_REQUEST_POLL_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "auth_request_poll",
+    limit: 120,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Untrusted,
+};
+// Listing and answering requests from a connected extension, by device id.
+pub const AUTH_REQUEST_DEVICE_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "auth_request_device",
+    limit: 60,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
 pub const SYNC_UPLOAD_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "sync_upload",
     limit: 600,

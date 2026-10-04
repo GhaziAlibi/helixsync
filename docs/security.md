@@ -168,7 +168,9 @@ Configurable limits (see `docs/deployment.md` for env vars) cover:
 
 ```text
 login, registration, token refresh, device registration,
-account deletion, sync upload, sync download, WebSocket connection attempts
+account deletion, password recovery, recovery-code regeneration,
+login-with-device requests and polling, sync upload, sync download,
+WebSocket connection attempts
 ```
 
 Per-client limits key on the client IP as nginx reports it
@@ -176,7 +178,11 @@ Per-client limits key on the client IP as nginx reports it
 limits (login, prelogin, device registration by email) additionally throttle
 guessing spread across many IPs. Account deletion is limited to 5 attempts a
 minute per account and is keyed by account, not by the login buckets, so
-failed deletes can't lock the owner out of signing in.
+failed deletes can't lock the owner out of signing in. Password recovery
+(`/auth/recover/*`) has its own per-IP and per-email buckets of 10 a minute.
+Creating a login-with-device request is limited to 3 per 10 minutes per
+email, which also caps how many approval prompts anyone can push to an
+account's extensions.
 
 Sync upload/download limits are set high enough to accommodate normal
 bursty browser activity (e.g. importing many bookmarks) without making
@@ -199,8 +205,12 @@ per-minute cap tuned for login-sized traffic.
 - `audit_logs` records security-relevant events: login, logout, password
   change, device registration, device revocation (`device_revoked`,
   `device_self_revoked`, `refresh_token_reuse_detected`), credential rotation,
-  account deletion (`account_deleted`, `account_delete_failed`), settings
-  changes. Rows reference the account and device with `ON DELETE SET NULL`,
+  account deletion (`account_deleted`, `account_delete_failed`,
+  `account_deleted_by_operator`), password recovery (`password_recovered`,
+  `password_recovery_failed`, `recovery_code_regenerated`,
+  `recovery_code_regenerate_failed`), login with device
+  (`auth_request_created`, `auth_request_approved`, `auth_request_denied`,
+  `login_with_device_succeeded`), settings changes. Rows reference the account and device with `ON DELETE SET NULL`,
   so the trail survives an account's deletion with the identifiers removed.
 - No secrets (passwords, tokens, key material, decrypted payloads) are ever
   written to logs. Structured logging (`tracing`) uses explicit field
@@ -274,9 +284,17 @@ discover them:
   non-extractable key (§13), so reading the profile's files directly does not
   reveal them. Code running inside the extension, or someone using the unlocked
   browser, can still use them; there is no OS keychain to do better.
-- **There is no password recovery.** The account key exists only wrapped under
-  a key derived from the password, which the server never sees
-  (`docs/encryption.md` §5).
+- **The recovery code is as powerful as the password.** Anyone with the code
+  and the email can set a new password and decrypt the account's data
+  (`docs/encryption.md` §9.1). Each code works once and can be replaced from
+  the Security page, but nothing can stop its holder before that. Without
+  the password or the code, an account's data can't be recovered by anyone;
+  the operator can only delete it (§11).
+- **Login with device relies on the user comparing the phrase.** Approving a
+  new browser hands it the account key. The fingerprint phrase is what stops a
+  hostile server from approving its own key, or a stranger from getting a
+  look-alike request approved (`docs/encryption.md` §9.2); an approval given
+  without comparing it gives that protection up.
 - **Per-account rate limits can be used to lock out a specific account.**
   More than ten login attempts a minute against one email, from anyone, get
   that email's logins throttled for a while. The alternative (no per-account limit) lets
@@ -319,6 +337,45 @@ last-seen state. Both cookies are cleared in the response. The old session
 cookie and every device token stop working immediately, not after the
 30-second cache window. Backups taken earlier still contain the data until they
 are rotated out; see `docs/deployment.md`.
+
+### Password recovery
+
+`POST /auth/recover/prepare` and `/auth/recover/complete` reset a forgotten
+password with the recovery code (`docs/encryption.md` §9.1). The server
+stores only the SHA-256 of the code's `recoveryAuthKey` and compares in
+constant time; an unknown email and a wrong code get the same `401`, and a
+failure on a real account is audited as `password_recovery_failed`. A
+completed reset swaps the password fields and the recovery code in one
+transaction, matching on the old code's hash so a code can't be used twice,
+revokes every web session, and is audited as `password_recovered`. Device
+credentials keep working, as after a password change.
+
+`PATCH /auth/recovery-code` replaces the code from a signed-in dashboard and
+needs the current `authKey` as well as the session and CSRF token, like
+account deletion.
+
+### Login with device
+
+`POST /auth/requests` and `/auth/requests/{id}/poll` let a dashboard or a
+new extension sign in once a connected extension approves
+(`docs/encryption.md` §9.2). The requester's secret is stored only as a
+SHA-256 hash; a wrong secret reads as `pending`, never as an error, and an
+unknown email gets a normal-looking request that is never stored. Only an
+active device of the same account can list or answer a request. An approval
+is collected once, in a transaction that also registers the device, so
+hitting the device cap leaves it collectable. A dashboard approval carries no
+key material. Expired requests are deleted by housekeeping.
+
+### Operator account delete
+
+`helixsync-server delete-account <email>`, run on the server host, deletes an
+account without its password: the way back for an owner who lost both the
+password and the recovery code. It asks for confirmation, uses the same
+transaction as `DELETE /auth/account`, and records
+`account_deleted_by_operator`. The server sends no email, so the operator
+must check who's asking before running it. As a separate process it can't
+purge the running server's caches, so the account's sessions and device
+tokens keep working for up to 30 seconds afterwards.
 
 ### Device self-revocation
 

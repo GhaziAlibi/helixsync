@@ -5,7 +5,10 @@ interface AuthState {
   user: api.UserPublic | null;
   loading: boolean;
   login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string) => Promise<void>;
+  /** Resolves to the new account's recovery code, to show once. */
+  register: (email: string, password: string) => Promise<string>;
+  /** One poll of a login-with-device request; signs in on approval. */
+  pollDeviceLogin: (id: string, secret: string) => Promise<api.AuthRequestPoll>;
   logout: () => Promise<void>;
   deleteAccount: (password: string) => Promise<void>;
 }
@@ -42,6 +45,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const register = useCallback(async (email: string, password: string) => {
     const result = await api.register(email, password);
     setUser(result.user);
+    return result.recoveryCode;
+  }, []);
+
+  const pollDeviceLogin = useCallback(async (id: string, secret: string) => {
+    const result = await api.pollAuthRequest(id, secret);
+    if (result.status === "approved") setUser(result.user);
+    return result;
   }, []);
 
   const logout = useCallback(async () => {
@@ -55,8 +65,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ user, loading, login, register, logout, deleteAccount }),
-    [user, loading, login, register, logout, deleteAccount],
+    () => ({ user, loading, login, register, pollDeviceLogin, logout, deleteAccount }),
+    [user, loading, login, register, pollDeviceLogin, logout, deleteAccount],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

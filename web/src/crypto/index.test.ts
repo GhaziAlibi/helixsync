@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_KDF_PARAMS,
+  authRequestFingerprint,
   deriveAuthKey,
   deriveKek,
   deriveMasterKey,
+  deriveRecoveryKeys,
   fromB64,
   generateAccountKey,
+  generateAuthRequestPublicKey,
   generateKdfSalt,
+  generateRecoveryCode,
+  parseRecoveryCode,
   toB64,
   unwrapAccountKey,
   wrapAccountKey,
@@ -150,4 +155,62 @@ describe("unsafe KDF parameters from the server are rejected (SEC-14)", () => {
   it("accepts the documented floor itself", async () => {
     await expect(deriveMasterKey(PASSWORD, goodSalt, DEFAULT_KDF_PARAMS)).resolves.toHaveLength(32);
   }, 30_000);
+});
+
+describe("recovery code", () => {
+  const CODE_FORMAT = /^([0-9A-HJKMNP-TV-Z]{4}-){7}[0-9A-HJKMNP-TV-Z]{4}$/;
+  // Bytes 0..19 in Crockford base32, pinned so the encoding can't drift.
+  const KNOWN_BYTES = Uint8Array.from({ length: 20 }, (_, i) => i);
+  const KNOWN_CODE = "000G-40R4-0M30-E209-185G-R38E-1W81-24GK";
+
+  it("is 160 random bits as eight groups of four Crockford characters", () => {
+    const code = generateRecoveryCode();
+    expect(code).toMatch(CODE_FORMAT);
+    expect(parseRecoveryCode(code)).toHaveLength(20);
+    expect(generateRecoveryCode()).not.toBe(code);
+  });
+
+  it("round-trips through parsing, byte for byte", () => {
+    expect(parseRecoveryCode(KNOWN_CODE)).toEqual(KNOWN_BYTES);
+  });
+
+  it("forgives case, spacing, dashes and the I/L/O look-alikes", () => {
+    expect(parseRecoveryCode(KNOWN_CODE.toLowerCase())).toEqual(KNOWN_BYTES);
+    expect(parseRecoveryCode(KNOWN_CODE.replace(/-/g, ""))).toEqual(KNOWN_BYTES);
+    expect(parseRecoveryCode(`  ${KNOWN_CODE.replace(/-/g, " ")}  `)).toEqual(KNOWN_BYTES);
+    expect(parseRecoveryCode(KNOWN_CODE.replace(/0/g, "O").replace(/1/g, "l"))).toEqual(KNOWN_BYTES);
+    expect(parseRecoveryCode(KNOWN_CODE.replace(/1/g, "I"))).toEqual(KNOWN_BYTES);
+  });
+
+  it("rejects characters outside the alphabet and the wrong length", () => {
+    expect(() => parseRecoveryCode(KNOWN_CODE.replace("G", "U"))).toThrow();
+    expect(() => parseRecoveryCode(KNOWN_CODE.slice(0, -1))).toThrow("32 characters");
+    expect(() => parseRecoveryCode(`${KNOWN_CODE}0`)).toThrow("32 characters");
+  });
+
+  it("derives a fixed auth key and a distinct KEK that opens the recovery wrap", async () => {
+    const { authKey, kek } = await deriveRecoveryKeys(KNOWN_BYTES);
+    expect(authKey).toBe("WZAAb6DCjUopIPxwNX3kIJ0xYQ4kmWdmYllhtApdFmo");
+    expect(toB64(kek)).not.toBe(authKey);
+    const accountKey = generateAccountKey();
+    expect(unwrapAccountKey(kek, wrapAccountKey(kek, accountKey))).toEqual(accountKey);
+  });
+});
+
+describe("login-with-device fingerprint", () => {
+  // 0x04 followed by bytes 1..64. The extension pins the same answer.
+  const KNOWN_PUBLIC_KEY = "BAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8gISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A";
+
+  it("is a fixed function of the public key", async () => {
+    expect(await authRequestFingerprint(KNOWN_PUBLIC_KEY)).toBe("CX9R-59WY-AVWD-TVDM");
+  });
+
+  it("differs between key pairs", async () => {
+    const a = await generateAuthRequestPublicKey();
+    const b = await generateAuthRequestPublicKey();
+    expect(fromB64(a)).toHaveLength(65);
+    expect(fromB64(a)[0]).toBe(0x04);
+    expect(await authRequestFingerprint(a)).toMatch(/^([0-9A-HJKMNP-TV-Z]{4}-){3}[0-9A-HJKMNP-TV-Z]{4}$/);
+    expect(await authRequestFingerprint(a)).not.toBe(await authRequestFingerprint(b));
+  });
 });

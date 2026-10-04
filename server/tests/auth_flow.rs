@@ -94,6 +94,8 @@ fn register_json(email: &str, password_seed: &str) -> serde_json::Value {
         "kdfSalt": common::test_kdf_salt(),
         "kdfParams": common::test_kdf_params(),
         "wrappedAk": common::test_wrapped_ak(),
+        "recoveryAuthKey": common::test_recovery_auth_key(),
+        "recoveryWrappedAk": common::test_recovery_wrapped_ak(),
     })
 }
 

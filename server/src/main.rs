@@ -1,7 +1,10 @@
+use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use helixsync_server::auth::account::delete_user_by_email;
+use helixsync_server::auth::normalize_email;
 use helixsync_server::config::Config;
 use helixsync_server::middleware::rate_limit::RateLimiter;
 use helixsync_server::state::AppState;
@@ -20,6 +23,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env()?;
+
+    // Operator commands run once against the database and exit, without
+    // starting the server.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.is_empty() {
+        return run_command(&config, &args).await;
+    }
 
     if !config.require_encryption {
         tracing::warn!(
@@ -103,6 +113,43 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+async fn run_command(config: &Config, args: &[String]) -> anyhow::Result<()> {
+    match args {
+        [command, email] if command == "delete-account" => {
+            delete_account_command(config, email).await
+        }
+        _ => anyhow::bail!("usage: helixsync-server [delete-account <email>]"),
+    }
+}
+
+/// `helixsync-server delete-account <email>`: removes an account whose owner
+/// lost both the password and the recovery code, so the email can register
+/// again (docs/security.md §11). The server never sends email, so the
+/// operator is the one who checks who's asking. Asks for confirmation first.
+async fn delete_account_command(config: &Config, email: &str) -> anyhow::Result<()> {
+    let email = normalize_email(email);
+    print!(
+        "Permanently delete the account {email} and all of its synced data? Type \"delete\" to confirm: "
+    );
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if answer.trim() != "delete" {
+        anyhow::bail!("not confirmed, nothing was deleted");
+    }
+
+    let db = database::connect(config).await?;
+    let Some(deleted) = delete_user_by_email(&db, &email).await? else {
+        anyhow::bail!("no account uses {email}");
+    };
+    println!(
+        "Deleted {email}: {} device(s) and {} web session(s) stop working within 30 seconds.",
+        deleted.device_ids.len(),
+        deleted.session_hashes.len()
+    );
     Ok(())
 }
 

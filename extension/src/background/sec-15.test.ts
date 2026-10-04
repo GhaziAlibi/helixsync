@@ -61,12 +61,14 @@ vi.mock("../api/client", () => ({
   fetchTabRestorePolicy: vi.fn(async () => "ask"),
   invalidateSettingsMemory: vi.fn(),
   invalidatePolicyMemory: vi.fn(),
+  listAuthRequests: vi.fn(async () => []),
 }));
 
 vi.mock("../api/websocket", () => ({
   disconnect: vi.fn(),
   ensureConnected: vi.fn(),
   onChangesAvailable: vi.fn(),
+  onAuthRequest: vi.fn(),
 }));
 
 const initialDevice: Record<string, unknown> = {

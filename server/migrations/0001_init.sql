@@ -14,6 +14,12 @@ CREATE TABLE users (
     kdf_salt TEXT NOT NULL,
     kdf_params JSONB NOT NULL,
     wrapped_account_key TEXT NOT NULL,
+    -- The recovery code's copy of the account key (docs/encryption.md §9.1):
+    -- `hash_token` of the code's derived `recoveryAuthKey`, and the account
+    -- key wrapped under the code's derived `recoveryKek`. Both replaced on
+    -- every recovery and every regeneration.
+    recovery_auth_hash TEXT NOT NULL,
+    recovery_wrapped_account_key TEXT NOT NULL,
     account_key_version INT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -240,6 +246,37 @@ CREATE TABLE web_sessions (
 CREATE INDEX idx_web_sessions_user ON web_sessions(user_id);
 CREATE INDEX idx_web_sessions_session_hash ON web_sessions(session_hash);
 CREATE INDEX idx_web_sessions_expires_at ON web_sessions(expires_at);
+
+-- Login with device (docs/protocol.md §7.4): a dashboard or a new browser
+-- asks to sign in without the password, and a connected extension approves.
+CREATE TABLE auth_requests (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('web', 'device')),
+    -- `hash_token` of the secret only the requester holds; polling needs it.
+    secret_hash TEXT NOT NULL,
+    -- The requester's one-time ECDH P-256 public key (raw, base64url). The
+    -- fingerprint phrase both sides show is derived from it.
+    public_key TEXT NOT NULL,
+    -- The name the new browser will register under (`kind = 'device'`).
+    device_name TEXT,
+    request_ip TEXT,
+    user_agent TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'denied')),
+    responded_by_device_id UUID REFERENCES devices(id) ON DELETE SET NULL,
+    responded_at TIMESTAMPTZ,
+    -- `kind = 'device'` approvals only: the account key encrypted to
+    -- `public_key`, and the approver's one-time public key.
+    encrypted_account_key TEXT,
+    approver_public_key TEXT,
+    -- Set when the requester collects an approval, so it works only once.
+    consumed_at TIMESTAMPTZ
+);
+
+CREATE INDEX idx_auth_requests_user_expires ON auth_requests(user_id, expires_at);
+CREATE INDEX idx_auth_requests_expires_at ON auth_requests(expires_at);
 
 CREATE TABLE audit_logs (
     id BIGSERIAL PRIMARY KEY,

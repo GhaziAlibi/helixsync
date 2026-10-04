@@ -48,6 +48,10 @@ pub async fn run_once(state: &AppState) {
         tracing::error!(error = %e, "housekeeping: web_sessions cleanup failed");
     }
 
+    if let Err(e) = delete_expired_auth_requests(state).await {
+        tracing::error!(error = %e, "housekeeping: auth_requests cleanup failed");
+    }
+
     if let Err(e) = delete_old_audit_logs(state).await {
         tracing::error!(error = %e, "housekeeping: audit_logs cleanup failed");
     }
@@ -127,6 +131,26 @@ async fn delete_expired_web_sessions(state: &AppState) -> AppResult<()> {
     })
     .await?;
     tracing::debug!(rows = total_rows, "housekeeping: pruned web_sessions");
+    Ok(())
+}
+
+// Login-with-device requests are useless once expired, answered or not.
+async fn delete_expired_auth_requests(state: &AppState) -> AppResult<()> {
+    let now = Utc::now();
+    let total_rows = delete_in_chunks("auth_requests", || async move {
+        let result = sqlx::query!(
+            "DELETE FROM auth_requests WHERE id IN ( \
+                SELECT id FROM auth_requests WHERE expires_at < $1 ORDER BY expires_at ASC LIMIT $2 \
+             )",
+            now,
+            DELETE_CHUNK_SIZE
+        )
+        .execute(&state.db)
+        .await?;
+        Ok(result.rows_affected())
+    })
+    .await?;
+    tracing::debug!(rows = total_rows, "housekeeping: pruned auth_requests");
     Ok(())
 }
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/context";
 import * as api from "../api/client";
+import RecoveryCodeNotice from "../components/RecoveryCodeNotice";
 
 function ChangePasswordForm() {
   const [current, setCurrent] = useState("");
@@ -50,6 +51,66 @@ function ChangePasswordForm() {
       {status && <p className="text-sm text-emerald-600">{status}</p>}
       <button type="submit" className="self-start rounded bg-slate-900 text-white px-4 py-2 text-sm">
         Update password
+      </button>
+    </form>
+  );
+}
+
+function RecoveryCodeForm() {
+  const { user } = useAuth();
+  const [password, setPassword] = useState("");
+  const [code, setCode] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [working, setWorking] = useState(false);
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setWorking(true);
+    try {
+      setCode(await api.regenerateRecoveryCode(password));
+      setPassword("");
+    } catch (err) {
+      setError(
+        err instanceof api.ApiError && err.status === 401
+          ? "That password is incorrect. Your recovery code was not changed."
+          : err instanceof Error
+            ? err.message
+            : String(err),
+      );
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  if (code) {
+    return (
+      <div className="max-w-sm">
+        <RecoveryCodeNotice code={code} email={user?.email ?? ""} continueLabel="Done" onContinue={() => setCode(null)} />
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={onSubmit} className="flex flex-col gap-3 max-w-sm">
+      <label className="flex flex-col gap-1 text-sm">
+        Your password
+        <input
+          type="password"
+          required
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          className="border border-slate-300 rounded px-3 py-2"
+        />
+      </label>
+      {error && <p className="text-sm text-red-600">{error}</p>}
+      <button
+        type="submit"
+        disabled={working}
+        className="self-start rounded bg-slate-900 text-white px-4 py-2 text-sm disabled:opacity-50"
+      >
+        {working ? "Generating…" : "Generate a new recovery code"}
       </button>
     </form>
   );
@@ -207,6 +268,16 @@ export default function Security() {
           browser session on this account.
         </p>
         <ChangePasswordForm />
+      </div>
+
+      <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-5 mt-6">
+        <h2 className="font-medium mb-4">Recovery code</h2>
+        <p className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded px-3 py-2 mb-4">
+          Your recovery code lets you set a new password from the sign-in page if you forget yours, without losing
+          your data. Generate a new one if you lost it or think someone else has seen it; the old code stops working
+          right away.
+        </p>
+        <RecoveryCodeForm />
       </div>
 
       <div className="bg-white rounded-lg shadow-sm border border-red-200 p-5 mt-6">

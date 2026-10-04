@@ -108,6 +108,18 @@ impl ConnectionRegistry {
             }
         }
     }
+
+    /// Tells every connected device of the user that a login-with-device
+    /// request is waiting (docs/protocol.md §7.4). Only a hint, like
+    /// `changes_available`: extensions also check on their periodic sync.
+    pub fn notify_auth_request(&self, user_id: Uuid) {
+        if let Some(conns) = self.connections.get(&user_id) {
+            let msg = serde_json::json!({ "type": "auth_request" }).to_string();
+            for conn in conns.iter() {
+                let _ = conn.sender.try_send(msg.clone());
+            }
+        }
+    }
 }
 
 impl Default for ConnectionRegistry {

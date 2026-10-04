@@ -36,10 +36,12 @@ let wsConstructed = 0;
 class FakeSocket {
   static OPEN = 1;
   static CONNECTING = 0;
+  static last: FakeSocket | undefined;
   readyState = FakeSocket.CONNECTING;
   listeners = new Map<string, Array<() => void>>();
   constructor(public url: string) {
     wsConstructed++;
+    FakeSocket.last = this;
   }
   addEventListener(t: string, fn: () => void) {
     const l = this.listeners.get(t) ?? [];
@@ -53,7 +55,35 @@ class FakeSocket {
 }
 vi.stubGlobal("WebSocket", FakeSocket as never);
 
-const { ensureConnected, disconnect } = await import("./websocket");
+const { ensureConnected, disconnect, onAuthRequest, onChangesAvailable } = await import("./websocket");
+
+describe("push messages", () => {
+  beforeEach(async () => {
+    await disconnect();
+    sessionStore.clear();
+  });
+
+  it("routes auth_request to its own handler, separately from changes_available", async () => {
+    const changes = vi.fn();
+    const authRequests = vi.fn();
+    onChangesAvailable(changes);
+    onAuthRequest(authRequests);
+    await ensureConnected();
+    const emit = (message: unknown) => {
+      for (const listener of FakeSocket.last!.listeners.get("message") ?? []) {
+        (listener as (event: { data: string }) => void)({ data: JSON.stringify(message) });
+      }
+    };
+
+    emit({ type: "auth_request" });
+    expect(authRequests).toHaveBeenCalledTimes(1);
+    expect(changes).not.toHaveBeenCalled();
+
+    emit({ type: "changes_available", cursor: 1 });
+    expect(changes).toHaveBeenCalledTimes(1);
+    expect(authRequests).toHaveBeenCalledTimes(1);
+  }, 30000);
+});
 
 describe("ensureConnected connection sharing", () => {
   beforeEach(async () => {

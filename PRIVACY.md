@@ -67,9 +67,11 @@ record, and every sign-in session from the server's database, and the server
 stops accepting the account's devices. Anyone running the server can also
 remove an account directly from its database. Backups the server's operator
 took before the deletion keep a copy until the operator's backup retention
-expires, which only that operator controls. Because your data is encrypted with
-a key only your password unlocks, no one can recover a deleted account's data
-afterwards.
+expires, which only that operator controls. The operator can also delete an
+account at your request without your password (for example when you lost
+both your password and your recovery code). Because your data is encrypted
+with a key only your password or your recovery code unlocks, no one can
+recover a deleted account's data afterwards.
 
 **Disconnecting a device.** "Disconnect" in the extension's settings revokes
 that device on the server (when it can be reached) and deletes the extension's

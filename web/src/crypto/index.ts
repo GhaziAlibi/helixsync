@@ -156,3 +156,105 @@ export function unwrapAccountKey(kek: Uint8Array, wrapped: string): Uint8Array {
   const envelope = JSON.parse(wrapped) as WrappedAccountKeyEnvelope;
   return xchacha20poly1305(kek, fromB64(envelope.nonce)).decrypt(fromB64(envelope.ciphertext));
 }
+
+// Crockford base32: no I, L, O or U, so a code read aloud or retyped from
+// paper survives the usual mix-ups (see `parseRecoveryCode`).
+const CROCKFORD_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/** Crockford base32 of `bytes`, whose bit length must be a multiple of 5
+ * (the recovery code's 20 bytes and the fingerprint's 10 both are). */
+function toCrockford(bytes: Uint8Array): string {
+  let bits = 0;
+  let value = 0;
+  let out = "";
+  for (const byte of bytes) {
+    value = (value << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += CROCKFORD_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  return out;
+}
+
+function groupsOfFour(text: string): string {
+  return text.match(/.{1,4}/g)!.join("-");
+}
+
+const RECOVERY_CODE_BYTES = 20;
+const RECOVERY_CODE_CHARS = (RECOVERY_CODE_BYTES * 8) / 5;
+
+/** A fresh recovery code (docs/encryption.md §9.1): 160 random bits shown as
+ * eight groups of four Crockford base32 characters, `XXXX-XXXX-…`. High
+ * entropy, so it needs no Argon2 stretching, unlike the password. */
+export function generateRecoveryCode(): string {
+  return groupsOfFour(toCrockford(randomBytes(RECOVERY_CODE_BYTES)));
+}
+
+/** The 20 bytes behind a typed recovery code. Accepts lowercase, spaces and
+ * dashes anywhere, and reads I and L as 1 and O as 0. Throws on anything
+ * else, or on the wrong length. */
+export function parseRecoveryCode(input: string): Uint8Array {
+  const normalized = input
+    .toUpperCase()
+    .replace(/[\s-]/g, "")
+    .replace(/[IL]/g, "1")
+    .replace(/O/g, "0");
+  if (normalized.length !== RECOVERY_CODE_CHARS) {
+    throw new Error("A recovery code has 32 characters.");
+  }
+  const bytes = new Uint8Array(RECOVERY_CODE_BYTES);
+  let bits = 0;
+  let value = 0;
+  let index = 0;
+  for (const char of normalized) {
+    const digit = CROCKFORD_ALPHABET.indexOf(char);
+    if (digit < 0) {
+      throw new Error(`"${char}" can't appear in a recovery code.`);
+    }
+    value = ((value << 5) | digit) & 0xfff;
+    bits += 5;
+    if (bits >= 8) {
+      bytes[index++] = (value >>> (bits - 8)) & 0xff;
+      bits -= 8;
+    }
+  }
+  return bytes;
+}
+
+/** The recovery code's counterparts of `authKey` and `KEK`: what the server
+ * checks (stored only as a hash) and what wraps the second copy of the
+ * account key. Same HKDF as the password path, different info strings. */
+export async function deriveRecoveryKeys(code: Uint8Array): Promise<{ authKey: string; kek: Uint8Array }> {
+  return {
+    authKey: toB64(await hkdfSha256(code, "helixsync-recovery-auth-v1")),
+    kek: await hkdfSha256(code, "helixsync-recovery-kek-v1"),
+  };
+}
+
+const AUTH_REQUEST_LABEL = "helixsync-auth-request-v1";
+
+/** A one-time ECDH P-256 key pair for a login-with-device request
+ * (docs/encryption.md §9.2), with the public key in the raw base64url form
+ * the server expects. The dashboard only needs the public key, for the
+ * fingerprint phrase: an approved dashboard login receives no key. */
+export async function generateAuthRequestPublicKey(): Promise<string> {
+  const keyPair = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+  return toB64(new Uint8Array(await crypto.subtle.exportKey("raw", keyPair.publicKey)));
+}
+
+/** The phrase both sides of a login-with-device request show, so the user
+ * can tell their own request from someone else's, or from a key a hostile
+ * server swapped in: SHA-256 of a fixed label and the requester's public
+ * key, first 80 bits, as `XXXX-XXXX-XXXX-XXXX`. Mirrors
+ * extension/src/crypto/index.ts::authRequestFingerprint. */
+export async function authRequestFingerprint(publicKeyB64: string): Promise<string> {
+  const label = sharedTextEncoder.encode(AUTH_REQUEST_LABEL);
+  const publicKey = fromB64(publicKeyB64);
+  const input = new Uint8Array(label.length + publicKey.length);
+  input.set(label);
+  input.set(publicKey, label.length);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
+  return groupsOfFour(toCrockford(digest.slice(0, 10)));
+}

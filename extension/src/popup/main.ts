@@ -1,10 +1,16 @@
 import {
+  ApiError,
   registerDevice,
   prelogin,
   fetchSettings,
   updateSettings,
   invalidateSettingsCache,
   revokeThisDevice,
+  createAuthRequest,
+  pollAuthRequest,
+  listAuthRequests,
+  respondAuthRequest,
+  type PendingAuthRequest,
   type UpdateSettingsRequest,
   type UserSettingsDto,
 } from "../api/client";
@@ -17,7 +23,18 @@ import {
   type DeviceRecord,
 } from "../storage/db";
 import type { PendingTabRestore } from "../storage/selectors";
-import { ensureCryptoReady, deriveMasterKey, deriveAuthKey, deriveKek, unwrapAccountKey, toB64 } from "../crypto";
+import {
+  ensureCryptoReady,
+  deriveMasterKey,
+  deriveAuthKey,
+  deriveKek,
+  unwrapAccountKey,
+  toB64,
+  authRequestFingerprint,
+  decryptAccountKeyFromApproval,
+  encryptAccountKeyForRequest,
+  generateAuthRequestKeyPair,
+} from "../crypto";
 import { assertSecureServerUrl, InsecureServerUrlError } from "./serverUrl";
 
 /** The https origin and its wss counterpart (for the WebSocket channel),
@@ -49,14 +66,41 @@ const SETTINGS_DRAFT_KEY = "settingsDraft";
 // SEC-12: the password goes to chrome.storage.session (memory-only, cleared
 // when the browser exits), never to chrome.storage.local on disk.
 const SETUP_PASSWORD_KEY = "setupDraftPassword";
+// A waiting login-with-device request, private key included: also
+// chrome.storage.session only, for the same reason.
+const DEVICE_LOGIN_KEY = "pendingDeviceLogin";
+const DEVICE_LOGIN_POLL_MS = 3000;
 
 interface SetupDraft {
   serverUrl?: string;
   email?: string;
   deviceName?: string;
   // The permission dialog steals focus and Chrome destroys the popup,
-  // killing the connect attempt. This flag lets the next open resume it.
+  // killing the connect attempt. These flags let the next open resume it.
   pendingConnect?: boolean;
+  pendingDeviceLogin?: boolean;
+}
+
+/** A "Log in with device" request this browser is waiting on
+ * (docs/protocol.md §7.4). */
+interface PendingDeviceLogin {
+  serverUrl: string;
+  email: string;
+  deviceName: string;
+  requestId: string;
+  secret: string;
+  expiresAt: string;
+  publicKey: string;
+  privateKeyJwk: JsonWebKey;
+}
+
+async function loadPendingDeviceLogin(): Promise<PendingDeviceLogin | undefined> {
+  const result = await chrome.storage.session.get(DEVICE_LOGIN_KEY);
+  return result[DEVICE_LOGIN_KEY] as PendingDeviceLogin | undefined;
+}
+
+async function clearPendingDeviceLogin(): Promise<void> {
+  await chrome.storage.session.remove(DEVICE_LOGIN_KEY);
 }
 
 async function loadPasswordDraft(): Promise<string | undefined> {
@@ -315,10 +359,16 @@ function renderPendingTabRestores(
 }
 
 async function render(): Promise<void> {
+  stopDeviceLoginPolling();
   const device = await getDevice();
   if (!device) {
     headerActions.innerHTML = "";
-    await renderSetup();
+    const pendingLogin = await loadPendingDeviceLogin();
+    if (pendingLogin) {
+      await renderDeviceLoginWait(pendingLogin);
+    } else {
+      await renderSetup();
+    }
     return;
   }
   if (connectedView === "settings") {
@@ -360,9 +410,13 @@ async function renderSetup(): Promise<void> {
         <input type="text" id="deviceName" value="${escapeAttr(draft.deviceName ?? defaultDeviceName())}" required />
       </label>
       <button type="submit" class="primary">Connect</button>
+      <button type="button" id="device-login" class="ghost">Log in with device instead</button>
     </form>
     <p class="view-subtitle">
       Don't have an account? <a href="#" id="register-link">Register on the web</a>
+    </p>
+    <p class="view-subtitle">
+      <a href="#" id="forgot-password-link">Forgot your password?</a>
     </p>
     <div class="status-message" id="status"></div>
   `;
@@ -370,8 +424,8 @@ async function renderSetup(): Promise<void> {
   const form = document.getElementById("setup-form") as HTMLFormElement;
   const status = document.getElementById("status")!;
 
-  document.getElementById("register-link")?.addEventListener("click", (e) => {
-    e.preventDefault();
+  // Both links open a dashboard page on the server typed into the form.
+  const openDashboardPage = (path: string) => {
     const serverUrl = inputById("serverUrl").value.trim();
     status.classList.remove("error");
 
@@ -383,7 +437,16 @@ async function renderSetup(): Promise<void> {
       return;
     }
 
-    void chrome.tabs.create({ url: `${origin}/login?mode=register` });
+    void chrome.tabs.create({ url: `${origin}${path}` });
+  };
+
+  document.getElementById("register-link")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    openDashboardPage("/login?mode=register");
+  });
+  document.getElementById("forgot-password-link")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    openDashboardPage("/recover");
   });
 
   const persistDraft = () => {
@@ -443,9 +506,181 @@ async function renderSetup(): Promise<void> {
     }
   });
 
+  document.getElementById("device-login")?.addEventListener("click", async () => {
+    if (connectInFlight) return;
+    const serverUrl = inputById("serverUrl").value.replace(/\/$/, "");
+    const email = inputById("email").value;
+    const deviceName = inputById("deviceName").value;
+
+    status.classList.remove("error");
+    if (!email.includes("@") || !deviceName.trim()) {
+      showError(status, "Enter your email and a device name first.");
+      return;
+    }
+    let origins: string[];
+    try {
+      assertSecureServerUrl(serverUrl);
+      origins = hostPermissionOrigins(serverUrl);
+    } catch (err) {
+      showError(status, err instanceof InsecureServerUrlError ? err.message : "Enter a valid Server URL.");
+      return;
+    }
+
+    // Same gesture rule as Connect: no await before the permission request.
+    void saveDraft<SetupDraft>(SETUP_DRAFT_KEY, { serverUrl, email, deviceName, pendingDeviceLogin: true });
+    const granted = await chrome.permissions.request({ origins });
+    if (!granted) {
+      await saveDraft<SetupDraft>(SETUP_DRAFT_KEY, { serverUrl, email, deviceName, pendingDeviceLogin: false });
+      showError(status, "Permission to contact the server was not granted.");
+      return;
+    }
+    await startDeviceLogin({ serverUrl, email, deviceName }, status);
+  });
+
   if (draft.pendingConnect && draft.serverUrl && draft.email && password) {
     await resumePendingConnect(draft, password, status);
+  } else if (draft.pendingDeviceLogin && draft.serverUrl && draft.email && draft.deviceName) {
+    await resumePendingDeviceLogin(draft, status);
   }
+}
+
+/** Starts a device login that the permission dialog interrupted by
+ * destroying the popup, if the permission ended up granted. */
+async function resumePendingDeviceLogin(draft: SetupDraft, status: HTMLElement): Promise<void> {
+  await saveDraft<SetupDraft>(SETUP_DRAFT_KEY, { ...draft, pendingDeviceLogin: false });
+  let origins: string[];
+  try {
+    assertSecureServerUrl(draft.serverUrl!);
+    origins = hostPermissionOrigins(draft.serverUrl!);
+  } catch {
+    return;
+  }
+  if (!(await chrome.permissions.contains({ origins }))) {
+    showError(status, "Permission wasn't granted last time — click \"Log in with device instead\" to try again.");
+    return;
+  }
+  await startDeviceLogin(
+    { serverUrl: draft.serverUrl!, email: draft.email!, deviceName: draft.deviceName! },
+    status,
+  );
+}
+
+/** Creates the request and switches to the waiting view. Callers must have
+ * the host permission already. */
+async function startDeviceLogin(
+  input: { serverUrl: string; email: string; deviceName: string },
+  status: HTMLElement,
+): Promise<void> {
+  if (connectInFlight) return;
+  connectInFlight = true;
+  status.classList.remove("error");
+  status.textContent = "Creating sign-in request…";
+  try {
+    const keyPair = await generateAuthRequestKeyPair();
+    const created = await createAuthRequest(input.serverUrl, input.email, keyPair.publicKey, input.deviceName);
+    const pending: PendingDeviceLogin = {
+      ...input,
+      requestId: created.id,
+      secret: created.secret,
+      expiresAt: created.expiresAt,
+      publicKey: keyPair.publicKey,
+      privateKeyJwk: keyPair.privateKeyJwk,
+    };
+    await chrome.storage.session.set({ [DEVICE_LOGIN_KEY]: pending });
+    await saveDraft<SetupDraft>(SETUP_DRAFT_KEY, { ...input, pendingDeviceLogin: false });
+  } catch (err) {
+    showError(status, `Failed: ${errorMessage(err)}`);
+    return;
+  } finally {
+    connectInFlight = false;
+  }
+  await render();
+}
+
+let deviceLoginPollTimer: ReturnType<typeof setTimeout> | undefined;
+
+function stopDeviceLoginPolling(): void {
+  clearTimeout(deviceLoginPollTimer);
+  deviceLoginPollTimer = undefined;
+}
+
+/** Back to the setup form, with `message` explaining why. */
+async function abandonDeviceLogin(message?: string): Promise<void> {
+  await clearPendingDeviceLogin();
+  await render();
+  if (message) {
+    const status = document.getElementById("status");
+    if (status) showError(status, message);
+  }
+}
+
+/** Waits for another browser to approve, polling while the popup is open.
+ * Reopening the popup resumes here, since the request lives in session
+ * storage. */
+async function renderDeviceLoginWait(pending: PendingDeviceLogin): Promise<void> {
+  app.innerHTML = `
+    <h2 class="view-title">Approve on another browser</h2>
+    <p class="view-subtitle">
+      Open HelixSync on a browser that's already connected to this account and approve the request there.
+      Approve it only if that browser shows this phrase:
+    </p>
+    <div class="fingerprint" id="fingerprint"></div>
+    <div class="status-message" id="status">Waiting for approval…</div>
+    <button id="cancel-device-login" class="ghost">Cancel</button>
+  `;
+  document.getElementById("fingerprint")!.textContent = await authRequestFingerprint(pending.publicKey);
+  const status = document.getElementById("status")!;
+  document.getElementById("cancel-device-login")?.addEventListener("click", () => {
+    void abandonDeviceLogin();
+  });
+
+  const tick = async () => {
+    deviceLoginPollTimer = undefined;
+    try {
+      const result = await pollAuthRequest(pending.serverUrl, pending.requestId, pending.secret, {
+        browser: "helium",
+        extensionVersion: chrome.runtime.getManifest().version,
+      });
+      if (result.status === "approved") {
+        const accountKey = await decryptAccountKeyFromApproval(
+          pending.privateKeyJwk,
+          result.approverPublicKey,
+          result.encryptedAccountKey,
+          pending.requestId,
+        );
+        await clearPendingDeviceLogin();
+        // Connected some other way in the meantime: keep that connection.
+        if (await getDevice()) {
+          await render();
+          return;
+        }
+        await finishConnect({ serverUrl: pending.serverUrl, email: pending.email }, result, toB64(accountKey));
+        return;
+      }
+      if (result.status === "denied") {
+        await abandonDeviceLogin("The sign-in request was denied.");
+        return;
+      }
+      if (result.status === "expired") {
+        await abandonDeviceLogin("The sign-in request expired. Start a new one.");
+        return;
+      }
+    } catch (err) {
+      // The approval stays collectable until the request expires, so the
+      // device cap and transient failures just show and keep waiting.
+      status.classList.add("error");
+      status.textContent =
+        err instanceof ApiError && err.code === "device_limit_reached"
+          ? "This account has the maximum number of devices. Revoke one on the dashboard and this browser will connect."
+          : `Still waiting: ${errorMessage(err)}`;
+    }
+    if (Date.now() >= Date.parse(pending.expiresAt)) {
+      await abandonDeviceLogin("The sign-in request expired. Start a new one.");
+      return;
+    }
+    deviceLoginPollTimer = setTimeout(() => void tick(), DEVICE_LOGIN_POLL_MS);
+  };
+  deviceLoginPollTimer = setTimeout(() => void tick(), DEVICE_LOGIN_POLL_MS);
 }
 
 /** Finishes a connect that the permission dialog interrupted by destroying
@@ -517,35 +752,50 @@ async function attemptConnect(input: ConnectInput, status: HTMLElement): Promise
     });
 
     const accountKey = toB64(unwrapAccountKey(kek, result.wrappedAccountKey));
-
-    const record: DeviceRecord = {
-      id: "self",
-      serverUrl,
-      deviceId: result.deviceId,
-      userId: "",
-      email,
-      accessToken: result.accessToken,
-      accessTokenExpiresAt: result.accessTokenExpiresAt,
-      refreshToken: result.refreshToken,
-      accountKey,
-      accountKeyVersion: result.accountKeyVersion,
-    };
-    await putDevice(record);
-    await clearDraft(SETUP_DRAFT_KEY);
-    await clearPasswordDraft();
-
-    // The worker's startup already ran without a device, so it has to be
-    // told to start capture, the initial import and the WebSocket. Not
-    // awaited: the worker replies only after the import, which can take
-    // minutes.
-    void chrome.runtime.sendMessage({ type: "REFRESH_CAPTURE_CONFIG" }).catch(() => {});
-
-    connectedView = "status";
-    await render();
+    await finishConnect({ serverUrl, email }, result, accountKey);
   } catch (err) {
     await saveDraft<SetupDraft>(SETUP_DRAFT_KEY, { serverUrl, email, deviceName, pendingConnect: false });
     showError(status, `Failed: ${errorMessage(err)}`);
   }
+}
+
+/** Stores the new device's credentials and account key, shared by password
+ * connect and login with device. */
+async function finishConnect(
+  account: { serverUrl: string; email: string },
+  credentials: {
+    deviceId: string;
+    accessToken: string;
+    accessTokenExpiresAt: string;
+    refreshToken: string;
+    accountKeyVersion: number;
+  },
+  accountKey: string,
+): Promise<void> {
+  const record: DeviceRecord = {
+    id: "self",
+    serverUrl: account.serverUrl,
+    deviceId: credentials.deviceId,
+    userId: "",
+    email: account.email,
+    accessToken: credentials.accessToken,
+    accessTokenExpiresAt: credentials.accessTokenExpiresAt,
+    refreshToken: credentials.refreshToken,
+    accountKey,
+    accountKeyVersion: credentials.accountKeyVersion,
+  };
+  await putDevice(record);
+  await clearDraft(SETUP_DRAFT_KEY);
+  await clearPasswordDraft();
+
+  // The worker's startup already ran without a device, so it has to be
+  // told to start capture, the initial import and the WebSocket. Not
+  // awaited: the worker replies only after the import, which can take
+  // minutes.
+  void chrome.runtime.sendMessage({ type: "REFRESH_CAPTURE_CONFIG" }).catch(() => {});
+
+  connectedView = "status";
+  await render();
 }
 
 function renderHeaderButton(id: string, title: string, icon: string, targetView: ConnectedView): void {
@@ -559,9 +809,10 @@ function renderHeaderButton(id: string, title: string, icon: string, targetView:
 async function renderStatusView(device: DeviceRecord): Promise<void> {
   renderHeaderButton("open-settings", "Settings", GEAR_ICON, "settings");
 
-  const [response, settings] = await Promise.all([
+  const [response, settings, authRequests] = await Promise.all([
     chrome.runtime.sendMessage({ type: "GET_STATUS" }),
     fetchSettings().catch(() => undefined),
+    listAuthRequests().catch((): PendingAuthRequest[] => []),
   ]);
 
   app.innerHTML = `
@@ -582,6 +833,12 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
     detail.className = "status-message error";
     detail.textContent = response.errorDetail;
     document.querySelector(".status-card")!.insertAdjacentElement("afterend", detail);
+  }
+
+  if (authRequests.length > 0) {
+    document
+      .getElementById("sync-now")!
+      .insertAdjacentElement("beforebegin", await renderAuthRequests(device, authRequests));
   }
 
   document.getElementById("sync-now")?.addEventListener("click", async (e) => {
@@ -622,6 +879,87 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
   footer.style.textAlign = "center";
   footer.textContent = `Signed in as ${device.email}`;
   app.appendChild(footer);
+}
+
+/** Sign-in requests waiting for this account's approval (login with device,
+ * docs/protocol.md §7.4). Built with DOM APIs, not innerHTML: the device
+ * name and user agent come from whoever made the request. */
+async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthRequest[]): Promise<HTMLElement> {
+  const section = document.createElement("div");
+  const label = document.createElement("div");
+  label.className = "section-label";
+  label.textContent = requests.length === 1 ? "Sign-in request" : "Sign-in requests";
+  section.appendChild(label);
+
+  for (const request of requests) {
+    const card = document.createElement("div");
+    card.className = "auth-request";
+
+    const title = document.createElement("div");
+    title.className = "item-title";
+    title.textContent =
+      request.kind === "web" ? "Web dashboard sign-in" : `New browser: ${request.deviceName ?? "unnamed"}`;
+
+    const meta = document.createElement("div");
+    meta.className = "item-meta";
+    meta.textContent = `${request.requestIp ?? "Unknown IP"} · ${timeAgo(request.createdAt)}`;
+    if (request.userAgent) meta.title = request.userAgent;
+
+    const consequence = document.createElement("div");
+    consequence.className = "item-meta";
+    consequence.textContent =
+      request.kind === "web"
+        ? "Approving signs that browser in to your dashboard."
+        : "Approving gives that browser your encryption key and all your synced data.";
+
+    const prompt = document.createElement("div");
+    prompt.className = "item-meta";
+    prompt.textContent = "Approve only if the other screen shows:";
+
+    const fingerprint = document.createElement("div");
+    fingerprint.className = "fingerprint";
+    fingerprint.textContent = await authRequestFingerprint(request.publicKey);
+
+    const actions = document.createElement("div");
+    actions.className = "auth-actions";
+    const approve = document.createElement("button");
+    approve.className = "primary";
+    approve.textContent = "Approve";
+    const deny = document.createElement("button");
+    deny.textContent = "Deny";
+    actions.append(approve, deny);
+
+    const error = document.createElement("div");
+    error.className = "status-message error";
+
+    const answer = async (approved: boolean) => {
+      approve.disabled = true;
+      deny.disabled = true;
+      error.textContent = "";
+      try {
+        if (approved && request.kind === "device") {
+          const keys = await encryptAccountKeyForRequest(device.accountKey, request.publicKey, request.id);
+          await respondAuthRequest(request.id, { approve: true, ...keys });
+        } else {
+          await respondAuthRequest(request.id, { approve: approved });
+        }
+        await render();
+      } catch (err) {
+        error.textContent =
+          err instanceof ApiError && err.status === 404
+            ? "This request was already answered or has expired."
+            : `Failed: ${errorMessage(err)}`;
+        approve.disabled = false;
+        deny.disabled = false;
+      }
+    };
+    approve.addEventListener("click", () => void answer(true));
+    deny.addEventListener("click", () => void answer(false));
+
+    card.append(title, meta, consequence, prompt, fingerprint, actions, error);
+    section.appendChild(card);
+  }
+  return section;
 }
 
 function readSettingsForm(): SettingsForm {
@@ -693,9 +1031,22 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
         </select>
       </label>
     </fieldset>
+    <fieldset>
+      <legend>Account</legend>
+      <div class="row"><span class="row-label">Password</span>
+        <a href="#" id="change-password-link">Change on the web</a>
+      </div>
+    </fieldset>
     <button id="save-settings" class="primary">Save</button>
     <div class="status-message" id="status"></div>
   `;
+
+  // Like Bitwarden's extension, password changes happen on the web
+  // dashboard: it holds the account's KDF material and the change form.
+  document.getElementById("change-password-link")?.addEventListener("click", (e) => {
+    e.preventDefault();
+    void chrome.tabs.create({ url: `${new URL(device.serverUrl).origin}/security` });
+  });
 
   document.getElementById("disconnect")?.addEventListener("click", async () => {
     const confirmed = await showConfirmDialog(

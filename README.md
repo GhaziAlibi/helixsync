@@ -285,10 +285,13 @@ network, change the `web` service's port mapping to
 
 Open the dashboard in your browser (`https://sync.example.com`, or
 `http://localhost:5173` for a trial) and choose **Register**. Enter an email
-and a password, and confirm that you understand the password cannot be
-recovered. The account key that encrypts your data is created in your browser
-and locked with this password, so neither the server operator nor the
+and a password. The account key that encrypts your data is created in your
+browser and locked with this password, so neither the server operator nor the
 developer can reset it or read your data without it.
+
+The dashboard then shows your **recovery code**, once. Save it somewhere safe
+and offline (print it, or keep it in a password manager): if you forget your
+password, it's the only way to set a new one without losing your data.
 
 Registration is open by default. **On any instance reachable from the
 internet, close it once your accounts exist** (see
@@ -324,7 +327,10 @@ Pick one:
    server address; allow it. The extension requests access to that origin only,
    never to all sites.
 3. Repeat on every browser you want to sync. Each one signs in with the same
-   email and password and ends up with the same account key.
+   email and password and ends up with the same account key. Instead of the
+   password, you can click **Log in with device instead** and approve the
+   request from the popup of a browser that's already connected, after
+   checking that both show the same phrase.
 4. **Close registration.** Once your accounts exist, set
    `ALLOW_REGISTRATION=false` in `.env` and restart the server
    (`docker compose up -d`, or restart the process for option E). Existing
@@ -340,7 +346,10 @@ status and when it last synced. The gear icon opens the settings once connected:
 (bookmarks, history, tabs, tab groups), the tab restore policy (disabled, ask
 before restoring, or restore automatically), and history retention (7 days to
 unlimited). **Disconnect** revokes the device on the server and removes its
-local data.
+local data. Under **Account**, **Change on the web** opens the dashboard's
+password form. When another browser or the dashboard asks to log in with this
+device, the toolbar icon shows **!** and the popup lists the request with its
+phrase, to approve or deny.
 
 **Web dashboard.**
 
@@ -349,11 +358,20 @@ local data.
 | Dashboard | Connection and sync health, last sync, device count, how many bookmarks, history items and tabs are synced, storage used against your limit, and recent devices |
 | Devices | List, rename and revoke connected browsers |
 | Synchronization | The same sync settings as the popup, kept in one place |
-| Security | Check encryption status, review and revoke web sessions, change your password, delete your account |
+| Security | Check encryption status, review and revoke web sessions, change your password, get a new recovery code, delete your account |
 
 **Changing your password** re-wraps your account key under the new password.
 Nothing already synced becomes unreadable; each browser simply signs in again
 with the new password.
+
+**Forgot your password?** On the sign-in page, enter your email, your
+recovery code and a new password. Your data stays readable, every web session
+is signed out, and you get a new recovery code (each one works once). To just
+get into the dashboard, **Log in with a device** lets a connected browser
+approve you. If you lost the recovery code as well, the server's operator can
+delete the account with `helixsync-server delete-account <email>` so you can
+register again; your browsers upload their bookmarks and history again when
+you reconnect them. See [`docs/encryption.md`](docs/encryption.md) §9.
 
 **Deleting your account** (Security → Danger zone) permanently removes the
 account and everything stored under it, and connected browsers stop syncing.
@@ -389,8 +407,8 @@ and [`docs/deployment.md`](docs/deployment.md).
 - [ ] **`ALLOW_REGISTRATION=false`** once your accounts exist, or anyone who
   finds the URL can sign up and store up to `MAX_ACCOUNT_STORAGE_BYTES` (5 GiB
   by default) each on your server.
-- [ ] **Backups** of the database, with a tested restore (see below). A lost
-  password cannot be recovered.
+- [ ] **Backups** of the database, with a tested restore (see below). Backups
+  don't help with a forgotten password; only the user's recovery code does.
 - [ ] **`HELIXSYNC_VERSION`** pinned to a released version when using
   `docker-compose.prod.yml`, and updated deliberately.
 - [ ] If `web` is published directly rather than reached only through your
@@ -434,6 +452,7 @@ recovery steps are in [`docs/deployment.md`](docs/deployment.md).
 | The extension says the Server URL must use `https://` | Only `localhost`, `127.0.0.1` and `[::1]` may use plain HTTP. Put a TLS proxy in front of `web` (option D). |
 | The dashboard signs you out immediately, or warns that the page is not using HTTPS | Session cookies are `Secure`; load the dashboard over HTTPS (or from `localhost`). |
 | Registering returns `registration_disabled` | The server has `ALLOW_REGISTRATION=false`. Set it to `true` temporarily to add an account. |
+| A user forgot their password | They reset it with their recovery code (**Forgot your password?** on the sign-in page). Without the code, run `docker compose exec server /app/helixsync-server delete-account <email>` once you've checked who's asking, and they register again. |
 | The extension shows an "update the HelixSync extension" error | It met sync data written in a newer format. Update the extension; nothing is lost, and it retries automatically. |
 | Everyone gets `429` rate-limit errors after one client misbehaves | The rate limiter sees all clients as the proxy's address. Make sure your proxy sets `X-Forwarded-For`, and see [`docs/deployment.md`](docs/deployment.md#real-client-ips-behind-that-reverse-proxy). |
 
@@ -462,12 +481,13 @@ synced data in it).
   counted.** Chrome's history APIs don't expose every intermediate redirect
   visit to extensions, so a small number of such visits may not be enumerable
   during import.
-- **A lost password cannot be recovered.** Your data is encrypted with a random
-  account key that only your password can unlock; the server never sees the
-  password or the key, so neither the operator nor the developer can reset it or
-  get your data back. Changing your password does *not* change that key (it is
-  only re-wrapped), which is also why there is no "forgot password" flow. See
-  [`docs/encryption.md`](docs/encryption.md).
+- **Losing both your password and your recovery code loses your data.** Your
+  data is encrypted with a random account key that only your password or your
+  recovery code can unlock; the server never sees either, so neither the
+  operator nor the developer can reset them or get your data back. The operator
+  can only delete the account so you can start over. Keep the recovery code
+  private: like the password, it unlocks everything. See
+  [`docs/encryption.md`](docs/encryption.md) §9.
 - **Use the web dashboard only on a server you trust.** Its code is served by
   that server, so a compromised server could capture the password you type
   there. The extension is installed separately and isn't affected. See
