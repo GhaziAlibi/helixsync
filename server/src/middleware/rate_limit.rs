@@ -487,6 +487,14 @@ pub const RECOVERY_CODE_LIMIT: RateLimitConfig = RateLimitConfig {
     window: Duration::from_secs(60),
     partition: RateLimitPartition::Authenticated,
 };
+// Changing the password re-verifies the current password hash (Argon2).
+// Keyed by user id, like ACCOUNT_DELETE_LIMIT.
+pub const PASSWORD_CHANGE_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "password_change",
+    limit: 5,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
 // Creating a login-with-device request. The per-email bucket also caps how
 // many approval prompts anyone can push to an account's extensions.
 pub const AUTH_REQUEST_LIMIT: RateLimitConfig = RateLimitConfig {

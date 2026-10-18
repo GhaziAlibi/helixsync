@@ -168,7 +168,8 @@ Configurable limits (see `docs/deployment.md` for env vars) cover:
 
 ```text
 login, registration, token refresh, device registration,
-account deletion, password recovery, recovery-code regeneration,
+account deletion, password change, password recovery,
+recovery-code regeneration,
 login-with-device requests and polling, sync upload, sync download,
 WebSocket connection attempts
 ```

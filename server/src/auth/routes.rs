@@ -17,8 +17,9 @@ use crate::crypto::{
 use crate::error::{AppError, AppResult};
 use crate::middleware::client_ip::{client_ip, rate_limit_ip_key};
 use crate::middleware::rate_limit::{
-    enforce, ACCOUNT_DELETE_LIMIT, LOGIN_EMAIL_LIMIT, LOGIN_LIMIT, PRELOGIN_EMAIL_LIMIT,
-    PRELOGIN_LIMIT, RECOVERY_CODE_LIMIT, RECOVER_EMAIL_LIMIT, RECOVER_LIMIT, REGISTER_LIMIT,
+    enforce, ACCOUNT_DELETE_LIMIT, LOGIN_EMAIL_LIMIT, LOGIN_LIMIT, PASSWORD_CHANGE_LIMIT,
+    PRELOGIN_EMAIL_LIMIT, PRELOGIN_LIMIT, RECOVERY_CODE_LIMIT, RECOVER_EMAIL_LIMIT, RECOVER_LIMIT,
+    REGISTER_LIMIT,
 };
 use crate::state::AppState;
 
@@ -505,6 +506,13 @@ async fn change_password(
     jar: CookieJar,
     Json(req): Json<ChangePasswordRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
+    enforce(
+        &state.rate_limiter,
+        PASSWORD_CHANGE_LIMIT,
+        &user.user_id.to_string(),
+    )?;
+
+    validate_request_auth_key(&req.current_auth_key)?;
     validate_request_auth_key(&req.new_auth_key)?;
 
     let row = sqlx::query!(

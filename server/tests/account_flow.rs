@@ -11,7 +11,9 @@ use axum_test::{TestServer, TestServerConfig, Transport};
 use helixsync_server::auth::account::delete_user_by_email;
 use helixsync_server::auth::extractors::{CSRF_COOKIE_NAME, SESSION_COOKIE_NAME};
 use helixsync_server::config::Config;
-use helixsync_server::middleware::rate_limit::{RateLimiter, ACCOUNT_DELETE_LIMIT, REGISTER_LIMIT};
+use helixsync_server::middleware::rate_limit::{
+    RateLimiter, ACCOUNT_DELETE_LIMIT, PASSWORD_CHANGE_LIMIT, REGISTER_LIMIT,
+};
 use helixsync_server::state::AppState;
 use helixsync_server::websocket::ConnectionRegistry;
 use serde_json::json;
@@ -864,6 +866,39 @@ async fn delete_account_attempts_are_rate_limited(pool: PgPool) {
         .await
         .assert_status_ok();
     assert_eq!(count_users(&pool).await, 1);
+}
+
+/// Same oracle as account deletion: a stolen session must not get unlimited
+/// guesses at the current authKey through the password-change route.
+#[sqlx::test(migrations = "./migrations")]
+async fn password_change_attempts_are_rate_limited(pool: PgPool) {
+    let state = state_for(pool.clone(), test_config());
+    let server = browser(&state);
+    let csrf = register(&server, "changer@example.com").await;
+
+    let body = json!({
+        "currentAuthKey": common::test_auth_key("wrong password"),
+        "newAuthKey": common::test_auth_key("another long password"),
+        "newKdfSalt": common::test_kdf_salt(),
+        "newKdfParams": common::test_kdf_params(),
+        "newWrappedAk": common::test_wrapped_ak(),
+    });
+    let mut statuses = Vec::new();
+    for _ in 0..(PASSWORD_CHANGE_LIMIT.limit + 1) {
+        let res = server
+            .patch("/api/v1/auth/password")
+            .add_header("x-csrf-token", &csrf)
+            .json(&body)
+            .await;
+        statuses.push(res.status_code());
+    }
+    assert!(
+        statuses[..PASSWORD_CHANGE_LIMIT.limit as usize]
+            .iter()
+            .all(|s| *s == StatusCode::UNAUTHORIZED),
+        "{statuses:?}"
+    );
+    assert_eq!(*statuses.last().unwrap(), StatusCode::TOO_MANY_REQUESTS);
 }
 
 // --- Operator delete (`helixsync-server delete-account <email>`) ---
