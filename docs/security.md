@@ -164,7 +164,8 @@ token issuance.
 
 ## 5. Rate Limiting
 
-Configurable limits (see `docs/deployment.md` for env vars) cover:
+The limits are fixed constants in `server/src/middleware/rate_limit.rs`
+(there are no environment variables for them). They cover:
 
 ```text
 login, registration, token refresh, device registration,
