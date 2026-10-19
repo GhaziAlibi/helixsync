@@ -35,8 +35,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/logout", post(logout))
         .route("/me", axum::routing::get(me))
-        // Documented as PATCH (docs/encryption.md §4); POST kept for old clients.
-        .route("/password", post(change_password).patch(change_password))
+        .route("/password", patch(change_password))
         .route("/recovery-code", patch(regenerate_recovery_code))
         .route("/sessions", axum::routing::get(list_sessions))
         .route("/sessions/{id}/revoke", post(revoke_session_route))

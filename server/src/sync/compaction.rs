@@ -241,28 +241,12 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
 
         let stats_objects = filter_tombstoned(stats_objects_map, &now_tombstones);
 
-        // A full recount, so it can't go negative. `saturating_add` is just
-        // a safety net.
-        //
-        // `history_visit_count` (and this recount) are kept exactly as they
-        // were — `sync::stats::stats` no longer reads this column at all
-        // (docs/protocol.md §8.3.2): it now sums the dedicated
-        // `history_visit_hours` table instead, which buckets by real visit
-        // time and survives operations being pruned below, rather than by
-        // this snapshot's upload-time-based retention filtering. Left in
-        // place rather than removed since it costs nothing to keep populated
-        // and other code may still reasonably expect it to be accurate.
+        // A full recount, so it can't go negative.
         let mut bookmark_count: i64 = 0;
-        let mut history_visit_count: i64 = 0;
         let mut tab_count: i64 = 0;
         for obj in &stats_objects {
             match obj.object_type.as_str() {
                 "bookmark" | "bookmarkFolder" => bookmark_count += 1,
-                // Count visits, not rows. Old objects count as 1.
-                "historyVisit" => {
-                    history_visit_count =
-                        history_visit_count.saturating_add(obj.visit_count.unwrap_or(1));
-                }
                 "tab" => tab_count += 1,
                 _ => {}
             }
@@ -270,17 +254,15 @@ async fn compact_user(state: &AppState, user_id: Uuid) -> AppResult<()> {
 
         sqlx::query!(
             r#"
-            INSERT INTO sync_stats (user_id, bookmark_count, history_visit_count, tab_count, updated_at)
-            VALUES ($1, $2, $3, $4, now())
+            INSERT INTO sync_stats (user_id, bookmark_count, tab_count, updated_at)
+            VALUES ($1, $2, $3, now())
             ON CONFLICT (user_id) DO UPDATE SET
                 bookmark_count = EXCLUDED.bookmark_count,
-                history_visit_count = EXCLUDED.history_visit_count,
                 tab_count = EXCLUDED.tab_count,
                 updated_at = now()
             "#,
             user_id,
             bookmark_count,
-            history_visit_count,
             tab_count
         )
         .execute(&mut *tx)

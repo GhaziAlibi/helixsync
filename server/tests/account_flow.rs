@@ -155,6 +155,7 @@ fn bookmark_op(sequence: i64) -> serde_json::Value {
 async fn upload_one_op(server: &TestServer, access_token: &str) {
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(access_token)
         .json(&json!({ "operations": [bookmark_op(1)] }))
         .await;
@@ -416,6 +417,7 @@ async fn self_revoke_kills_the_access_token_and_the_refresh_token_immediately(po
         .assert_status_unauthorized();
     devices
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&device.access_token)
         .json(&json!({ "operations": [bookmark_op(1)] }))
         .await

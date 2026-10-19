@@ -349,7 +349,7 @@ export async function changePassword(currentPassword: string, newPassword: strin
   const newWrappedAk = wrapAccountKey(newKek, accountKey);
 
   await request("/api/v1/auth/password", {
-    method: "POST",
+    method: "PATCH",
     body: JSON.stringify({ currentAuthKey, newAuthKey, newKdfSalt, newKdfParams, newWrappedAk }),
   });
 }

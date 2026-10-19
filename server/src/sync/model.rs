@@ -34,12 +34,9 @@ pub struct OperationIn {
     /// encrypted in `payload`) so the server can track real visit-time
     /// retention through end-to-end encryption. `#[serde(rename_all =
     /// "camelCase")]` on this struct makes the wire field `visitHours`.
-    /// Legal only on `historyVisit` ops (validated in
+    /// Required on `historyVisit` ops and illegal on any other (validated in
     /// `sync::routes::process_batch`, alongside the existing `visit_count`
-    /// checks) — `None` means either a non-historyVisit op, or a historyVisit
-    /// op from a client built before this field existed, which
-    /// `process_batch`'s write path falls back to bucketing at its upload
-    /// hour. Chrono's `DateTime<Utc>` deserializes the RFC3339
+    /// checks). Chrono's `DateTime<Utc>` deserializes the RFC3339
     /// (`"2026-09-23T09:00:00.000Z"`) map keys the extension sends.
     #[serde(default)]
     pub visit_hours: Option<BTreeMap<DateTime<Utc>, i64>>,

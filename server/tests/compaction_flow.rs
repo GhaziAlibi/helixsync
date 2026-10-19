@@ -203,6 +203,7 @@ fn bookmark_op(
 async fn upload(server: &TestServer, token: &str, op: serde_json::Value) {
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(token)
         .json(&json!({ "operations": [op] }))
         .await
@@ -604,6 +605,7 @@ async fn terminal_operation_survives_its_own_retention_window(pool: PgPool) {
     });
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_a)
         .json(&json!({ "operations": [delete_op] }))
         .await
@@ -701,6 +703,7 @@ async fn edit_after_compaction_is_accepted_not_rejected(pool: PgPool) {
     });
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_a)
         .json(&json!({ "operations": [rename_op] }))
         .await;
@@ -756,6 +759,7 @@ async fn device_sequence_does_not_reset_after_full_compaction(pool: PgPool) {
     let replayed_op = bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 2, 3, "Replayed");
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_a)
         .json(&json!({ "operations": [replayed_op] }))
         .await;
@@ -780,6 +784,7 @@ async fn device_sequence_does_not_reset_after_full_compaction(pool: PgPool) {
     next_op["deviceSequence"] = json!(3);
     let res2 = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_a)
         .json(&json!({ "operations": [next_op] }))
         .await;
@@ -817,6 +822,7 @@ async fn retry_of_compacted_upload_is_reported_duplicate_not_sequence_conflict(p
     // Retry the exact same op.
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_a)
         .json(&json!({ "operations": [op] }))
         .await;
@@ -1792,15 +1798,15 @@ async fn compaction_with_lagging_device_keeps_stats_equal_to_snapshot(pool: PgPo
         "the persisted snapshot must still stop at the ack boundary, not the account's true head"
     );
 
-    let (bookmark_count, _, _) = {
+    let (bookmark_count, _) = {
         let row = sqlx::query!(
-            "SELECT bookmark_count, history_visit_count, tab_count FROM sync_stats WHERE user_id = $1",
+            "SELECT bookmark_count, tab_count FROM sync_stats WHERE user_id = $1",
             user_id
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        (row.bookmark_count, row.history_visit_count, row.tab_count)
+        (row.bookmark_count, row.tab_count)
     };
 
     // `/snapshot` always computes "as of now"; compare against it.
@@ -1842,7 +1848,8 @@ fn bulk_history_op(op_id: Uuid, object_id: Uuid, seq: i64, visit_count: i64) -> 
         "operationType": "bulkImport",
         "encryptionVersion": 0,
         "payload": { "v": 1, "bulkVersion": 1, "visitCount": visit_count, "segments": [] },
-        "visitCount": visit_count
+        "visitCount": visit_count,
+        "visitHours": { Utc::now().format("%Y-%m-%dT%H:00:00.000Z").to_string(): visit_count }
     })
 }
 

@@ -182,7 +182,7 @@ old key (SDEK_v(n))
       is still derivable from AK, which every authorized device still holds
 ```
 
-**Password change** (`POST/PATCH /api/v1/auth/password`, web dashboard):
+**Password change** (`PATCH /api/v1/auth/password`, web dashboard):
 because the data key is not derived from the password, this does **not**
 change what any device can decrypt. The client derives the old `authKey`/`KEK` (via a fresh
 prelogin call) to unwrap the current AK, picks a *new* `kdfSalt`, derives a

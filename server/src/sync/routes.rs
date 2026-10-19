@@ -60,14 +60,13 @@ const MAX_UPLOAD_BODY_BYTES: usize = MAX_OPERATIONS_PER_BATCH * MAX_PAYLOAD_BYTE
 const MAX_CONCURRENT_UPLOADS: usize = 16;
 
 /// Clients below the minimum protocol version can't write, but can still
-/// read (docs/protocol.md §13). The header is optional for now.
+/// read (docs/protocol.md §13). The header is required.
 fn reject_if_protocol_too_old(headers: &HeaderMap, state: &AppState) -> AppResult<()> {
-    let Some(value) = headers.get(PROTOCOL_VERSION_HEADER) else {
-        return Ok(());
-    };
-    let Ok(version) = value.to_str().unwrap_or("").parse::<u32>() else {
-        return Ok(());
-    };
+    let version = headers
+        .get(PROTOCOL_VERSION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or(AppError::ProtocolTooOld)?;
     if version < state.config.minimum_supported_protocol_version {
         return Err(AppError::ProtocolTooOld);
     }
@@ -244,7 +243,7 @@ fn check_op_shape(op: &OperationIn, require_encryption: bool) -> Result<(), &'st
         return Err("unexpected_visit_count");
     }
     // Hourly visit-count buckets (docs/protocol.md §8.3.2): `visitHours`
-    // is legal only on `historyVisit` ops, and its shape depends on
+    // is required on `historyVisit` ops and illegal on any other, and its shape depends on
     // whether this op is a `bulkImport` chunk (entries must sum to
     // `visitCount`, already validated `Some(1..=MAX_VISIT_COUNT_PER_OP)`
     // above) or a single `visit` (exactly one entry, value 1 — a live
@@ -256,7 +255,10 @@ fn check_op_shape(op: &OperationIn, require_encryption: bool) -> Result<(), &'st
         if op.visit_hours.is_some() {
             return Err("unexpected_visit_hours");
         }
-    } else if let Some(hours) = &op.visit_hours {
+    } else {
+        let Some(hours) = &op.visit_hours else {
+            return Err("missing_visit_hours");
+        };
         if hours.len() > MAX_VISIT_HOURS_ENTRIES {
             return Err("invalid_visit_hours");
         }
@@ -615,11 +617,7 @@ async fn process_batch(
         // Hourly visit buckets (docs/protocol.md §8.3.2): aggregated across
         // every accepted historyVisit op in this batch, in Rust, so the write
         // below is one UPSERT per distinct hour rather than one per op.
-        // `legacy_visit_total` covers ops with no `visitHours` at all (older
-        // clients) — bucketed separately, at this transaction's own `now()`,
-        // once the loop below finishes (see the query right after it).
         let mut hour_buckets: HashMap<DateTime<Utc>, i64> = HashMap::new();
-        let mut legacy_visit_total: i64 = 0;
 
         for (i, &op_index) in accepted_indices.iter().enumerate() {
             let cursor = start_cursor + i as i64;
@@ -654,17 +652,9 @@ async fn process_batch(
                 bulk_object_ids.insert(op.object_id);
             }
             if op.object_type == "historyVisit" {
-                match op.visit_hours.take() {
-                    Some(hours) => {
-                        for (hour, count) in hours {
-                            *hour_buckets.entry(hour).or_insert(0) += count;
-                        }
-                    }
-                    // No histogram (older client build): bucket the whole op
-                    // — visitCount for a bulk chunk, 1 for a plain visit — at
-                    // this transaction's own upload hour, computed once,
-                    // right after this loop.
-                    None => legacy_visit_total += op.visit_count.unwrap_or(1),
+                // Validated present on every `historyVisit` op above.
+                for (hour, count) in op.visit_hours.take().into_iter().flatten() {
+                    *hour_buckets.entry(hour).or_insert(0) += count;
                 }
             }
 
@@ -697,7 +687,6 @@ async fn process_batch(
         // never restore, so the tab restore term is always 0 today.
         let bookmark_types: &[&str] = &["bookmark", "bookmarkFolder"];
         let tab_types: &[&str] = &["tab"];
-        let history_types: &[&str] = &["historyVisit"];
 
         // Take the tag-1 stats lock (same as compaction and `/stats`), then
         // compute deltas from each object's real before/after state, not
@@ -746,14 +735,6 @@ async fn process_batch(
             .map(|r| (r.object_type, r.object_id))
             .collect()
         };
-
-        // History counts visits, not rows. It can't be deleted or restored,
-        // so it's safe to compute straight from `originations`.
-        let history_visit_delta: i64 = originations
-            .iter()
-            .filter(|((t, _), _)| history_types.contains(&t.as_str()))
-            .map(|(_, v)| *v)
-            .sum();
 
         sqlx::query!(
             r#"
@@ -810,7 +791,7 @@ async fn process_batch(
             // back by the `known_bulk` lookup above, specifically so a
             // retry (after `sync::compaction` has deleted the original
             // `sync_operations` row) still resolves to `Duplicate` instead
-            // of double-counting `sync_stats.history_visit_count`. One row
+            // of double-counting the visit buckets. One row
             // per accepted bulk chunk is bounded (an import produces a
             // handful of chunks, not one per visit), unlike one row per
             // visit. Every other object type has at least one
@@ -821,8 +802,7 @@ async fn process_batch(
             // keep writing it regardless. This filters at the insert site
             // rather than changing `is_origination_operation`'s return
             // value, which other correctness paths (the ownership
-            // pre-check skip above, and the `history_visit_delta` stats
-            // calculation) still rely on.
+            // pre-check skip above) still rely on.
             let (types, ids): (Vec<String>, Vec<Uuid>) = originations
                 .into_keys()
                 .filter(|(object_type, id)| {
@@ -954,33 +934,24 @@ async fn process_batch(
         //
         // The tag-1 lock taken above is still held here.
         //
-        // `history_visit_count` here (and `compact_user`'s own authoritative
-        // recount of it) is kept exactly as it was — still written on every
-        // batch — but is no longer what `/stats` reads to answer "how many
-        // history visits are synced" (docs/protocol.md §8.3.2): that now
-        // sums `history_visit_hours`, written just below, which buckets by
-        // real visit time instead of upload time. Left in place rather than
-        // removed: it costs nothing to keep populated and ripping it out
-        // would be a larger, purely cosmetic change for no correctness gain.
+        //
+        // History visit counts live in `history_visit_hours`, written below.
         if bookmark_delta != 0
-            || history_visit_delta != 0
             || tab_delta != 0
             || batch_storage_bytes != 0
         {
             sqlx::query!(
                 r#"
-                INSERT INTO sync_stats (user_id, bookmark_count, history_visit_count, tab_count, storage_bytes)
-                VALUES ($1, GREATEST(0::bigint, $2), GREATEST(0::bigint, $3), GREATEST(0::bigint, $4), GREATEST(0::bigint, $5))
+                INSERT INTO sync_stats (user_id, bookmark_count, tab_count, storage_bytes)
+                VALUES ($1, GREATEST(0::bigint, $2), GREATEST(0::bigint, $3), GREATEST(0::bigint, $4))
                 ON CONFLICT (user_id) DO UPDATE SET
                     bookmark_count = GREATEST(0::bigint, sync_stats.bookmark_count + $2),
-                    history_visit_count = GREATEST(0::bigint, sync_stats.history_visit_count + $3),
-                    tab_count = GREATEST(0::bigint, sync_stats.tab_count + $4),
-                    storage_bytes = GREATEST(0::bigint, sync_stats.storage_bytes + $5),
+                    tab_count = GREATEST(0::bigint, sync_stats.tab_count + $3),
+                    storage_bytes = GREATEST(0::bigint, sync_stats.storage_bytes + $4),
                     updated_at = now()
                 "#,
                 device.user_id,
                 bookmark_delta,
-                history_visit_delta,
                 tab_delta,
                 batch_storage_bytes
             )
@@ -993,21 +964,7 @@ async fn process_batch(
         // above for the `sync_stats` upsert — every accepted historyVisit op
         // is itself an origination (`vocabulary::is_origination_operation`),
         // so `touches_stats` (and therefore the lock) is already guaranteed
-        // true whenever `hour_buckets`/`legacy_visit_total` is non-empty.
-        // `legacy_visit_total` (ops with no `visitHours` at all) is folded
-        // into `hour_buckets` at this transaction's own `now()` — Postgres's
-        // `now()` is the transaction start time, the same instant
-        // `sync_operations.created_at`'s `DEFAULT now()` resolves to for
-        // every row this same INSERT above just wrote, so this is exactly
-        // "bucket at the hour this op gets".
-        if legacy_visit_total > 0 {
-            let legacy_hour: DateTime<Utc> = sqlx::query_scalar!(
-                r#"SELECT date_trunc('hour', now()) AS "hour!: DateTime<Utc>""#
-            )
-            .fetch_one(&mut *tx)
-            .await?;
-            *hour_buckets.entry(legacy_hour).or_insert(0) += legacy_visit_total;
-        }
+        // true whenever `hour_buckets` is non-empty.
         if !hour_buckets.is_empty() {
             let (hours, counts): (Vec<DateTime<Utc>>, Vec<i64>) = hour_buckets.into_iter().unzip();
             sqlx::query!(

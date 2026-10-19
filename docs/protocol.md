@@ -192,7 +192,7 @@ optimistically.
   is given a permanent ledger row in specifically so this lookup has
   something to find), so a retry after compaction — even one that reserves
   a fresh `deviceSequence` — still reads as `duplicate` rather than
-  double-counting `sync_stats.history_visit_count`.
+  double-counting the `history_visit_hours` buckets.
 
 ---
 
@@ -635,17 +635,17 @@ payloads are end-to-end encrypted, the server has no way to see real visit
 times unless the client sends them separately — so it does, in plaintext,
 as counts only (never URLs or titles):
 
-- Upload operations may carry an optional `visitHours` field: a JSON object
+- `historyVisit` upload operations must carry a `visitHours` field: a JSON object
   mapping an hour-aligned UTC RFC3339 timestamp string to a positive integer
-  count, e.g. `{"2026-09-23T09:00:00.000Z": 12}`. Only `historyVisit` ops
-  may carry it; every key must be aligned to the hour (minute/second/
+  count, e.g. `{"2026-09-23T09:00:00.000Z": 12}`. Other ops must not
+  carry it; every key must be aligned to the hour (minute/second/
   nanosecond zero) and no more than a day in the future; every value must be
   `>= 1`; at most 100,000 entries per op.
 - A `visit` op's `visitHours` must have exactly one entry with value 1 (a
   live visit is always exactly one visit in exactly one hour). A
   `bulkImport` chunk's entries must sum to exactly its `visitCount`.
   Violating either is rejected (`visit_hours_mismatch` /
-  `invalid_visit_hours` / `unexpected_visit_hours`), never silently
+  `invalid_visit_hours` / `missing_visit_hours` / `unexpected_visit_hours`), never silently
   truncated or ignored.
 - The server aggregates accepted ops' buckets into a dedicated
   `history_visit_hours` table (`user_id, hour, visits`), independent of
@@ -656,10 +656,6 @@ as counts only (never URLs or titles):
   visit right at the edge of the retention window may count for up to an
   hour longer or shorter than the exact cutoff — an accepted trade-off, not
   a bug.
-- Ops uploaded by clients built before this field existed carry no
-  `visitHours` at all; the server falls back to bucketing the whole op
-  (`visitCount` or 1) at its upload hour, same as the pre-existing
-  `created_at`-based behavior for that one row.
 - A URL whose *only* visits are hidden redirect hops is not enumerable
   through `chrome.history`'s extension API at all (a Chromium platform
   limit, not a bug in this protocol) and so can never contribute to either
@@ -971,6 +967,8 @@ Rules:
   don't know `bulkImport` (§8.3.1): per this rule they store-but-don't-apply
   it, silently missing new history until updated. Documented, not gated
   (revisit only if peer-version data says otherwise).
+- Write endpoints require the `X-Protocol-Version` header; a request without
+  a valid one is rejected like a too-old client.
 - A client whose `protocolVersion` is below the server's
   `minimumSupportedProtocolVersion` is rejected on write endpoints with
   `426 Upgrade Required` and a machine-readable error; it may still read

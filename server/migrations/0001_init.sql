@@ -111,7 +111,6 @@ CREATE TABLE sync_operations (
     CONSTRAINT uq_sync_operations_server_cursor UNIQUE (user_id, server_cursor)
 );
 
-CREATE INDEX idx_sync_operations_user_cursor ON sync_operations(user_id, server_cursor);
 CREATE INDEX idx_sync_operations_object ON sync_operations(user_id, object_type, object_id);
 
 -- Terminal-operation lookups (`prune_compacted_operations`) only ever filter
@@ -163,13 +162,11 @@ CREATE TABLE sync_objects (
 );
 
 -- Per-user object counts, kept fresh by process_batch's incremental deltas,
--- compaction's authoritative reconciliation, and the /stats handler's lazy
--- backfill — avoids deserializing an account's entire snapshot just to
+-- compaction's authoritative reconciliation — avoids deserializing an account's entire snapshot just to
 -- answer "how many of each type do you have".
 CREATE TABLE sync_stats (
     user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     bookmark_count BIGINT NOT NULL DEFAULT 0 CHECK (bookmark_count >= 0),
-    history_visit_count BIGINT NOT NULL DEFAULT 0 CHECK (history_visit_count >= 0),
     tab_count BIGINT NOT NULL DEFAULT 0 CHECK (tab_count >= 0),
     -- Sum of `sync_operations.payload_bytes` currently on-disk for this
     -- account (F-04): incremented by `process_batch` on insert, decremented
@@ -177,13 +174,7 @@ CREATE TABLE sync_stats (
     -- log's real size. Checked against `Config::max_account_storage_bytes`
     -- before a new upload is accepted.
     storage_bytes BIGINT NOT NULL DEFAULT 0 CHECK (storage_bytes >= 0),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    -- Marks accounts that predate `history_visit_hours`: stamped so
-    -- `sync::routes::stats` knows to seed that table once, lazily, from
-    -- existing live `historyVisit` objects before trusting it. NULL for
-    -- accounts created by a build that already writes `history_visit_hours`
-    -- directly.
-    history_hours_seed_before TIMESTAMPTZ NULL
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Per-hour visit-count histogram, keyed on real visit time rather than

@@ -325,14 +325,6 @@ interface BulkChunkOperation extends LocalOperation {
   chunkBytes: number;
 }
 
-// Page-granularity resume fields written by older builds; read only to
-// migrate an import that was in progress.
-interface LegacyResumeFields {
-  historyBulkResumePageEndTime?: number;
-  historyBulkResumePreviousPageEndTime?: number;
-  historyBulkResumeChunkIndex?: number;
-}
-
 /** Collects history into bulkImport chunk ops and awaits `onChunk` for each
  * before continuing, so at most one chunk is resident. On disconnect
  * (`aborted`), chunks already uploaded stay (each is idempotent) and the
@@ -348,41 +340,10 @@ export async function collectHistoryBulk(
   // A persisted scope always wins, so a retry derives the same chunk ids.
   const effectiveCutoff =
     device.historyBulkCutoffMs !== undefined ? device.historyBulkCutoffMs : cutoffMs;
-  let effectiveEndMs = device.historyBulkEndMs !== undefined ? device.historyBulkEndMs : endMs;
-
-  // An import started by an older build (old resume fields, or a cutoff
-  // without an end) restarts from chunk 0 with the end fixed at now. Chunks
-  // already sent re-derive the same ids and are deduplicated by the server.
-  const legacy = device as typeof device & LegacyResumeFields;
-  const isLegacyInProgress =
-    legacy.historyBulkResumePageEndTime !== undefined ||
-    legacy.historyBulkResumePreviousPageEndTime !== undefined ||
-    legacy.historyBulkResumeChunkIndex !== undefined ||
-    (device.historyBulkCutoffMs !== undefined && device.historyBulkEndMs === undefined);
+  const effectiveEndMs = device.historyBulkEndMs !== undefined ? device.historyBulkEndMs : endMs;
 
   let uploadedChunks = device.historyBulkUploadedChunks ?? 0;
   let uploadedVisits = device.historyBulkUploadedVisits ?? 0;
-
-  if (isLegacyInProgress) {
-    effectiveEndMs = Date.now();
-    uploadedChunks = 0;
-    uploadedVisits = 0;
-    const current = await getDevice();
-    if (current) {
-      const migrated = { ...current } as typeof current & LegacyResumeFields;
-      delete migrated.historyBulkResumePageEndTime;
-      delete migrated.historyBulkResumePreviousPageEndTime;
-      delete migrated.historyBulkResumeChunkIndex;
-      migrated.historyBulkEndMs = effectiveEndMs;
-      migrated.historyBulkUploadedChunks = undefined;
-      migrated.historyBulkUploadedVisits = undefined;
-      await putDevice(migrated);
-    }
-    console.log("HelixSync: bulk history migrated legacy in-progress device record", {
-      effectiveCutoff,
-      effectiveEndMs,
-    });
-  }
 
   const startedAt = Date.now();
   console.log("HelixSync: bulk history collect starting", {

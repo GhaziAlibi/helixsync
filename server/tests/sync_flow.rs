@@ -151,6 +151,7 @@ async fn duplicate_operation_upload_is_idempotent(pool: PgPool) {
 
     let res1 = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op.clone()] }))
         .await;
@@ -162,6 +163,7 @@ async fn duplicate_operation_upload_is_idempotent(pool: PgPool) {
     // Retry the same op (as after a dropped response).
     let res2 = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await;
@@ -194,6 +196,7 @@ async fn upload_of_another_users_operation_id_is_rejected_not_duplicate(pool: Pg
     let victim_op = sample_bookmark_op(shared_op_id, victim_object_id, 1, 1);
     let res1 = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&victim_access_token)
         .json(&json!({ "operations": [victim_op] }))
         .await;
@@ -205,6 +208,7 @@ async fn upload_of_another_users_operation_id_is_rejected_not_duplicate(pool: Pg
     let attacker_op = sample_bookmark_op(shared_op_id, Uuid::now_v7(), 1, 1);
     let res2 = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&attacker_access_token)
         .json(&json!({ "operations": [attacker_op] }))
         .await;
@@ -239,6 +243,7 @@ async fn empty_operations_batch_returns_current_cursor(pool: PgPool) {
     let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
     let res1 = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await;
@@ -249,6 +254,7 @@ async fn empty_operations_batch_returns_current_cursor(pool: PgPool) {
     // An empty batch succeeds and returns the current cursor.
     let res2 = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [] }))
         .await;
@@ -273,6 +279,7 @@ async fn duplicate_only_batch_returns_current_cursor_not_stale_max(pool: PgPool)
     let op_a = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
     let res_a = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token_a)
         .json(&json!({ "operations": [op_a.clone()] }))
         .await;
@@ -284,6 +291,7 @@ async fn duplicate_only_batch_returns_current_cursor_not_stale_max(pool: PgPool)
     let op_b = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
     let res_b = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token_b)
         .json(&json!({ "operations": [op_b] }))
         .await;
@@ -299,6 +307,7 @@ async fn duplicate_only_batch_returns_current_cursor_not_stale_max(pool: PgPool)
     // the account's current cursor (`cursor_after_b`), not the old one.
     let res_retry = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token_a)
         .json(&json!({ "operations": [op_a] }))
         .await;
@@ -328,6 +337,7 @@ async fn stale_device_sequence_is_reported_duplicate(pool: PgPool) {
     let op1 = sample_bookmark_op(Uuid::now_v7(), object_id, 5, 10);
     let res1 = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op1] }))
         .await;
@@ -338,6 +348,7 @@ async fn stale_device_sequence_is_reported_duplicate(pool: PgPool) {
     op2["operationType"] = json!("create");
     let res2 = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op2] }))
         .await;
@@ -368,6 +379,7 @@ async fn out_of_order_device_sequence_within_one_batch_is_rejected(pool: PgPool)
 
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op1, op2, op3, op4] }))
         .await;
@@ -405,6 +417,7 @@ async fn per_user_require_encryption_rejects_plaintext_even_when_global_flag_is_
     let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1); // encryptionVersion: 0
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await;
@@ -530,6 +543,7 @@ async fn global_require_encryption_rejects_plaintext_regardless_of_per_user_sett
     let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1); // encryptionVersion: 0
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await;
@@ -550,6 +564,7 @@ async fn download_returns_operations_after_cursor(pool: PgPool) {
     let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
     let upload_res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await;
@@ -593,6 +608,7 @@ async fn cursor_too_old_returns_documented_body(pool: PgPool) {
     let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await
@@ -628,6 +644,7 @@ async fn cursor_above_ceiling_returns_conflict_not_empty_page(pool: PgPool) {
     let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await
@@ -657,6 +674,7 @@ async fn delete_creates_tombstone_excluded_from_snapshot(pool: PgPool) {
     let create_op = sample_bookmark_op(Uuid::now_v7(), object_id, 1, 1);
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [create_op] }))
         .await
@@ -674,6 +692,7 @@ async fn delete_creates_tombstone_excluded_from_snapshot(pool: PgPool) {
     });
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [delete_op] }))
         .await
@@ -705,6 +724,7 @@ async fn snapshot_reports_max_encryption_version_across_objects(pool: PgPool) {
 
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [plaintext_op, encrypted_op] }))
         .await
@@ -756,6 +776,7 @@ async fn extension_storage_entry_set_then_delete_is_accepted(pool: PgPool) {
     });
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [set_op] }))
         .await;
@@ -776,6 +797,7 @@ async fn extension_storage_entry_set_then_delete_is_accepted(pool: PgPool) {
     });
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [delete_op] }))
         .await;
@@ -804,6 +826,7 @@ async fn extension_meta_observe_is_accepted(pool: PgPool) {
     });
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [observe_op] }))
         .await;
@@ -824,6 +847,7 @@ async fn snapshot_merges_concurrent_field_updates_independently(pool: PgPool) {
     let create_op = sample_bookmark_op(Uuid::now_v7(), object_id, 1, 1);
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_a)
         .json(&json!({ "operations": [create_op] }))
         .await
@@ -843,6 +867,7 @@ async fn snapshot_merges_concurrent_field_updates_independently(pool: PgPool) {
     });
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_a)
         .json(&json!({ "operations": [title_update] }))
         .await
@@ -860,6 +885,7 @@ async fn snapshot_merges_concurrent_field_updates_independently(pool: PgPool) {
     });
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_b)
         .json(&json!({ "operations": [url_update] }))
         .await
@@ -907,6 +933,7 @@ async fn snapshot_merge_preserves_fields_outside_field_merge(pool: PgPool) {
     });
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_a)
         .json(&json!({ "operations": [create_op] }))
         .await
@@ -933,6 +960,7 @@ async fn snapshot_merge_preserves_fields_outside_field_merge(pool: PgPool) {
     });
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_a)
         .json(&json!({ "operations": [title_update] }))
         .await
@@ -970,6 +998,7 @@ async fn revoked_device_is_rejected(pool: PgPool) {
     let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await;
@@ -1017,6 +1046,7 @@ async fn batch_upload_resolves_ownership_for_object_created_earlier_in_same_batc
 
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [create_op, update_op] }))
         .await;
@@ -1048,6 +1078,7 @@ async fn batch_upload_returns_mixed_accepted_duplicate_and_rejected(pool: PgPool
     let first = sample_bookmark_op(already_uploaded_id, Uuid::now_v7(), 1, 1);
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [first.clone()] }))
         .await
@@ -1059,6 +1090,7 @@ async fn batch_upload_returns_mixed_accepted_duplicate_and_rejected(pool: PgPool
 
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [first, new_valid, invalid] }))
         .await;
@@ -1092,6 +1124,7 @@ async fn batch_upload_rejects_once_storage_quota_exceeded(pool: PgPool) {
     let first = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [first] }))
         .await;
@@ -1104,6 +1137,7 @@ async fn batch_upload_rejects_once_storage_quota_exceeded(pool: PgPool) {
     let second = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 2, 2);
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [second] }))
         .await;
@@ -1131,6 +1165,7 @@ async fn storage_bytes_grows_on_upload_and_shrinks_on_compaction_prune(pool: PgP
     let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await
@@ -1187,6 +1222,7 @@ async fn batch_upload_rejects_payload_too_large(pool: PgPool) {
 
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [oversize_op] }))
         .await;
@@ -1217,6 +1253,7 @@ async fn batch_upload_rejects_dense_payload(pool: PgPool) {
 
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [dense_op] }))
         .await;
@@ -1254,6 +1291,7 @@ async fn batch_upload_accepts_large_sparse_payloads(pool: PgPool) {
 
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [envelope_op, bulk_op] }))
         .await;
@@ -1288,6 +1326,7 @@ async fn concurrent_uploads_from_one_device_do_not_starve_other_requests(pool: P
         let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), seq, seq);
         let req = server
             .post("/api/v1/sync/operations")
+            .add_header("x-protocol-version", "1")
             .authorization_bearer(&token_a)
             .json(&json!({ "operations": [op] }));
         async move { req.await }
@@ -1296,6 +1335,7 @@ async fn concurrent_uploads_from_one_device_do_not_starve_other_requests(pool: P
     let other_op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
     let other_req = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_b)
         .json(&json!({ "operations": [other_op] }));
     let other_request = async move { other_req.await };
@@ -1341,6 +1381,7 @@ async fn upload_semaphore_acquire_timeout_rejects_busy_request(pool: PgPool) {
     let started = std::time::Instant::now();
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await;
@@ -1392,6 +1433,7 @@ async fn route_level_timeout_cuts_off_a_slow_request(pool: PgPool) {
     let started = std::time::Instant::now();
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await;
@@ -1415,7 +1457,8 @@ fn history_visit_op(op_id: Uuid, object_id: Uuid, seq: i64, url: &str) -> serde_
         "objectId": object_id,
         "operationType": "visit",
         "encryptionVersion": 0,
-        "payload": { "url": url, "title": "Example", "visitedAt": "2026-01-01T00:00:00.000Z" }
+        "payload": { "url": url, "title": "Example", "visitedAt": "2026-01-01T00:00:00.000Z" },
+        "visitHours": { Utc::now().format("%Y-%m-%dT%H:00:00.000Z").to_string(): 1 }
     })
 }
 
@@ -1440,6 +1483,7 @@ async fn expired_history_visit_is_excluded_from_snapshot_and_stats(pool: PgPool)
     let old_object_id = Uuid::now_v7();
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [history_visit_op(old_op_id, old_object_id, 1, "https://old.example.com")] }))
         .await
@@ -1448,6 +1492,7 @@ async fn expired_history_visit_is_excluded_from_snapshot_and_stats(pool: PgPool)
     let recent_object_id = Uuid::now_v7();
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [history_visit_op(Uuid::now_v7(), recent_object_id, 2, "https://recent.example.com")] }))
         .await
@@ -1473,40 +1518,6 @@ async fn expired_history_visit_is_excluded_from_snapshot_and_stats(pool: PgPool)
         "expired visit must not appear in the snapshot: {objects:?}"
     );
     assert_eq!(objects[0]["objectId"], json!(recent_object_id));
-
-    // `sync_stats` only changes on uploads, so right after the backdate it
-    // still counts the expired visit. Checked in the table directly, since
-    // `/stats` would just hit its 30s cache.
-    let user_id = user_id_for_email(&pool, "nora@example.com").await;
-    let (_, history_visits_before_compaction, _) = sync_stats_row(&pool, user_id).await;
-    assert_eq!(
-        history_visits_before_compaction, 2,
-        "incremental sync_stats has no retention-decay signal, so it still counts the not-yet-reconciled expired visit"
-    );
-
-    // Compaction recounts from the retention-filtered objects. Ack first so
-    // it covers both ops.
-    sync_device(&server, &access_token).await;
-    compaction::run_once(&state).await.unwrap();
-
-    // Checked against the `sync_stats` table directly, not `/stats`'s JSON
-    // response: `/stats` now answers from `history_visit_hours` (Change 3,
-    // docs/protocol.md §8.3.2), which this test's manual `UPDATE
-    // sync_operations SET created_at = ...` above never touches — that
-    // bucket was already written, at real upload time, before this test
-    // artificially backdated `created_at` to simulate an old visit. This is
-    // exactly the upload-time-vs-visit-time gap Change 3 exists to close;
-    // `visit_hours_accepted_ops_respect_retention_window` above is the test
-    // that exercises retention exclusion the way it now actually happens
-    // (via real visit-hour buckets, not backdated upload time). What this
-    // assertion still correctly verifies is that `compact_user`'s
-    // authoritative recount of the legacy `history_visit_count` column
-    // (kept, but no longer read by `/stats`) is unaffected by Change 3.
-    let (_, history_visits_after_compaction, _) = sync_stats_row(&pool, user_id).await;
-    assert_eq!(
-        history_visits_after_compaction, 1,
-        "compaction must reconcile the legacy history_visit_count column to exclude the expired visit"
-    );
 }
 
 /// With "unlimited" retention, the old visit is still served.
@@ -1527,6 +1538,7 @@ async fn unlimited_history_retention_keeps_old_visits(pool: PgPool) {
     let old_object_id = Uuid::now_v7();
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [history_visit_op(old_op_id, old_object_id, 1, "https://very-old.example.com")] }))
         .await
@@ -1676,6 +1688,7 @@ async fn batch_upload_dedupes_tombstone_writes_for_same_object(pool: PgPool) {
 
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [create_op, delete_op_a, delete_op_b] }))
         .await;
@@ -1715,6 +1728,7 @@ async fn history_visit_does_not_grow_sync_objects_ledger(pool: PgPool) {
     let bookmark_op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 2, 2);
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [visit_op, bookmark_op] }))
         .await;
@@ -1756,16 +1770,16 @@ async fn user_id_for_email(pool: &PgPool, email: &str) -> Uuid {
 
 /// Reads `sync_stats` directly, skipping the 30s `/stats` cache. A missing
 /// row reads as zeros.
-async fn sync_stats_row(pool: &PgPool, user_id: Uuid) -> (i64, i64, i64) {
+async fn sync_stats_row(pool: &PgPool, user_id: Uuid) -> (i64, i64) {
     sqlx::query!(
-        "SELECT bookmark_count, history_visit_count, tab_count FROM sync_stats WHERE user_id = $1",
+        "SELECT bookmark_count, tab_count FROM sync_stats WHERE user_id = $1",
         user_id
     )
     .fetch_optional(pool)
     .await
     .unwrap()
-    .map(|r| (r.bookmark_count, r.history_visit_count, r.tab_count))
-    .unwrap_or((0, 0, 0))
+    .map(|r| (r.bookmark_count, r.tab_count))
+    .unwrap_or((0, 0))
 }
 
 /// Builds an op with an empty payload; only the types matter for stats tests.
@@ -1777,7 +1791,7 @@ fn make_op(
     seq: i64,
     lamport: i64,
 ) -> serde_json::Value {
-    json!({
+    let mut op = json!({
         "operationId": op_id,
         "deviceSequence": seq,
         "lamportTimestamp": lamport,
@@ -1786,7 +1800,11 @@ fn make_op(
         "operationType": operation_type,
         "encryptionVersion": 0,
         "payload": {}
-    })
+    });
+    if object_type == "historyVisit" {
+        op["visitHours"] = json!({ hour_key(Utc::now()): 1 });
+    }
+    op
 }
 
 /// Downloads twice so the server records the ack (docs/protocol.md §4.4),
@@ -1818,6 +1836,7 @@ async fn stats_reflects_counts_across_batches(pool: PgPool) {
     let visit_a = Uuid::now_v7();
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [
             make_op("bookmark", "create", Uuid::now_v7(), bookmark_a, 1, 1),
@@ -1831,6 +1850,7 @@ async fn stats_reflects_counts_across_batches(pool: PgPool) {
     let tab_a = Uuid::now_v7();
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [
             make_op("tab", "create", Uuid::now_v7(), tab_a, 4, 4),
@@ -1866,6 +1886,7 @@ async fn stats_nets_out_same_batch_create_then_delete(pool: PgPool) {
     let object_id = Uuid::now_v7();
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [
             make_op("bookmark", "create", Uuid::now_v7(), object_id, 1, 1),
@@ -1877,7 +1898,7 @@ async fn stats_nets_out_same_batch_create_then_delete(pool: PgPool) {
     assert_eq!(body["accepted"].as_array().unwrap().len(), 2);
 
     let user_id = user_id_for_email(&pool, "quinn@example.com").await;
-    let (bookmarks, _, _) = sync_stats_row(&pool, user_id).await;
+    let (bookmarks, _) = sync_stats_row(&pool, user_id).await;
     assert_eq!(
         bookmarks, 0,
         "create+delete in the same batch must net to zero, not undercount/overcount"
@@ -1902,13 +1923,14 @@ async fn stats_decreases_when_object_deleted_in_later_batch(pool: PgPool) {
     let object_id = Uuid::now_v7();
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [make_op("bookmark", "create", Uuid::now_v7(), object_id, 1, 1)] }))
         .await
         .assert_status_ok();
 
     let user_id = user_id_for_email(&pool, "rex@example.com").await;
-    let (bookmarks_after_create, _, _) = sync_stats_row(&pool, user_id).await;
+    let (bookmarks_after_create, _) = sync_stats_row(&pool, user_id).await;
     assert_eq!(
         bookmarks_after_create, 1,
         "creation batch must apply a +1 delta"
@@ -1916,12 +1938,13 @@ async fn stats_decreases_when_object_deleted_in_later_batch(pool: PgPool) {
 
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [make_op("bookmark", "delete", Uuid::now_v7(), object_id, 2, 2)] }))
         .await
         .assert_status_ok();
 
-    let (bookmarks_after_delete, _, _) = sync_stats_row(&pool, user_id).await;
+    let (bookmarks_after_delete, _) = sync_stats_row(&pool, user_id).await;
     assert_eq!(
         bookmarks_after_delete, 0,
         "a later batch's -1 delta must be applied on top of the earlier +1"
@@ -1942,6 +1965,7 @@ async fn compaction_reconciles_stats_after_snapshot(pool: PgPool) {
     let visit_id = Uuid::now_v7();
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [
             make_op("bookmark", "create", Uuid::now_v7(), bookmark_id, 1, 1),
@@ -1958,7 +1982,7 @@ async fn compaction_reconciles_stats_after_snapshot(pool: PgPool) {
 
     // Corrupt the counts.
     sqlx::query!(
-        "UPDATE sync_stats SET bookmark_count = 999, tab_count = 999, history_visit_count = 999 WHERE user_id = $1",
+        "UPDATE sync_stats SET bookmark_count = 999, tab_count = 999 WHERE user_id = $1",
         user_id
     )
     .execute(&pool)
@@ -1967,14 +1991,10 @@ async fn compaction_reconciles_stats_after_snapshot(pool: PgPool) {
 
     compaction::run_once(&state).await.unwrap();
 
-    let (bookmarks, history_visits, tabs) = sync_stats_row(&pool, user_id).await;
+    let (bookmarks, tabs) = sync_stats_row(&pool, user_id).await;
     assert_eq!(
         bookmarks, 1,
         "compaction must overwrite the corrupted bookmark_count with the true count"
-    );
-    assert_eq!(
-        history_visits, 1,
-        "compaction must overwrite the corrupted history_visit_count with the true count"
     );
     assert_eq!(
         tabs, 1,
@@ -2008,6 +2028,7 @@ async fn concurrent_deletes_of_same_object_decrement_once(pool: PgPool) {
     let untouched_object_id = Uuid::now_v7();
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_a)
         .json(&json!({ "operations": [
             make_op("bookmark", "create", Uuid::now_v7(), object_id, 1, 1),
@@ -2017,7 +2038,7 @@ async fn concurrent_deletes_of_same_object_decrement_once(pool: PgPool) {
         .assert_status_ok();
 
     let user_id = user_id_for_email(&pool, "uzo@example.com").await;
-    let (bookmarks_after_create, _, _) = sync_stats_row(&pool, user_id).await;
+    let (bookmarks_after_create, _) = sync_stats_row(&pool, user_id).await;
     assert_eq!(
         bookmarks_after_create, 2,
         "creation batch must apply a +1 delta per created bookmark"
@@ -2027,11 +2048,13 @@ async fn concurrent_deletes_of_same_object_decrement_once(pool: PgPool) {
     // valid on its own.
     let delete_a_req = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_a)
         .json(&json!({ "operations": [make_op("bookmark", "delete", Uuid::now_v7(), object_id, 3, 3)] }));
     let delete_a = async move { delete_a_req.await };
     let delete_b_req = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&token_b)
         .json(&json!({ "operations": [make_op("bookmark", "delete", Uuid::now_v7(), object_id, 1, 2)] }));
     let delete_b = async move { delete_b_req.await };
@@ -2045,7 +2068,7 @@ async fn concurrent_deletes_of_same_object_decrement_once(pool: PgPool) {
     res_a.assert_status_ok();
     res_b.assert_status_ok();
 
-    let (bookmarks_after_deletes, _, _) = sync_stats_row(&pool, user_id).await;
+    let (bookmarks_after_deletes, _) = sync_stats_row(&pool, user_id).await;
     assert_eq!(
         bookmarks_after_deletes, 1,
         "two concurrent deletes of the same object must decrement the count exactly once, not twice \
@@ -2079,6 +2102,7 @@ async fn idle_poll_with_unchanged_cursor_skips_cursor_write(pool: PgPool) {
     let op = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 1, 1);
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await
@@ -2124,6 +2148,7 @@ async fn idle_poll_with_unchanged_cursor_skips_cursor_write(pool: PgPool) {
     let op2 = sample_bookmark_op(Uuid::now_v7(), Uuid::now_v7(), 2, 2);
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op2] }))
         .await
@@ -2179,7 +2204,9 @@ fn bulk_history_op(
     });
     // The server reads the top-level `visitCount`, not the payload's copy.
     // `None` leaves the field out (not `null`).
-    if visit_count.is_none() {
+    if let Some(n) = visit_count {
+        op["visitHours"] = json!({ hour_key(Utc::now()): n });
+    } else {
         op.as_object_mut().unwrap().remove("visitCount");
     }
     op
@@ -2197,6 +2224,7 @@ async fn bulk_upload_validation_rejects_missing_and_unexpected_visit_count(pool:
     let missing = bulk_history_op(Uuid::now_v7(), Uuid::now_v7(), 1, None);
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [missing] }))
         .await;
@@ -2218,10 +2246,12 @@ async fn bulk_upload_validation_rejects_missing_and_unexpected_visit_count(pool:
         "operationType": "bulkImport",
         "encryptionVersion": 0,
         "payload": { "v": 1, "bulkVersion": 1, "visitCount": 0, "segments": [] },
-        "visitCount": 0
+        "visitCount": 0,
+        "visitHours": { hour_key(Utc::now()): 0 }
     });
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [zero] }))
         .await;
@@ -2237,6 +2267,7 @@ async fn bulk_upload_validation_rejects_missing_and_unexpected_visit_count(pool:
     smuggled["visitCount"] = json!(5);
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [smuggled] }))
         .await;
@@ -2252,6 +2283,7 @@ async fn bulk_upload_validation_rejects_missing_and_unexpected_visit_count(pool:
     bookmark_smuggled["visitCount"] = json!(5);
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [bookmark_smuggled] }))
         .await;
@@ -2272,10 +2304,12 @@ async fn bulk_upload_validation_rejects_missing_and_unexpected_visit_count(pool:
         "operationType": "bulkImport",
         "encryptionVersion": 0,
         "payload": { "v": 1, "bulkVersion": 1, "visitCount": 3, "segments": [] },
-        "visitCount": 3
+        "visitCount": 3,
+        "visitHours": { hour_key(Utc::now()): 3 }
     });
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [valid] }))
         .await;
@@ -2296,6 +2330,7 @@ async fn bulk_upload_rejects_visit_count_above_ceiling(pool: PgPool) {
     let too_many = bulk_history_op(Uuid::now_v7(), Uuid::now_v7(), 1, Some(1_000_001));
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [too_many] }))
         .await;
@@ -2310,6 +2345,7 @@ async fn bulk_upload_rejects_visit_count_above_ceiling(pool: PgPool) {
     let at_ceiling = bulk_history_op(Uuid::now_v7(), Uuid::now_v7(), 2, Some(1_000_000));
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [at_ceiling] }))
         .await;
@@ -2344,11 +2380,13 @@ async fn download_caps_page_by_byte_budget_not_just_row_count(pool: PgPool) {
             "operationType": "bulkImport",
             "encryptionVersion": 0,
             "payload": { "v": 1, "bulkVersion": 1, "visitCount": 1, "blob": big_blob },
-            "visitCount": 1
+            "visitCount": 1,
+            "visitHours": { hour_key(Utc::now()): 1 }
         }));
     }
     let upload_res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": ops }))
         .await;
@@ -2409,7 +2447,8 @@ async fn download_returns_oversized_first_row_alone_then_pages_to_the_rest(pool:
         "operationType": "bulkImport",
         "encryptionVersion": 0,
         "payload": { "v": 1, "bulkVersion": 1, "visitCount": 1, "blob": big_blob },
-        "visitCount": 1
+        "visitCount": 1,
+        "visitHours": { hour_key(Utc::now()): 1 }
     });
     let small_op = json!({
         "operationId": Uuid::now_v7(),
@@ -2420,10 +2459,12 @@ async fn download_returns_oversized_first_row_alone_then_pages_to_the_rest(pool:
         "operationType": "bulkImport",
         "encryptionVersion": 0,
         "payload": { "v": 1, "bulkVersion": 1, "visitCount": 1, "blob": "y" },
-        "visitCount": 1
+        "visitCount": 1,
+        "visitHours": { hour_key(Utc::now()): 1 }
     });
     let upload_res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [big_op, small_op] }))
         .await;
@@ -2468,7 +2509,7 @@ async fn bulk_upload_does_not_overflow_sync_stats_past_i32_max(pool: PgPool) {
     let user_id = user_id_for_email(&pool, "overflow-guard@example.com").await;
 
     sqlx::query!(
-        "INSERT INTO sync_stats (user_id, bookmark_count, history_visit_count, tab_count) VALUES ($1, 0, $2, 0)",
+        "INSERT INTO history_visit_hours (user_id, hour, visits) VALUES ($1, date_trunc('hour', now()), $2)",
         user_id,
         i32::MAX as i64
     )
@@ -2479,6 +2520,7 @@ async fn bulk_upload_does_not_overflow_sync_stats_past_i32_max(pool: PgPool) {
     let op = bulk_history_op(Uuid::now_v7(), Uuid::now_v7(), 1, Some(1_000_000));
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await;
@@ -2490,7 +2532,7 @@ async fn bulk_upload_does_not_overflow_sync_stats_past_i32_max(pool: PgPool) {
         "a batch must not 500 just because the account's counter already sits at i32::MAX"
     );
 
-    let (_, history_visits, _) = sync_stats_row(&pool, user_id).await;
+    let history_visits = history_visit_hours_sum(&pool, user_id).await;
     assert_eq!(
         history_visits,
         i32::MAX as i64 + 1_000_000,
@@ -2538,12 +2580,13 @@ async fn negative_delta_on_fresh_account_clamps_to_zero(pool: PgPool) {
         .collect();
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": ops }))
         .await
         .assert_status_ok();
 
-    let (bookmarks, _, _) = sync_stats_row(&pool, user_id).await;
+    let (bookmarks, _) = sync_stats_row(&pool, user_id).await;
     assert_eq!(
         bookmarks, 0,
         "a negative net delta on a fresh row must clamp to zero, not go negative"
@@ -2567,17 +2610,19 @@ async fn bulk_upload_counts_n_visits_in_stats(pool: PgPool) {
         "operationType": "bulkImport",
         "encryptionVersion": 0,
         "payload": { "v": 1, "bulkVersion": 1, "visitCount": 5000, "segments": [] },
-        "visitCount": 5000
+        "visitCount": 5000,
+        "visitHours": { hour_key(Utc::now()): 5000 }
     });
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await
         .assert_status_ok();
 
     let user_id = user_id_for_email(&pool, "bulk-counts@example.com").await;
-    let (_, history_visits, _) = sync_stats_row(&pool, user_id).await;
+    let history_visits = history_visit_hours_sum(&pool, user_id).await;
     assert_eq!(
         history_visits, 5000,
         "one bulk op must count N visits, not 1 row"
@@ -2592,255 +2637,6 @@ async fn bulk_upload_counts_n_visits_in_stats(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(stored, Some(5000));
-}
-
-/// After compaction, `history_visit_count` is N for a bulk import of N
-/// visits, not 1.
-#[sqlx::test(migrations = "./migrations")]
-async fn bulk_compaction_reconciles_to_n_not_one(pool: PgPool) {
-    let state = state_for_config(pool.clone(), test_config());
-    let server = server_for_state(state.clone());
-    register_and_login(&server, "bulk-compact@example.com").await;
-    let (_device_id, access_token) =
-        register_device(&server, "bulk-compact@example.com", "Laptop").await;
-
-    const N: i64 = 3210;
-    let bulk = json!({
-        "operationId": Uuid::now_v7(),
-        "deviceSequence": 1,
-        "lamportTimestamp": 1,
-        "objectType": "historyVisit",
-        "objectId": Uuid::now_v7(),
-        "operationType": "bulkImport",
-        "encryptionVersion": 0,
-        "payload": { "v": 1, "bulkVersion": 1, "visitCount": N, "segments": [] },
-        "visitCount": N
-    });
-    server
-        .post("/api/v1/sync/operations")
-        .authorization_bearer(&access_token)
-        .json(&json!({ "operations": [bulk] }))
-        .await
-        .assert_status_ok();
-
-    // 250 bookmarks, over the 200-op threshold, so compaction runs.
-    let mut ops = Vec::new();
-    for i in 0..250 {
-        ops.push(make_op(
-            "bookmark",
-            "create",
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            2 + i as i64,
-            2 + i as i64,
-        ));
-    }
-    // One batch (max 500); deviceSequence continues from 2.
-    server
-        .post("/api/v1/sync/operations")
-        .authorization_bearer(&access_token)
-        .json(&json!({ "operations": ops }))
-        .await
-        .assert_status_ok();
-
-    sync_device(&server, &access_token).await;
-
-    let user_id = user_id_for_email(&pool, "bulk-compact@example.com").await;
-    // Corrupt first, to prove it's overwritten.
-    sqlx::query!(
-        "UPDATE sync_stats SET history_visit_count = 999 WHERE user_id = $1",
-        user_id
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    compaction::run_once(&state).await.unwrap();
-
-    let (bookmarks, history_visits, _) = sync_stats_row(&pool, user_id).await;
-    assert_eq!(bookmarks, 250);
-    assert_eq!(
-        history_visits, N,
-        "compaction must converge on N visits, not 1 row"
-    );
-}
-
-/// The first-time `/stats` backfill also counts N for a bulk object, not 1.
-#[sqlx::test(migrations = "./migrations")]
-async fn bulk_stats_lazy_seed_counts_n(pool: PgPool) {
-    let server = server_for(pool.clone());
-    register_and_login(&server, "bulk-lazy@example.com").await;
-    let (_device_id, access_token) =
-        register_device(&server, "bulk-lazy@example.com", "Laptop").await;
-
-    let op = json!({
-        "operationId": Uuid::now_v7(),
-        "deviceSequence": 1,
-        "lamportTimestamp": 1,
-        "objectType": "historyVisit",
-        "objectId": Uuid::now_v7(),
-        "operationType": "bulkImport",
-        "encryptionVersion": 0,
-        "payload": { "v": 1, "bulkVersion": 1, "visitCount": 777, "segments": [] },
-        "visitCount": 777
-    });
-    server
-        .post("/api/v1/sync/operations")
-        .authorization_bearer(&access_token)
-        .json(&json!({ "operations": [op] }))
-        .await
-        .assert_status_ok();
-
-    // Delete the stats row so `/stats` does the backfill.
-    let user_id = user_id_for_email(&pool, "bulk-lazy@example.com").await;
-    sqlx::query!("DELETE FROM sync_stats WHERE user_id = $1", user_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let stats_res = server
-        .get("/api/v1/sync/stats")
-        .authorization_bearer(&access_token)
-        .await;
-    stats_res.assert_status_ok();
-    let stats: serde_json::Value = stats_res.json();
-    assert_eq!(stats["historyVisits"], json!(777));
-
-    let (_, history_visits, _) = sync_stats_row(&pool, user_id).await;
-    assert_eq!(history_visits, 777);
-}
-
-/// The `/stats` backfill races an upload from another device. Whichever
-/// gets the lock first, the final count must include both bookmarks, with
-/// no lost or double-counted update.
-#[sqlx::test(migrations = "./migrations")]
-async fn concurrent_lazy_backfill_and_upload_do_not_lose_or_double_count(pool: PgPool) {
-    let server = server_for(pool.clone());
-    register_and_login(&server, "race@example.com").await;
-    let (_device_a, token_a) = register_device(&server, "race@example.com", "Laptop").await;
-    let (_device_b, token_b) = register_device(&server, "race@example.com", "Phone").await;
-
-    server
-        .post("/api/v1/sync/operations")
-        .authorization_bearer(&token_a)
-        .json(&json!({ "operations": [
-            make_op("bookmark", "create", Uuid::now_v7(), Uuid::now_v7(), 1, 1),
-        ] }))
-        .await
-        .assert_status_ok();
-
-    let user_id = user_id_for_email(&pool, "race@example.com").await;
-    sqlx::query!("DELETE FROM sync_stats WHERE user_id = $1", user_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-    let stats_req = server
-        .get("/api/v1/sync/stats")
-        .authorization_bearer(&token_a);
-    let stats_request = async move { stats_req.await };
-
-    let upload_op = make_op("bookmark", "create", Uuid::now_v7(), Uuid::now_v7(), 1, 1);
-    let upload_req = server
-        .post("/api/v1/sync/operations")
-        .authorization_bearer(&token_b)
-        .json(&json!({ "operations": [upload_op] }));
-    let upload_request = async move { upload_req.await };
-
-    let (stats_result, upload_result) = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        futures::future::join(stats_request, upload_request),
-    )
-    .await
-    .expect("backfill and concurrent upload must not deadlock on the advisory lock");
-
-    stats_result.assert_status_ok();
-    upload_result.assert_status_ok();
-
-    // Check the table directly; `/stats` would just return its cached value.
-    let (bookmarks, _, _) = sync_stats_row(&pool, user_id).await;
-    assert_eq!(
-        bookmarks, 2,
-        "final count must reflect both bookmarks regardless of race outcome"
-    );
-}
-
-/// Old rows (NULL visit_count) and old snapshot objects (no visitCount
-/// field) each count as 1.
-#[sqlx::test(migrations = "./migrations")]
-async fn legacy_rows_and_blobs_without_visit_count_count_one(pool: PgPool) {
-    let server = server_for(pool.clone());
-    register_and_login(&server, "bulk-legacy@example.com").await;
-    let (_device_id, access_token) =
-        register_device(&server, "bulk-legacy@example.com", "Laptop").await;
-
-    // Two old single-visit rows (visit_count NULL).
-    server
-        .post("/api/v1/sync/operations")
-        .authorization_bearer(&access_token)
-        .json(&json!({ "operations": [
-            history_visit_op(Uuid::now_v7(), Uuid::now_v7(), 1, "https://a.example.com"),
-            history_visit_op(Uuid::now_v7(), Uuid::now_v7(), 2, "https://b.example.com"),
-        ] }))
-        .await
-        .assert_status_ok();
-
-    let user_id = user_id_for_email(&pool, "bulk-legacy@example.com").await;
-    let nulls: i64 = sqlx::query_scalar!(
-        r#"SELECT COUNT(*) as "c!" FROM sync_operations WHERE user_id = $1 AND visit_count IS NULL"#,
-        user_id
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(nulls, 2, "non-bulk rows must store NULL visit_count");
-
-    let (_, history_visits, _) = sync_stats_row(&pool, user_id).await;
-    assert_eq!(history_visits, 2, "legacy NULL rows count 1 each");
-
-    // An old snapshot object with no visitCount field at all. Written as raw
-    // JSON so the field is really missing, not null.
-    let legacy_object_id = Uuid::now_v7();
-    let legacy_blob = json!([{
-        "objectType": "historyVisit",
-        "objectId": legacy_object_id,
-        "operationType": "visit",
-        "encryptionVersion": 0,
-        "payload": { "url": "https://legacy.example.com" },
-        "createdAt": chrono::Utc::now().to_rfc3339()
-    }]);
-    let legacy_bytes = serde_json::to_vec(&legacy_blob).unwrap();
-    assert!(
-        !String::from_utf8_lossy(&legacy_bytes).contains("visitCount"),
-        "test precondition: blob must omit visitCount entirely"
-    );
-    sqlx::query(
-        "INSERT INTO sync_snapshots (user_id, snapshot_cursor, encryption_version, data) VALUES ($1, $2, 0, $3)",
-    )
-    .bind(user_id)
-    .bind(0i64)
-    .bind(&legacy_bytes)
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    // Force the backfill: 2 rows + 1 snapshot object = 3.
-    sqlx::query!("DELETE FROM sync_stats WHERE user_id = $1", user_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-    // The row check below doesn't depend on the /stats cache.
-    let stats_res = server
-        .get("/api/v1/sync/stats")
-        .authorization_bearer(&access_token)
-        .await;
-    stats_res.assert_status_ok();
-    let stats: serde_json::Value = stats_res.json();
-    assert_eq!(
-        stats["historyVisits"],
-        json!(3),
-        "2 NULL rows + 1 field-less blob object must count 3"
-    );
 }
 
 /// `/snapshot` opens its transaction with `SNAPSHOT_TX_ISOLATION`, so all
@@ -2903,6 +2699,7 @@ async fn snapshot_stays_internally_consistent_under_concurrent_uploads(pool: PgP
         );
         let upload_req = server
             .post("/api/v1/sync/operations")
+            .add_header("x-protocol-version", "1")
             .authorization_bearer(&token_b)
             .json(&json!({ "operations": [op] }));
         let upload_request = async move { upload_req.await };
@@ -2980,6 +2777,7 @@ async fn prunes_ledger_row_for_tab_once_its_close_tombstone_ages_out(pool: PgPoo
     });
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&ops)
         .await;
@@ -3044,6 +2842,7 @@ async fn late_op_after_ledger_prune_is_rejected_but_live_object_still_works(pool
     });
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&ops)
         .await
@@ -3071,6 +2870,7 @@ async fn late_op_after_ledger_prune_is_rejected_but_live_object_still_works(pool
 
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [stale_update, live_update] }))
         .await;
@@ -3112,7 +2912,7 @@ async fn ack_device(server: &TestServer, token: &str) {
 /// operationId/objectId but with a higher `deviceSequence` — simulating the
 /// extension resuming an import after `sync::compaction` has already run.
 /// Must come back `duplicate`, must not create a new `sync_operations` row,
-/// and `sync_stats.history_visit_count` must not double-count it.
+/// and `history_visit_hours` must not double-count it.
 #[sqlx::test(migrations = "./migrations")]
 async fn bulk_reupload_after_compaction_is_duplicate(pool: PgPool) {
     let state = state_for_config(pool.clone(), test_config());
@@ -3127,6 +2927,7 @@ async fn bulk_reupload_after_compaction_is_duplicate(pool: PgPool) {
     let first = bulk_history_op(operation_id, object_id, 1, Some(100_000));
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [first] }))
         .await;
@@ -3155,7 +2956,7 @@ async fn bulk_reupload_after_compaction_is_duplicate(pool: PgPool) {
         "compaction must have pruned the original op's row"
     );
 
-    let (_, history_visits_after_compaction, _) = sync_stats_row(&pool, user_id).await;
+    let history_visits_after_compaction = history_visit_hours_sum(&pool, user_id).await;
     assert_eq!(history_visits_after_compaction, 100_000);
 
     // Re-upload: same operationId and objectId, but a fresh, higher
@@ -3164,6 +2965,7 @@ async fn bulk_reupload_after_compaction_is_duplicate(pool: PgPool) {
     let retry = bulk_history_op(operation_id, object_id, 50, Some(100_000));
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [retry] }))
         .await;
@@ -3190,10 +2992,10 @@ async fn bulk_reupload_after_compaction_is_duplicate(pool: PgPool) {
         "no new sync_operations row for the duplicate retry"
     );
 
-    let (_, history_visits_after_retry, _) = sync_stats_row(&pool, user_id).await;
+    let history_visits_after_retry = history_visit_hours_sum(&pool, user_id).await;
     assert_eq!(
         history_visits_after_retry, 100_000,
-        "history_visit_count must not double-count the re-sent chunk"
+        "history_visit_hours must not double-count the re-sent chunk"
     );
 }
 
@@ -3215,6 +3017,7 @@ async fn bulk_reupload_with_different_operation_id_same_object_is_duplicate(pool
     let first = bulk_history_op(Uuid::now_v7(), object_id, 1, Some(50_000));
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [first] }))
         .await
@@ -3226,6 +3029,7 @@ async fn bulk_reupload_with_different_operation_id_same_object_is_duplicate(pool
     let retry = bulk_history_op(Uuid::now_v7(), object_id, 2, Some(50_000));
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [retry] }))
         .await;
@@ -3237,7 +3041,7 @@ async fn bulk_reupload_with_different_operation_id_same_object_is_duplicate(pool
     );
     assert_eq!(body["rejected"].as_array().unwrap().len(), 0);
 
-    let (_, history_visits, _) = sync_stats_row(&pool, user_id).await;
+    let history_visits = history_visit_hours_sum(&pool, user_id).await;
     assert_eq!(history_visits, 50_000);
 }
 
@@ -3257,6 +3061,7 @@ async fn single_visit_history_ops_do_not_create_sync_objects_rows(pool: PgPool) 
     let op = history_visit_op(Uuid::now_v7(), object_id, 1, "https://example.com");
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await
@@ -3278,7 +3083,7 @@ async fn single_visit_history_ops_do_not_create_sync_objects_rows(pool: PgPool) 
 
 // --- Hourly visit-count buckets (Change 3, docs/protocol.md §8.3.2):
 // `visitHours` validation, the `history_visit_hours` write path, and the
-// `/stats` read path (retention filtering + legacy accounts). ---
+// `/stats` read path (retention filtering). ---
 
 /// Truncates down to the containing UTC hour — the Rust-side equivalent of
 /// `date_trunc('hour', ...)`, used to build expected bucket keys/rows for
@@ -3355,6 +3160,7 @@ async fn visit_hours_validation_rejects_each_reason(pool: PgPool) {
     async fn post_and_reason(server: &TestServer, token: &str, op: serde_json::Value) -> String {
         let res = server
             .post("/api/v1/sync/operations")
+            .add_header("x-protocol-version", "1")
             .authorization_bearer(token)
             .json(&json!({ "operations": [op] }))
             .await;
@@ -3375,6 +3181,20 @@ async fn visit_hours_validation_rejects_each_reason(pool: PgPool) {
     assert_eq!(
         post_and_reason(&server, &access_token, bookmark_op).await,
         "unexpected_visit_hours"
+    );
+
+    // missing_visit_hours: a historyVisit op with no `visitHours` at all.
+    let mut no_hours = history_visit_op_with_hours(
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        1,
+        "https://none.example.com",
+        json!({}),
+    );
+    no_hours.as_object_mut().unwrap().remove("visitHours");
+    assert_eq!(
+        post_and_reason(&server, &access_token, no_hours).await,
+        "missing_visit_hours"
     );
 
     // invalid_visit_hours: hour not aligned to the hour boundary.
@@ -3454,6 +3274,7 @@ async fn visit_hours_validation_rejects_each_reason(pool: PgPool) {
     );
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [valid_bulk] }))
         .await;
@@ -3475,6 +3296,7 @@ async fn visit_hours_validation_rejects_each_reason(pool: PgPool) {
     );
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [valid_visit] }))
         .await;
@@ -3516,6 +3338,7 @@ async fn visit_hours_accepted_ops_respect_retention_window(pool: PgPool) {
     );
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [bulk] }))
         .await
@@ -3537,6 +3360,7 @@ async fn visit_hours_accepted_ops_respect_retention_window(pool: PgPool) {
     );
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [visit1, visit2] }))
         .await
@@ -3577,6 +3401,7 @@ async fn duplicate_visit_hours_upload_does_not_double_count(pool: PgPool) {
 
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op.clone()] }))
         .await
@@ -3586,6 +3411,7 @@ async fn duplicate_visit_hours_upload_does_not_double_count(pool: PgPool) {
     // Same operationId, still present in sync_operations: plain duplicate.
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [op] }))
         .await;
@@ -3615,6 +3441,7 @@ async fn duplicate_visit_hours_upload_does_not_double_count(pool: PgPool) {
     );
     server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [bulk] }))
         .await
@@ -3632,6 +3459,7 @@ async fn duplicate_visit_hours_upload_does_not_double_count(pool: PgPool) {
     );
     let res = server
         .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
         .authorization_bearer(&access_token)
         .json(&json!({ "operations": [retry] }))
         .await;
@@ -3645,119 +3473,4 @@ async fn duplicate_visit_hours_upload_does_not_double_count(pool: PgPool) {
         11,
         "a post-compaction duplicate retry must not add buckets again"
     );
-}
-
-/// Test 4: a legacy op with no `visitHours` field at all (an older client
-/// build) is bucketed at its upload hour, using `visit_count.unwrap_or(1)`.
-#[sqlx::test(migrations = "./migrations")]
-async fn legacy_op_without_visit_hours_buckets_at_upload_hour(pool: PgPool) {
-    let server = server_for(pool.clone());
-    register_and_login(&server, "legacy-visit-hours@example.com").await;
-    let (_device_id, access_token) =
-        register_device(&server, "legacy-visit-hours@example.com", "Laptop").await;
-    let user_id = user_id_for_email(&pool, "legacy-visit-hours@example.com").await;
-
-    let before = Utc::now();
-    let op = history_visit_op(
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-        1,
-        "https://legacy.example.com",
-    );
-    server
-        .post("/api/v1/sync/operations")
-        .authorization_bearer(&access_token)
-        .json(&json!({ "operations": [op] }))
-        .await
-        .assert_status_ok();
-
-    let rows = sqlx::query!(
-        "SELECT hour, visits FROM history_visit_hours WHERE user_id = $1",
-        user_id
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].visits, 1);
-    assert_eq!(rows[0].hour, truncate_hour(before));
-}
-
-/// Test 5: an account that predates `history_visit_hours` (simulated: `history_hours_seed_
-/// before` set, bucket rows deleted as if they'd never existed) gets its
-/// buckets backfilled from its live historyVisit objects on the next
-/// `/stats` call, and the marker is cleared so nothing re-seeds afterward.
-#[sqlx::test(migrations = "./migrations")]
-async fn legacy_seed_backfills_history_visit_hours_once(pool: PgPool) {
-    let server = server_for(pool.clone());
-    register_and_login(&server, "legacy-seed@example.com").await;
-    let (_device_id, access_token) =
-        register_device(&server, "legacy-seed@example.com", "Laptop").await;
-    let user_id = user_id_for_email(&pool, "legacy-seed@example.com").await;
-
-    let bulk = bulk_history_op_with_hours(
-        Uuid::now_v7(),
-        Uuid::now_v7(),
-        1,
-        20,
-        json!({ hour_key(Utc::now()): 20 }),
-    );
-    server
-        .post("/api/v1/sync/operations")
-        .authorization_bearer(&access_token)
-        .json(&json!({ "operations": [bulk] }))
-        .await
-        .assert_status_ok();
-
-    // Simulate a pre-0018 account: mark it for seeding and wipe the bucket
-    // rows process_batch just wrote, as if they'd never existed.
-    sqlx::query!(
-        "UPDATE sync_stats SET history_hours_seed_before = now() WHERE user_id = $1",
-        user_id
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::query!(
-        "DELETE FROM history_visit_hours WHERE user_id = $1",
-        user_id
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let stats_res = server
-        .get("/api/v1/sync/stats")
-        .authorization_bearer(&access_token)
-        .await;
-    stats_res.assert_status_ok();
-    let stats: serde_json::Value = stats_res.json();
-    assert_eq!(
-        stats["historyVisits"],
-        json!(20),
-        "legacy seed must recover the count from the live object"
-    );
-
-    let seed_marker: Option<DateTime<Utc>> = sqlx::query_scalar!(
-        "SELECT history_hours_seed_before FROM sync_stats WHERE user_id = $1",
-        user_id
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert!(
-        seed_marker.is_none(),
-        "the marker must be cleared after seeding"
-    );
-    assert_eq!(
-        history_visit_hours_sum(&pool, user_id).await,
-        20,
-        "seeding must not double-count the single live object"
-    );
-    // A later call can never re-seed: with the marker cleared, every future
-    // `stats` call takes the `Some(r) if r.history_hours_seed_before.is_none()`
-    // fast path, which never calls `seed_history_visit_hours` at all — this
-    // is a structural guarantee, not a race that needs to be won. (A second
-    // live HTTP call here would only re-exercise `STATS_CACHE`'s 30s TTL,
-    // not this code path.)
 }

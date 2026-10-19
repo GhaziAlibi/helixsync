@@ -107,7 +107,7 @@ fn login_json(email: &str, password_seed: &str) -> serde_json::Value {
     })
 }
 
-/// Request body for `POST/PATCH /auth/password`.
+/// Request body for `PATCH /auth/password`.
 fn change_password_json(current_password_seed: &str, new_password_seed: &str) -> serde_json::Value {
     json!({
         "currentAuthKey": common::test_auth_key(current_password_seed),
@@ -264,63 +264,6 @@ async fn change_password_requires_correct_current_password(pool: PgPool) {
     let csrf = body["csrfToken"].as_str().unwrap().to_string();
 
     let wrong = server
-        .post("/api/v1/auth/password")
-        .add_header("x-csrf-token", &csrf)
-        .json(&change_password_json(
-            "wrong password wrong",
-            "another long password",
-        ))
-        .await;
-    wrong.assert_status_unauthorized();
-
-    let right = server
-        .post("/api/v1/auth/password")
-        .add_header("x-csrf-token", &csrf)
-        .json(&change_password_json(
-            "correct horse battery staple",
-            "a brand new long password",
-        ))
-        .await;
-    right.assert_status_ok();
-
-    // Old password must no longer work.
-    let old_login = server
-        .post("/api/v1/auth/login")
-        .json(&login_json(
-            "harry@example.com",
-            "correct horse battery staple",
-        ))
-        .await;
-    old_login.assert_status_unauthorized();
-
-    let new_login = server
-        .post("/api/v1/auth/login")
-        .json(&login_json(
-            "harry@example.com",
-            "a brand new long password",
-        ))
-        .await;
-    new_login.assert_status_ok();
-}
-
-/// `PATCH /api/v1/auth/password` (docs/encryption.md §4) works the same as
-/// the old `POST`.
-#[sqlx::test(migrations = "./migrations")]
-async fn change_password_via_patch_matches_documented_contract(pool: PgPool) {
-    let server = server_for(pool);
-
-    let register_res = server
-        .post("/api/v1/auth/register")
-        .json(&register_json(
-            "patch-password@example.com",
-            "correct horse battery staple",
-        ))
-        .await;
-    register_res.assert_status_ok();
-    let body: serde_json::Value = register_res.json();
-    let csrf = body["csrfToken"].as_str().unwrap().to_string();
-
-    let wrong = server
         .patch("/api/v1/auth/password")
         .add_header("x-csrf-token", &csrf)
         .json(&change_password_json(
@@ -344,7 +287,7 @@ async fn change_password_via_patch_matches_documented_contract(pool: PgPool) {
     let old_login = server
         .post("/api/v1/auth/login")
         .json(&login_json(
-            "patch-password@example.com",
+            "harry@example.com",
             "correct horse battery staple",
         ))
         .await;
@@ -353,7 +296,7 @@ async fn change_password_via_patch_matches_documented_contract(pool: PgPool) {
     let new_login = server
         .post("/api/v1/auth/login")
         .json(&login_json(
-            "patch-password@example.com",
+            "harry@example.com",
             "a brand new long password",
         ))
         .await;
@@ -482,7 +425,7 @@ async fn change_password_revokes_other_web_sessions_but_not_the_current_one(pool
     browser_b.get("/api/v1/auth/me").await.assert_status_ok();
 
     let change_res = browser_a
-        .post("/api/v1/auth/password")
+        .patch("/api/v1/auth/password")
         .add_header("x-csrf-token", &csrf_a)
         .json(&change_password_json(
             "correct horse battery staple",

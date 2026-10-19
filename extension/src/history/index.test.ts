@@ -1186,35 +1186,6 @@ describe("bulk chunk resume checkpoint (fix C: skip-by-count)", () => {
     expect(device!.historyBulkUploadedChunks).toBe(1);
     expect(device!.historyBulkUploadedVisits).toBe(1);
   });
-
-  it("migrates a legacy in-progress device record (old resume fields) to the new scheme and restarts from chunk 0", async () => {
-    const cutoff = 1_700_000_000_000;
-    // Old shape, from before fix C: page-granularity resume fields, cutoff
-    // persisted, no historyBulkEndMs (didn't exist yet).
-    device = {
-      ...baseDevice({ historyBulkCutoffMs: cutoff }),
-      historyBulkResumePageEndTime: cutoff + 999,
-      historyBulkResumePreviousPageEndTime: cutoff + 500,
-      historyBulkResumeChunkIndex: 2,
-    } as DeviceRecord;
-    fiveUrlFixture(cutoff);
-
-    await backfillExisting();
-
-    // Old fields are gone; historyBulkEndMs has been backfilled.
-    expect((device as unknown as Record<string, unknown>)["historyBulkResumePageEndTime"]).toBeUndefined();
-    expect((device as unknown as Record<string, unknown>)["historyBulkResumePreviousPageEndTime"]).toBeUndefined();
-    expect((device as unknown as Record<string, unknown>)["historyBulkResumeChunkIndex"]).toBeUndefined();
-    expect(device!.historyBulkEndMs).toBeDefined();
-
-    // Treated as "uploaded 0 chunks": every one of the 5 fixture visits was
-    // uploaded this run (chunk indices restart at 0), not just the ones
-    // beyond the stale chunk-index-2 checkpoint.
-    expect(uploadOperationsMock).toHaveBeenCalledTimes(5);
-    const firstOp = (uploadOperationsMock.mock.calls[0][0] as LocalOperation[])[0];
-    const chunk0Ids = await deterministicBulkIds("device-1", cutoff, 0);
-    expect(firstOp.operationId).toBe(chunk0Ids.operationId);
-  });
 });
 
 describe("backfillExisting retention window (bulk)", () => {
