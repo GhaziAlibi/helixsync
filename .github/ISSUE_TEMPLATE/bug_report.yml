@@ -27,7 +27,7 @@ body:
     attributes:
       label: HelixSync version
       description: The extension version (from the popup or the extensions page) and the server image tag or commit.
-      placeholder: "extension 0.3.0, server ghcr.io/ghazialibi/helixsync-server:0.3.0"
+      placeholder: "extension 0.4.0, server ghcr.io/ghazialibi/helixsync-server:0.4.0"
     validations:
       required: true
   - type: input

@@ -127,7 +127,7 @@ nothing is compiled on your machine.
 ```bash
 # in the helixsync directory, with .env created as above:
 # set HELIXSYNC_VERSION in .env to a released version, for example
-#   HELIXSYNC_VERSION=0.3.0
+#   HELIXSYNC_VERSION=0.4.0
 docker compose -f docker-compose.prod.yml up -d
 ```
 
@@ -448,7 +448,7 @@ recovery steps are in [`docs/deployment.md`](docs/deployment.md).
 | Symptom | Cause and fix |
 |---------|---------------|
 | `server` exits at startup mentioning `JWT_SIGNING_KEY` | The key is missing, shorter than 32 characters, or still contains `change-me` / `replace-me`. Generate one with `openssl rand -base64 48`. |
-| `docker compose` says `HELIXSYNC_VERSION is missing a value` | `docker-compose.prod.yml` needs a released version in `.env`, for example `HELIXSYNC_VERSION=0.3.0`. |
+| `docker compose` says `HELIXSYNC_VERSION is missing a value` | `docker-compose.prod.yml` needs a released version in `.env`, for example `HELIXSYNC_VERSION=0.4.0`. |
 | The extension says the Server URL must use `https://` | Only `localhost`, `127.0.0.1` and `[::1]` may use plain HTTP. Put a TLS proxy in front of `web` (option D). |
 | The dashboard signs you out immediately, or warns that the page is not using HTTPS | Session cookies are `Secure`; load the dashboard over HTTPS (or from `localhost`). |
 | Registering returns `registration_disabled` | The server has `ALLOW_REGISTRATION=false`. Set it to `true` temporarily to add an account. |

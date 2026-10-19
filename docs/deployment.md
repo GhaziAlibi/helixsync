@@ -54,7 +54,7 @@ needed — see the
 and
 [web](https://github.com/GhaziAlibi/helixsync/pkgs/container/helixsync-web)
 package pages for available tags). `HELIXSYNC_VERSION` in `.env` (e.g.
-`0.3.0`) is required and selects the released version to run; the compose
+`0.4.0`) is required and selects the released version to run; the compose
 file refuses to start without it rather than floating on `latest`.
 
 The web image's API base URL is compiled in at build time (see

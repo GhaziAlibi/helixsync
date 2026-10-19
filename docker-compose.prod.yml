@@ -4,7 +4,7 @@
 # compose -f docker-compose.prod.yml up -d`) — no repo checkout or Docker
 # build step needed on the host.
 #
-# HELIXSYNC_VERSION is required: set it to a released version (e.g. 0.3.0)
+# HELIXSYNC_VERSION is required: set it to a released version (e.g. 0.4.0)
 # so deploys are reproducible instead of floating on a moving `latest` tag —
 # see the tags at
 # https://github.com/GhaziAlibi/helixsync/pkgs/container/helixsync-server
@@ -47,7 +47,7 @@ services:
         max-file: "3"
 
   server:
-    image: ghcr.io/ghazialibi/helixsync-server:${HELIXSYNC_VERSION:?HELIXSYNC_VERSION must be set to a released version, e.g. 0.3.0}
+    image: ghcr.io/ghazialibi/helixsync-server:${HELIXSYNC_VERSION:?HELIXSYNC_VERSION must be set to a released version, e.g. 0.4.0}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -91,7 +91,7 @@ services:
         max-file: "3"
 
   web:
-    image: ghcr.io/ghazialibi/helixsync-web:${HELIXSYNC_VERSION:?HELIXSYNC_VERSION must be set to a released version, e.g. 0.3.0}
+    image: ghcr.io/ghazialibi/helixsync-web:${HELIXSYNC_VERSION:?HELIXSYNC_VERSION must be set to a released version, e.g. 0.4.0}
     restart: unless-stopped
     depends_on:
       - server
