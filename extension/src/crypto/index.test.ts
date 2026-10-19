@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import {
+  accountKeyCheckPhrase,
   activeB64ImplForTesting,
   assertSupportedEnvelopeVersion,
   authRequestFingerprint,
@@ -568,5 +569,29 @@ describe("login with device (docs/encryption.md §9.2)", () => {
     expect(fromB64(a.publicKey)).toHaveLength(65);
     expect(await authRequestFingerprint(a.publicKey)).toMatch(/^([0-9A-HJKMNP-TV-Z]{4}-){3}[0-9A-HJKMNP-TV-Z]{4}$/);
     expect(await authRequestFingerprint(a.publicKey)).not.toBe(await authRequestFingerprint(b.publicKey));
+  });
+
+  it("gives a fabricated approval a different key check phrase than the real account key", async () => {
+    const requester = await generateAuthRequestKeyPair();
+    const realKey = generateAccountKey();
+    const serverKey = generateAccountKey();
+    // A hostile server knows the requester's public key and the request id, so
+    // it can build an approval that decrypts without error.
+    const forged = await encryptAccountKeyForRequest(toB64(serverKey), requester.publicKey, REQUEST_ID);
+    const received = await decryptAccountKeyFromApproval(
+      requester.privateKeyJwk,
+      forged.approverPublicKey,
+      forged.encryptedAccountKey,
+      REQUEST_ID,
+    );
+    expect(received).toEqual(serverKey);
+    expect(await accountKeyCheckPhrase(received)).not.toBe(await accountKeyCheckPhrase(realKey));
+  });
+
+  it("derives the key check phrase from the account key alone", async () => {
+    const key = Uint8Array.from({ length: 32 }, (_, i) => i);
+    const phrase = await accountKeyCheckPhrase(key);
+    expect(phrase).toMatch(/^([0-9A-HJKMNP-TV-Z]{4}-){3}[0-9A-HJKMNP-TV-Z]{4}$/);
+    expect(await accountKeyCheckPhrase(key)).toBe(phrase);
   });
 });

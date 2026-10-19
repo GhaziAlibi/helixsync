@@ -552,10 +552,20 @@ only clients that hold AK.
    "device" it registers the device and returns its credentials,
    encryptedAccountKey and approverPublicKey. The new extension derives the
    same key from its private key and decrypts AK.
+5. For a "device" request, both sides show a key check phrase:
+   HKDF(AK, "helixsync-key-check-v1"), first 80 bits, in the same Crockford
+   format. The approving extension shows it next to the fingerprint; the new
+   extension shows it after decrypting and adopts AK only once the user
+   confirms it matches.
 ```
 
-The fingerprint is what keeps the server out: a server that swapped in its
-own public key would change the phrase the approver sees. The associated
+The fingerprint is what keeps a swapped requester key out: a server that
+replaced the requester's public key would change the phrase the approver
+sees. It does not authenticate the approval itself, since the server knows the
+requester's public key and the request id and could encrypt an account key of
+its own choosing to it. The key check phrase closes that gap: the server
+never holds AK, so it can't produce the phrase for a key it chose, and the
+new extension refuses a key whose phrase the user can't match. The associated
 data stops the server from handing one approval's ciphertext to another
 request. The requester's private key never leaves its browser; while it
 waits, the extension keeps it in `chrome.storage.session` (memory only),

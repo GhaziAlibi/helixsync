@@ -421,11 +421,15 @@ export async function authRequestFingerprint(publicKeyB64: string): Promise<stri
   const input = new Uint8Array(label.length + publicKey.length);
   input.set(label);
   input.set(publicKey, label.length);
-  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
+  return crockfordPhrase(new Uint8Array(await crypto.subtle.digest("SHA-256", input)));
+}
+
+/** First 80 bits of `bytes` as `XXXX-XXXX-XXXX-XXXX`. */
+function crockfordPhrase(bytes: Uint8Array): string {
   let bits = 0;
   let value = 0;
   let text = "";
-  for (const byte of digest.subarray(0, 10)) {
+  for (const byte of bytes.subarray(0, 10)) {
     value = (value << 8) | byte;
     bits += 8;
     while (bits >= 5) {
@@ -434,6 +438,17 @@ export async function authRequestFingerprint(publicKeyB64: string): Promise<stri
     }
   }
   return text.match(/.{4}/g)!.join("-");
+}
+
+const KEY_CHECK_LABEL = "helixsync-key-check-v1";
+
+/** A phrase derived from the account key itself. The approving extension
+ * shows it before approving; the new browser shows it after decrypting the
+ * approval and continues only once the user confirms the two match. The
+ * server never holds the account key, so it can't produce the phrase for a
+ * key it chose. */
+export async function accountKeyCheckPhrase(accountKey: Uint8Array): Promise<string> {
+  return crockfordPhrase(await hkdfSha256(accountKey, KEY_CHECK_LABEL, 80));
 }
 
 async function authRequestKey(privateKey: CryptoKey, peerPublicKeyB64: string): Promise<Uint8Array> {

@@ -29,7 +29,9 @@ import {
   deriveAuthKey,
   deriveKek,
   unwrapAccountKey,
+  fromB64,
   toB64,
+  accountKeyCheckPhrase,
   authRequestFingerprint,
   decryptAccountKeyFromApproval,
   encryptAccountKeyForRequest,
@@ -648,13 +650,21 @@ async function renderDeviceLoginWait(pending: PendingDeviceLogin): Promise<void>
           result.encryptedAccountKey,
           pending.requestId,
         );
-        await clearPendingDeviceLogin();
-        // Connected some other way in the meantime: keep that connection.
-        if (await getDevice()) {
-          await render();
-          return;
-        }
-        await finishConnect({ serverUrl: pending.serverUrl, email: pending.email }, result, toB64(accountKey));
+        // The server relays the approval and could have fabricated it. Only
+        // the approving browser knows the real account key, so the user
+        // checks the phrase derived from it before this browser adopts it.
+        await renderKeyCheck(await accountKeyCheckPhrase(accountKey), {
+          onMatch: async () => {
+            await clearPendingDeviceLogin();
+            // Connected some other way in the meantime: keep that connection.
+            if (await getDevice()) {
+              await render();
+              return;
+            }
+            await finishConnect({ serverUrl: pending.serverUrl, email: pending.email }, result, toB64(accountKey));
+          },
+          onMismatch: () => abandonDeviceLogin("The key check didn't match, so the approval was discarded."),
+        });
         return;
       }
       if (result.status === "denied") {
@@ -681,6 +691,41 @@ async function renderDeviceLoginWait(pending: PendingDeviceLogin): Promise<void>
     deviceLoginPollTimer = setTimeout(() => void tick(), DEVICE_LOGIN_POLL_MS);
   };
   deviceLoginPollTimer = setTimeout(() => void tick(), DEVICE_LOGIN_POLL_MS);
+}
+
+/** Shows the key-check phrase of a received approval and waits for the user
+ * to confirm it matches the one on the approving browser. */
+async function renderKeyCheck(
+  phrase: string,
+  handlers: { onMatch: () => Promise<void>; onMismatch: () => Promise<void> },
+): Promise<void> {
+  app.innerHTML = `
+    <h2 class="view-title">Check the key</h2>
+    <p class="view-subtitle">
+      The approving browser shows a key check phrase on its sign-in request. Continue only if it matches:
+    </p>
+    <div class="fingerprint" id="key-check"></div>
+    <div class="status-message" id="status"></div>
+    <button id="key-check-match" class="primary">It matches</button>
+    <button id="key-check-mismatch">It doesn't match</button>
+  `;
+  document.getElementById("key-check")!.textContent = phrase;
+  const status = document.getElementById("status")!;
+  const match = document.getElementById("key-check-match") as HTMLButtonElement;
+  const mismatch = document.getElementById("key-check-mismatch") as HTMLButtonElement;
+  const run = (handler: () => Promise<void>) => async () => {
+    match.disabled = true;
+    mismatch.disabled = true;
+    try {
+      await handler();
+    } catch (err) {
+      showError(status, errorMessage(err));
+      match.disabled = false;
+      mismatch.disabled = false;
+    }
+  };
+  match.addEventListener("click", () => void run(handlers.onMatch)());
+  mismatch.addEventListener("click", () => void run(handlers.onMismatch)());
 }
 
 /** Finishes a connect that the permission dialog interrupted by destroying
@@ -920,6 +965,17 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
     fingerprint.className = "fingerprint";
     fingerprint.textContent = await authRequestFingerprint(request.publicKey);
 
+    const keyCheckParts: HTMLElement[] = [];
+    if (request.kind === "device") {
+      const keyCheckLabel = document.createElement("div");
+      keyCheckLabel.className = "item-meta";
+      keyCheckLabel.textContent = "After you approve, the new browser asks you to confirm this key check phrase:";
+      const keyCheck = document.createElement("div");
+      keyCheck.className = "fingerprint";
+      keyCheck.textContent = await accountKeyCheckPhrase(fromB64(device.accountKey));
+      keyCheckParts.push(keyCheckLabel, keyCheck);
+    }
+
     const actions = document.createElement("div");
     actions.className = "auth-actions";
     const approve = document.createElement("button");
@@ -956,7 +1012,7 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
     approve.addEventListener("click", () => void answer(true));
     deny.addEventListener("click", () => void answer(false));
 
-    card.append(title, meta, consequence, prompt, fingerprint, actions, error);
+    card.append(title, meta, consequence, prompt, fingerprint, ...keyCheckParts, actions, error);
     section.appendChild(card);
   }
   return section;

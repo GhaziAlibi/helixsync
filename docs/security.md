@@ -292,9 +292,11 @@ discover them:
   the password or the code, an account's data can't be recovered by anyone;
   the operator can only delete it (§11).
 - **Login with device relies on the user comparing the phrase.** Approving a
-  new browser hands it the account key. The fingerprint phrase is what stops a
-  hostile server from approving its own key, or a stranger from getting a
-  look-alike request approved (`docs/encryption.md` §9.2); an approval given
+  new browser hands it the account key. The fingerprint phrase stops a hostile
+  server from swapping the requester's key, or a stranger from getting a
+  look-alike request approved. The key check phrase, derived from the account
+  key and shown on both screens, stops a hostile server from approving with a
+  key of its own (`docs/encryption.md` §9.2); confirming either phrase
   without comparing it gives that protection up.
 - **Per-account rate limits can be used to lock out a specific account.**
   More than ten login attempts a minute against one email, from anyone, get
