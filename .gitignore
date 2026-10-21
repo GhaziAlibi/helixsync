@@ -15,6 +15,12 @@ extension/dist/
 extension/*.zip
 *.local
 
+# Local TLS material, logs, coverage reports
+*.pem
+*.key
+*.log
+coverage/
+
 # Editor / OS
 .DS_Store
 .idea/

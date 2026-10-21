@@ -7,7 +7,9 @@ FROM rust:1-slim-bookworm@sha256:a24e292b4af7bdee351a31d3a6379972a5652f0ea22a1b6
 
 WORKDIR /build
 
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+# Generates the third-party license notices shipped in the image (about.toml).
+# Installed before anything is copied in, so this layer stays cached.
+RUN cargo install cargo-about --locked --version 0.9.2 --features cli
 
 # Cache dependency compilation separately from application source.
 COPY Cargo.toml Cargo.lock ./
@@ -20,6 +22,8 @@ COPY . .
 # docs/deployment.md.
 ENV SQLX_OFFLINE=true
 RUN touch src/main.rs src/lib.rs && cargo build --release --locked
+# Fails if a compiled crate's license isn't on about.toml's allowlist.
+RUN cargo about generate --locked about.hbs -o THIRD_PARTY_LICENSES.txt
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 
@@ -29,8 +33,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /app
 COPY --from=builder /build/target/release/helixsync-server /app/helixsync-server
 COPY --from=builder /build/migrations /app/migrations
+COPY --from=builder /build/THIRD_PARTY_LICENSES.txt /app/THIRD_PARTY_LICENSES.txt
 
 USER helixsync
+# The binary defaults to loopback; in a container it has to listen on the
+# container's own interface to be reachable from `web`.
+ENV BIND_ADDR=0.0.0.0:8080
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

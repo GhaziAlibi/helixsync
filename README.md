@@ -108,7 +108,8 @@ sed -i "s|^JWT_SIGNING_KEY=.*|JWT_SIGNING_KEY=$(openssl rand -base64 48)|" .env
 
 - `POSTGRES_PASSWORD` protects the database. Use a hex value as above: the
   password is embedded in a connection URL, where characters such as `/` or
-  `@` would break it.
+  `@` would break it. The server refuses to start while it still contains the
+  placeholder text.
 - `JWT_SIGNING_KEY` signs device access tokens. The server refuses to start
   while it still contains the placeholder text (`change-me` or `replace-me`).
   Keep it stable: changing it invalidates every outstanding access token
@@ -380,7 +381,9 @@ It asks for your password and for you to type `DELETE`.
 ## Configuration
 
 Compose reads these from `.env` (see [`.env.example`](.env.example), which
-documents every variable). The ones you are most likely to touch:
+documents each one; every setting the server reads is listed in
+[`docs/deployment.md`](docs/deployment.md#configuration-reference)). The ones
+you are most likely to touch:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
@@ -393,10 +396,13 @@ documents every variable). The ones you are most likely to touch:
 | `MAX_ACCOUNT_STORAGE_BYTES` | 5 GiB | Cap on stored sync data per account |
 | `WEB_PORT` | `5173` | Host port the dashboard listens on |
 | `WEB_TRUSTED_PROXY_CIDRS` | private ranges | Proxies whose `X-Forwarded-For` is trusted; narrow it if `web` is published directly |
+| `LOG_FORMAT` | `text` | `json` writes one JSON object per log line, for a log collector |
 
 Running the server outside Docker uses the same names plus `DATABASE_URL`,
-`BIND_ADDR` and `BEHIND_PROXY`; see [`server/.env.example`](server/.env.example)
-and [`docs/deployment.md`](docs/deployment.md).
+`BIND_ADDR` (default `127.0.0.1:8080`) and `BEHIND_PROXY`; see
+[`server/.env.example`](server/.env.example) and
+[`docs/deployment.md`](docs/deployment.md). The server checks its settings at
+startup and refuses to start, naming the variable, when one is invalid.
 
 ## Before you expose it to the internet
 
@@ -448,6 +454,8 @@ recovery steps are in [`docs/deployment.md`](docs/deployment.md).
 | Symptom | Cause and fix |
 |---------|---------------|
 | `server` exits at startup mentioning `JWT_SIGNING_KEY` | The key is missing, shorter than 32 characters, or still contains `change-me` / `replace-me`. Generate one with `openssl rand -base64 48`. |
+| `server` exits at startup mentioning `DATABASE_URL` and a placeholder | `POSTGRES_PASSWORD` still has the `.env.example` value. Set it with `openssl rand -hex 32`. PostgreSQL keeps the password it was first started with, so if the stack already ran once, also run `docker compose exec postgres psql -U helixsync -c "ALTER ROLE helixsync PASSWORD '<the new value>'"`. |
+| `server` exits at startup naming another variable | Its value doesn't parse or is out of range; the message says what is expected. See [`docs/deployment.md`](docs/deployment.md#configuration-reference). |
 | `docker compose` says `HELIXSYNC_VERSION is missing a value` | `docker-compose.prod.yml` needs a released version in `.env`, for example `HELIXSYNC_VERSION=0.4.0`. |
 | The extension says the Server URL must use `https://` | Only `localhost`, `127.0.0.1` and `[::1]` may use plain HTTP. Put a TLS proxy in front of `web` (option D). |
 | The dashboard signs you out immediately, or warns that the page is not using HTTPS | Session cookies are `Secure`; load the dashboard over HTTPS (or from `localhost`). |
@@ -488,12 +496,18 @@ synced data in it).
   can only delete the account so you can start over. Keep the recovery code
   private: like the password, it unlocks everything. See
   [`docs/encryption.md`](docs/encryption.md) §9.
+- **One server process per database.** Rate limits, short-lived auth caches
+  and WebSocket notifications are kept in the server's memory, so running
+  several replicas behind a load balancer isn't supported. See
+  [`docs/deployment.md`](docs/deployment.md).
 - **Use the web dashboard only on a server you trust.** Its code is served by
   that server, so a compromised server could capture the password you type
   there. The extension is installed separately and isn't affected. See
   [`docs/security.md`](docs/security.md).
-- Tab group restore and "ask before restoring" tabs rely on Chromium APIs that
-  the automated tests don't exercise and are verified manually. Reports from
+- **Tab groups need a permission in each browser.** Turning on Tab Groups in a
+  browser's popup asks for it; when the setting was turned on elsewhere, open
+  the popup's settings and press Save. Tab, tab group and restore behavior is
+  tested end to end in Chromium and Helium (`CONTRIBUTING.md`); reports from
   other Chromium builds are welcome.
 
 ## Documentation
@@ -523,4 +537,7 @@ Found a security problem? Please report it privately, as described in
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Each build carries the licenses of the third-party code it
+includes, in `THIRD_PARTY_LICENSES.txt`: at `/app/` in the server image, at the
+root of the dashboard (`https://sync.example.com/THIRD_PARTY_LICENSES.txt`),
+and in the extension zip.

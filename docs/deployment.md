@@ -33,6 +33,13 @@ containers on the internal `helixsync` docker network. `web`'s nginx
 dashboard's static assets for everything else, so `web` is the single
 ingress point for both browsers and the extension.
 
+Run one `server` process per database. Rate limits, the 30-second caches of
+session and device validity, and WebSocket change notifications live in that
+process's memory. With a second replica, each would apply its own rate limits,
+a revocation made through one could keep working on the other for up to 30
+seconds, and a device connected to one would only see changes uploaded through
+the other at its next poll. Several replicas are neither supported nor tested.
+
 ## Deploying prebuilt images (Portainer, etc.)
 
 `docker-compose.yml` builds `server`/`web` from source, which needs a repo
@@ -194,6 +201,49 @@ Other variables you may want to change are in `.env.example`, each with a
 comment. `CORS_ALLOWED_ORIGINS` only matters if something calls the API from
 a browser at a different origin than the dashboard.
 
+## Configuration reference
+
+Every setting the server reads, all from the environment (or a `.env` file in
+its working directory). The Compose files pass through the ones marked
+**C**; to set another one there, add it to the `server` service's
+`environment:`. Durations are in seconds.
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `DATABASE_URL` | required | PostgreSQL connection URL. **C** (built from `POSTGRES_*`) |
+| `JWT_SIGNING_KEY` | required | At least 32 characters, never a `.env.example` placeholder. **C** |
+| `BIND_ADDR` | `127.0.0.1:8080` | `ip:port` to listen on. The Docker image sets `0.0.0.0:8080`. **C** |
+| `BEHIND_PROXY` | `false` | Trust `X-Real-IP` / `X-Forwarded-For` for rate limiting. **C** (always `true`) |
+| `CORS_ALLOWED_ORIGINS` | empty | Comma-separated origins allowed to call the API cross-origin. **C** |
+| `REQUIRE_ENCRYPTION` | `true` | Reject unencrypted sync payloads. **C** |
+| `ALLOW_REGISTRATION` | `true` | Accept new accounts. **C** |
+| `MAX_ACCOUNT_STORAGE_BYTES` | `5368709120` | Stored payload bytes per account. **C** |
+| `MAX_DEVICES_PER_ACCOUNT` | `25` | Connected browsers per account. **C** |
+| `ACCESS_TOKEN_TTL_SECS` | `900` | Device access token lifetime. **C** |
+| `REFRESH_TOKEN_TTL_SECS` | `2592000` | Device refresh token lifetime (30 days). **C** |
+| `WEB_SESSION_TTL_SECS` | `1209600` | Dashboard session lifetime (14 days). **C** |
+| `COMPACTION_INTERVAL_SECS` | `3600` | How often operation-log compaction runs. **C** |
+| `TOMBSTONE_RETENTION_SECS` | `2592000` | Extra time a delete's raw log row is kept. **C** |
+| `AUDIT_LOG_RETENTION_SECS` | `7776000` | How long audit-log rows are kept (90 days). **C** |
+| `RUST_LOG` | `info` | Log filter (`tracing` env-filter syntax). **C** |
+| `LOG_FORMAT` | `text` | `text` or `json`. **C** |
+| `INACTIVE_DEVICE_COMPACTION_GRACE_PERIOD_SECS` | `2592000` | A device idle this long stops holding back compaction; it resyncs from a snapshot if it returns |
+| `NEVER_SYNCED_DEVICE_COMPACTION_GRACE_PERIOD_SECS` | `86400` | The same for a device that never downloaded changes |
+| `HOUSEKEEPING_INTERVAL_SECS` | `86400` | How often expired credentials, sessions and old audit rows are deleted |
+| `DEVICE_CREDENTIAL_RETENTION_SECS` | `604800` | How long an expired refresh token row is kept |
+| `EPHEMERAL_TOMBSTONE_RETENTION_SECS` | `2592000` | How long tab and window tombstones are kept |
+| `DATABASE_MAX_CONNECTIONS` | `50` | Connection pool size; keep it under PostgreSQL's `max_connections` |
+| `WEBSOCKET_PING_INTERVAL_SECS` | `30` | WebSocket keep-alive and re-authorization interval |
+| `REQUEST_TIMEOUT_SECS` | `30` | Longest an HTTP request may run |
+| `WEBSOCKET_SEND_TIMEOUT_SECS` | `10` | Longest one WebSocket send may block |
+| `UPLOAD_SEMAPHORE_ACQUIRE_TIMEOUT_SECS` | `20` | Longest an upload waits behind the same device's previous one |
+| `SHUTDOWN_DEADLINE_SECS` | `30` | Longest a graceful shutdown waits for open requests |
+
+On/off settings accept `true`, `false`, `1` or `0`. A value that doesn't
+parse, or is out of range (a zero interval, for example), stops the server at
+startup with a message naming the variable. Rate limits are fixed in code
+(`docs/security.md` §5).
+
 ## Content-Security-Policy and a separate API origin
 
 The `web` image serves a strict Content-Security-Policy that only allows
@@ -314,17 +364,13 @@ not from backups taken before; they age out with your backup retention.
 
 ## Database migrations
 
-Migrations live in `server/migrations/`, named `NNNN_description.sql`, and
-are applied automatically at server startup via `sqlx::migrate!`. To run
-them manually (e.g. before a blue/green cutover):
+The schema is `server/migrations/0001_init.sql`, applied automatically at
+server startup via `sqlx::migrate!`. To apply it by hand instead:
 
 ```bash
 cd server
 sqlx migrate run --database-url "$DATABASE_URL"
 ```
-
-Every schema change must be a new, versioned migration file — never edit
-a migration that has already shipped.
 
 ## Disaster recovery checklist
 
@@ -351,6 +397,20 @@ orchestrator can detect (and restart or stop routing to) an instance whose
 pool can no longer reach Postgres, rather than that going unnoticed while
 every real endpoint 500s. The Dockerfile's `HEALTHCHECK` (and Docker
 Compose's container health status) uses this endpoint.
+
+## Logs
+
+The server logs to standard output: `docker compose logs server`, or the
+journal for the systemd unit above. `RUST_LOG` selects what is logged (default
+`info`; for example `RUST_LOG=info,helixsync_server=debug`), and
+`LOG_FORMAT=json` switches from text lines to one JSON object per line for a
+log collector. The Compose files rotate each container's log at 10 MB, keeping
+three files.
+
+Logs never contain passwords, `authKey`s, tokens, key material or synced data
+(`docs/security.md` §7). Security events such as logins, revocations and
+account deletion are recorded in the `audit_logs` table, kept for
+`AUDIT_LOG_RETENTION_SECS` (default 90 days).
 
 ## Deleting an account (operators)
 

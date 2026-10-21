@@ -19,7 +19,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::auth::extractors::AuthenticatedDevice;
-use crate::auth::normalize_email;
+use crate::auth::request_email;
 use crate::crypto::{generate_opaque_token, token_hash_matches, validate_ecdh_public_key};
 use crate::devices::routes::{
     insert_device, user_agent_from_headers, validate_device_info, validate_device_name, NewDevice,
@@ -93,7 +93,7 @@ pub(crate) async fn create_auth_request(
         &rate_limit_ip_key(ip),
     )?;
 
-    let email = normalize_email(&req.email);
+    let email = request_email(&req.email)?;
     enforce(&state.rate_limiter, AUTH_REQUEST_EMAIL_LIMIT, &email)?;
 
     validate_ecdh_public_key(&req.public_key).map_err(|e| AppError::Validation(e.to_string()))?;

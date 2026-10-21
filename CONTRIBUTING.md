@@ -88,10 +88,11 @@ Queries in `server/tests/` use the live database and are deliberately not cached
 
 #### Schema changes
 
-`server/migrations/0001_init.sql` is the baseline. Every schema change is a new
-numbered migration file; never edit one that has shipped, because the server
-checks applied migrations against their recorded checksums. Prefer additive
-changes.
+The whole schema is `server/migrations/0001_init.sql`. Change that file in
+place; don't add a second numbered migration. Then regenerate `server/.sqlx/`
+as above. SQLx records a checksum of each applied migration and the server
+refuses to start when it no longer matches, so recreate your local database
+after a schema change.
 
 ### Extension
 
@@ -106,6 +107,26 @@ npm run build          # output in extension/dist/
 To try it, open `chrome://extensions`, enable Developer mode and load
 `extension/dist/` as an unpacked extension. The popup is the whole UI; set its
 Server URL to your dashboard's origin (HTTPS, except `localhost`).
+
+**End-to-end test.** `npm run test:e2e` drives the built extension in two
+throwaway browser profiles against a local stack: it registers on the
+dashboard, connects both popups, checks that bookmark create, rename and delete
+and a history visit sync between them, that open tabs sync under both "ask"
+and "automatic" restore and tab groups keep their title, color and collapsed
+state, and that a bookmark or visit made while the extension's service worker
+is stopped is still captured, then tests Disconnect and login with device. It needs a Chromium-based browser (Chromium, Helium, Brave, ...;
+branded Google Chrome ignores `--load-extension`). It creates accounts, so it
+only accepts a local server; give it a stack of its own. CI doesn't run it.
+
+```bash
+# from the repository root, with .env set up as in the README
+WEB_PORT=127.0.0.1:5174 docker compose -p helixsync-e2e up -d --build
+cd extension && npm run build
+HELIXSYNC_E2E_URL=http://localhost:5174 HELIXSYNC_E2E_BROWSER=/usr/bin/chromium npm run test:e2e
+cd .. && docker compose -p helixsync-e2e down -v
+```
+
+`HELIXSYNC_E2E_BROWSER_B` runs the second device in a different browser.
 
 ### Web dashboard
 
@@ -160,6 +181,14 @@ published until they pass on `main`.
   (`fix:`, `feat:`, `chore:`, `docs:`, `ci:`), then a body that says why.
 - Never commit secrets, real browsing data, or personal information, and
   don't paste them into issues or screenshots.
+- **New dependencies** must be under a permissive license that is compatible
+  with MIT. For the server, the allowed licenses are listed in
+  `server/about.toml`, and the server image build (which also runs on pull
+  requests) fails on anything else. To check locally:
+  `cargo install cargo-about --locked --version 0.9.2 --features cli`, then
+  `cargo about generate --locked about.hbs` in `server/`. The web and extension
+  builds list the licenses of everything they bundle in
+  `dist/THIRD_PARTY_LICENSES.txt`.
 
 ### Versions and releases
 

@@ -199,6 +199,12 @@ per-minute cap tuned for login-sized traffic.
   checked).
 - Explicit size limits: max request body size, max operations per upload
   batch, max payload size per operation.
+- Key material the clients depend on is shape-checked on every route that
+  stores it (register, password change, recovery, recovery-code
+  regeneration): `kdfSalt` must be 16 bytes of base64url, `kdfParams` exactly
+  `{ m, t, p }` within the bounds the clients accept, and wrapped keys are
+  length-capped. Emails over 320 bytes are refused before they are used as a
+  rate-limit key or looked up.
 - All SQL is parameterized via `sqlx` compile-time-checked queries — no
   string-built SQL.
 
@@ -409,6 +415,9 @@ tokens is `401`.
   `docs/releasing.md`.
 - `react-router-dom` is on 7.x, which carries the fix for the open-redirect
   advisory GHSA-wrjc-x8rr-h8h6.
+- Every build ships the licenses of the third-party code in it
+  (`THIRD_PARTY_LICENSES.txt`). The server image build fails when a compiled
+  crate is under a license missing from the allowlist in `server/about.toml`.
 
 ## 13. Browser Extension Surface
 

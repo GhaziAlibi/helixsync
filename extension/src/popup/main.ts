@@ -119,6 +119,8 @@ async function clearPasswordDraft(): Promise<void> {
 }
 
 const SYNC_TOGGLE_IDS = ["syncBookmarks", "syncHistory", "syncTabs", "syncTabGroups"] as const;
+// Optional in the manifest: asked for only when tab group sync is turned on.
+const TAB_GROUPS_PERMISSION: chrome.permissions.Permissions = { permissions: ["tabGroups"] };
 type SyncToggleId = (typeof SYNC_TOGGLE_IDS)[number];
 const SETTINGS_SELECT_IDS = ["tabRestorePolicy", "historyRetention"] as const;
 
@@ -1018,6 +1020,14 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
   return section;
 }
 
+function changedSettings(loaded: SettingsForm, form: SettingsForm): UpdateSettingsRequest {
+  return Object.fromEntries(
+    (Object.keys(form) as Array<keyof SettingsForm>)
+      .filter((key) => form[key] !== loaded[key])
+      .map((key) => [key, form[key]]),
+  );
+}
+
 function readSettingsForm(): SettingsForm {
   return {
     syncBookmarks: inputById("syncBookmarks").checked,
@@ -1093,7 +1103,7 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
         <a href="#" id="change-password-link">Change on the web</a>
       </div>
     </fieldset>
-    <button id="save-settings" class="primary">Save</button>
+    <button id="save-settings" class="primary" disabled>Save</button>
     <div class="status-message" id="status"></div>
   `;
 
@@ -1127,10 +1137,21 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
   });
 
   const status = document.getElementById("status")!;
+  const saveButton = document.getElementById("save-settings") as HTMLButtonElement;
+  // What the form was filled from; Save sends only fields changed since. Save
+  // stays disabled until then: the unfilled form reads as everything off.
+  let loaded: SettingsForm | undefined;
   try {
-    const settings = await fetchSettings();
+    const settings = await fetchSettings({ fresh: true });
     const draft = (await loadDraft<SettingsDraft>(SETTINGS_DRAFT_KEY)) ?? {};
     fillSettingsForm(settings, draft);
+    loaded = settings;
+    saveButton.disabled = false;
+    // The setting is account-wide (it can be turned on from the dashboard or
+    // another browser), but each browser grants the permission itself.
+    if (inputById("syncTabGroups").checked && !(await chrome.permissions.contains(TAB_GROUPS_PERMISSION))) {
+      status.textContent = "Tab groups need permission in this browser: press Save to allow it.";
+    }
   } catch (err) {
     showError(status, `Failed to load settings: ${errorMessage(err)}`);
   }
@@ -1142,11 +1163,22 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
     document.getElementById(id)?.addEventListener("change", persistSettingsDraft);
   }
 
-  document.getElementById("save-settings")?.addEventListener("click", async () => {
+  saveButton.addEventListener("click", async () => {
+    if (!loaded) return;
     status.classList.remove("error");
     status.textContent = "Saving…";
-    const patch: UpdateSettingsRequest = readSettingsForm();
+    const form = readSettingsForm();
+    // Settings are account-wide: sending only what changed here keeps a
+    // change made meanwhile on another device or the dashboard.
+    const patch: UpdateSettingsRequest = changedSettings(loaded, form);
+    // Requested before any await: chrome.permissions.request() must run inside
+    // the click's user gesture. Resolves at once when already granted.
+    const tabGroupsGranted = form.syncTabGroups ? chrome.permissions.request(TAB_GROUPS_PERMISSION) : Promise.resolve(true);
     try {
+      if (!(await tabGroupsGranted)) {
+        showError(status, "Tab group sync needs the tab groups permission. Allow it, or turn Tab Groups off.");
+        return;
+      }
       await updateSettings(patch);
       await clearDraft(SETTINGS_DRAFT_KEY);
       await chrome.runtime.sendMessage({ type: "REFRESH_CAPTURE_CONFIG" });

@@ -13,6 +13,7 @@ let onRemovedListener: ((tabId: number) => void) | undefined;
     onRemoved: { addListener: vi.fn() },
   },
   tabs: {
+    query: vi.fn(async () => []),
     onCreated: { addListener: vi.fn() },
     onUpdated: {
       addListener: vi.fn((cb) => {

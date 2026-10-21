@@ -1,11 +1,18 @@
 use std::env;
+use std::net::SocketAddr;
 
 use axum::http::HeaderValue;
 
-#[derive(Clone, Debug)]
+// No `Debug`: `database_url` carries the database password and
+// `jwt_signing_key` signs every access token, so the whole struct must never
+// end up in a log line.
+#[derive(Clone)]
 pub struct Config {
     pub database_url: String,
-    pub bind_addr: String,
+    /// `BIND_ADDR`. Loopback by default, so a server started by hand isn't
+    /// reachable from the network without a deliberate choice; the Docker
+    /// image sets `0.0.0.0:8080`.
+    pub bind_addr: SocketAddr,
     pub jwt_signing_key: Vec<u8>,
     pub access_token_ttl_secs: i64,
     pub refresh_token_ttl_secs: i64,
@@ -155,19 +162,14 @@ fn env_parse<T>(
     parse(name, env::var(name).ok().as_deref(), default)
 }
 
-/// A boolean env var: `true` or `1` is on; anything else, or unset, is off.
-fn env_flag(name: &str) -> bool {
-    env::var(name).is_ok_and(|v| v == "true" || v == "1")
-}
-
-/// Parses a boolean that is ON when unset (or empty), so forgetting the
-/// variable leaves the safe behaviour in place. Only an explicit `false`/`0`
-/// turns it off. Anything else fails startup rather than being guessed at:
-/// silently reading `no` or `off` as "on" would leave an operator believing
-/// they had disabled something they hadn't.
-fn parse_flag_default_true(name: &str, raw: Option<&str>) -> anyhow::Result<bool> {
+/// Parses a boolean: `true`/`1` or `false`/`0`, any case. Unset (or empty)
+/// uses `default`, so each flag's default is its safe behaviour. Anything
+/// else fails startup rather than being guessed at: silently reading `no` or
+/// `off` as "on" would leave an operator believing they had disabled
+/// something they hadn't.
+fn parse_flag(name: &str, raw: Option<&str>, default: bool) -> anyhow::Result<bool> {
     let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
-        return Ok(true);
+        return Ok(default);
     };
     match raw.to_ascii_lowercase().as_str() {
         "true" | "1" => Ok(true),
@@ -197,6 +199,63 @@ fn validate_jwt_signing_key(key: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Refuses a `DATABASE_URL` still carrying the `.env.example` password
+/// placeholder (the Compose files build the URL from `POSTGRES_PASSWORD`).
+/// Same substring rule as [`validate_jwt_signing_key`].
+fn validate_database_url(url: &str) -> anyhow::Result<()> {
+    let lowered = url.to_ascii_lowercase();
+    if lowered.contains("change-me") || lowered.contains("replace-me") {
+        return Err(anyhow::anyhow!(
+            "DATABASE_URL still contains a .env.example placeholder password (\"change-me\" or \"replace-me\"); set POSTGRES_PASSWORD to a real secret, e.g. `openssl rand -hex 32`"
+        ));
+    }
+    Ok(())
+}
+
+/// Parses `BIND_ADDR` as `ip:port`, so a typo fails startup before the
+/// database is touched.
+fn parse_bind_addr(
+    name: &str,
+    raw: Option<&str>,
+    default: SocketAddr,
+) -> anyhow::Result<SocketAddr> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        None => Ok(default),
+        Some(v) => v.parse().map_err(|_| {
+            anyhow::anyhow!("{name} must be an ip:port address such as 127.0.0.1:8080, got {v:?}")
+        }),
+    }
+}
+
+/// Log output format, from `LOG_FORMAT`. Read on its own, before [`Config`],
+/// because logging is set up first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogFormat {
+    /// Human-readable lines (the default).
+    Text,
+    /// One JSON object per line, for log collectors.
+    Json,
+}
+
+impl LogFormat {
+    pub fn from_env() -> anyhow::Result<Self> {
+        parse_log_format(env::var("LOG_FORMAT").ok().as_deref())
+    }
+}
+
+fn parse_log_format(raw: Option<&str>) -> anyhow::Result<LogFormat> {
+    let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(LogFormat::Text);
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "text" => Ok(LogFormat::Text),
+        "json" => Ok(LogFormat::Json),
+        _ => Err(anyhow::anyhow!(
+            "LOG_FORMAT must be text or json, got {raw:?}"
+        )),
+    }
+}
+
 /// Splits `CORS_ALLOWED_ORIGINS` on commas and checks each is a valid header
 /// value. A bad origin fails startup instead of being silently dropped.
 fn parse_cors_allowed_origins(raw: Option<&str>) -> anyhow::Result<Vec<String>> {
@@ -221,11 +280,16 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let database_url =
             env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL is required"))?;
+        validate_database_url(&database_url)?;
         let jwt_signing_key_str = env::var("JWT_SIGNING_KEY")
             .map_err(|_| anyhow::anyhow!("JWT_SIGNING_KEY is required (min 32 bytes)"))?;
         validate_jwt_signing_key(&jwt_signing_key_str)?;
 
-        let bind_addr = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
+        let bind_addr = env_parse(
+            "BIND_ADDR",
+            SocketAddr::from(([127, 0, 0, 1], 8080)),
+            parse_bind_addr,
+        )?;
 
         let access_token_ttl_secs = env_parse(
             "ACCESS_TOKEN_TTL_SECS",
@@ -245,17 +309,13 @@ impl Config {
             parse_nonnegative_secs,
         )?;
 
-        let require_encryption = parse_flag_default_true(
-            "REQUIRE_ENCRYPTION",
-            env::var("REQUIRE_ENCRYPTION").ok().as_deref(),
-        )?;
+        let require_encryption = env_parse("REQUIRE_ENCRYPTION", true, parse_flag)?;
 
-        let allow_registration = parse_flag_default_true(
-            "ALLOW_REGISTRATION",
-            env::var("ALLOW_REGISTRATION").ok().as_deref(),
-        )?;
+        let allow_registration = env_parse("ALLOW_REGISTRATION", true, parse_flag)?;
 
-        let behind_proxy = env_flag("BEHIND_PROXY");
+        // Off by default: trusting forwarded-for headers without a proxy in
+        // front lets any client pick its own rate-limit key.
+        let behind_proxy = env_parse("BEHIND_PROXY", false, parse_flag)?;
 
         let cors_allowed_origins =
             parse_cors_allowed_origins(env::var("CORS_ALLOWED_ORIGINS").ok().as_deref())?;
@@ -476,37 +536,115 @@ mod tests {
         );
     }
 
-    // --- on-by-default flags (REQUIRE_ENCRYPTION, ALLOW_REGISTRATION) ---
+    // --- flags (REQUIRE_ENCRYPTION, ALLOW_REGISTRATION on by default;
+    // BEHIND_PROXY off by default) ---
 
     #[test]
     fn flag_default_true_is_on_when_unset_or_empty() {
-        assert!(parse_flag_default_true("REQUIRE_ENCRYPTION", None).unwrap());
-        assert!(parse_flag_default_true("REQUIRE_ENCRYPTION", Some("")).unwrap());
-        assert!(parse_flag_default_true("REQUIRE_ENCRYPTION", Some("  ")).unwrap());
+        assert!(parse_flag("REQUIRE_ENCRYPTION", None, true).unwrap());
+        assert!(parse_flag("REQUIRE_ENCRYPTION", Some(""), true).unwrap());
+        assert!(parse_flag("REQUIRE_ENCRYPTION", Some("  "), true).unwrap());
     }
 
     #[test]
     fn flag_default_true_stays_on_for_explicit_true() {
-        assert!(parse_flag_default_true("REQUIRE_ENCRYPTION", Some("true")).unwrap());
-        assert!(parse_flag_default_true("REQUIRE_ENCRYPTION", Some("1")).unwrap());
-        assert!(parse_flag_default_true("REQUIRE_ENCRYPTION", Some("TRUE")).unwrap());
+        assert!(parse_flag("REQUIRE_ENCRYPTION", Some("true"), true).unwrap());
+        assert!(parse_flag("REQUIRE_ENCRYPTION", Some("1"), true).unwrap());
+        assert!(parse_flag("REQUIRE_ENCRYPTION", Some("TRUE"), true).unwrap());
     }
 
     #[test]
     fn flag_default_true_only_turns_off_for_explicit_false() {
-        assert!(!parse_flag_default_true("REQUIRE_ENCRYPTION", Some("false")).unwrap());
-        assert!(!parse_flag_default_true("REQUIRE_ENCRYPTION", Some("0")).unwrap());
-        assert!(!parse_flag_default_true("ALLOW_REGISTRATION", Some("False")).unwrap());
-        assert!(!parse_flag_default_true("ALLOW_REGISTRATION", Some(" false ")).unwrap());
+        assert!(!parse_flag("REQUIRE_ENCRYPTION", Some("false"), true).unwrap());
+        assert!(!parse_flag("REQUIRE_ENCRYPTION", Some("0"), true).unwrap());
+        assert!(!parse_flag("ALLOW_REGISTRATION", Some("False"), true).unwrap());
+        assert!(!parse_flag("ALLOW_REGISTRATION", Some(" false "), true).unwrap());
+    }
+
+    #[test]
+    fn flag_default_false_is_off_when_unset_and_strict_otherwise() {
+        assert!(!parse_flag("BEHIND_PROXY", None, false).unwrap());
+        assert!(!parse_flag("BEHIND_PROXY", Some(""), false).unwrap());
+        assert!(parse_flag("BEHIND_PROXY", Some("true"), false).unwrap());
+        assert!(parse_flag("BEHIND_PROXY", Some("1"), false).unwrap());
+        // `yes` used to read silently as "off".
+        let err = parse_flag("BEHIND_PROXY", Some("yes"), false).unwrap_err();
+        assert!(err.to_string().contains("BEHIND_PROXY"));
     }
 
     #[test]
     fn flag_default_true_rejects_unrecognised_values() {
         // `no`/`off` must not silently read as "on" (or "off").
         for bad in ["no", "off", "disabled", "2", "yes"] {
-            let err = parse_flag_default_true("ALLOW_REGISTRATION", Some(bad)).unwrap_err();
+            let err = parse_flag("ALLOW_REGISTRATION", Some(bad), true).unwrap_err();
             assert!(err.to_string().contains("ALLOW_REGISTRATION"), "{bad}");
         }
+    }
+
+    // --- DATABASE_URL ---
+
+    #[test]
+    fn database_url_rejects_the_env_example_password() {
+        let err = validate_database_url(
+            "postgres://helixsync:change-me-to-a-long-random-value@postgres:5432/helixsync",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("POSTGRES_PASSWORD"));
+    }
+
+    #[test]
+    fn database_url_accepts_a_real_password() {
+        assert!(validate_database_url("postgres://helix:helix@127.0.0.1:5432/helixsync").is_ok());
+    }
+
+    // --- BIND_ADDR ---
+
+    #[test]
+    fn bind_addr_defaults_to_loopback() {
+        let default = SocketAddr::from(([127, 0, 0, 1], 8080));
+        assert_eq!(
+            parse_bind_addr("BIND_ADDR", None, default).unwrap(),
+            default
+        );
+        assert_eq!(
+            parse_bind_addr("BIND_ADDR", Some(" "), default).unwrap(),
+            default
+        );
+    }
+
+    #[test]
+    fn bind_addr_accepts_ipv4_and_ipv6() {
+        let default = SocketAddr::from(([127, 0, 0, 1], 8080));
+        assert_eq!(
+            parse_bind_addr("BIND_ADDR", Some("0.0.0.0:9000"), default).unwrap(),
+            SocketAddr::from(([0, 0, 0, 0], 9000))
+        );
+        assert!(parse_bind_addr("BIND_ADDR", Some("[::1]:8080"), default).is_ok());
+    }
+
+    #[test]
+    fn bind_addr_rejects_a_missing_port_or_a_hostname() {
+        let default = SocketAddr::from(([127, 0, 0, 1], 8080));
+        for bad in ["127.0.0.1", "localhost:8080", "8080", ":8080"] {
+            let err = parse_bind_addr("BIND_ADDR", Some(bad), default).unwrap_err();
+            assert!(err.to_string().contains("BIND_ADDR"), "{bad}");
+        }
+    }
+
+    // --- LOG_FORMAT ---
+
+    #[test]
+    fn log_format_defaults_to_text_and_accepts_json() {
+        assert_eq!(parse_log_format(None).unwrap(), LogFormat::Text);
+        assert_eq!(parse_log_format(Some("")).unwrap(), LogFormat::Text);
+        assert_eq!(parse_log_format(Some("text")).unwrap(), LogFormat::Text);
+        assert_eq!(parse_log_format(Some("JSON")).unwrap(), LogFormat::Json);
+    }
+
+    #[test]
+    fn log_format_rejects_unknown_values() {
+        let err = parse_log_format(Some("logfmt")).unwrap_err();
+        assert!(err.to_string().contains("LOG_FORMAT"));
     }
 
     // --- JWT signing key validation ---

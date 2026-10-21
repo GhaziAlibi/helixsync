@@ -13,6 +13,7 @@ let onActivatedListener: ((info: { tabId: number; windowId: number }) => void) |
     onRemoved: { addListener: vi.fn() },
   },
   tabs: {
+    query: vi.fn(async () => []),
     onCreated: { addListener: vi.fn() },
     onUpdated: { addListener: vi.fn() },
     onActivated: {

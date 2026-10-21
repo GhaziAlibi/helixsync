@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 use crate::auth::account::delete_user;
-use crate::auth::normalize_email;
+use crate::auth::request_email;
 use crate::crypto::{
     fake_kdf_salt_for_unknown_email, hash_password_async, hash_token, token_hash_matches,
     validate_auth_key, verify_password_async,
@@ -62,9 +62,9 @@ pub fn sensitive_router() -> Router<AppState> {
 
 /// Default Argon2id cost for a fresh `kdfParams`, returned for prelogin's
 /// enumeration-resistant fake response (docs/encryption.md §2). Real
-/// accounts store their own `kdf_params`, generated client-side at
-/// register time — the server never chooses or validates the real ones
-/// beyond storing whatever JSON the client sent.
+/// accounts store their own `kdf_params`, generated client-side; the server
+/// never chooses them, only checks they are within the bounds the clients
+/// accept (`validate_kdf_params`).
 fn default_kdf_params() -> serde_json::Value {
     serde_json::json!({ "m": 19456, "t": 2, "p": 1 })
 }
@@ -105,7 +105,7 @@ async fn prelogin(
     let ip = client_ip(&headers, addr, state.config.behind_proxy);
     enforce(&state.rate_limiter, PRELOGIN_LIMIT, &rate_limit_ip_key(ip))?;
 
-    let email = normalize_email(&req.email);
+    let email = request_email(&req.email)?;
     enforce(&state.rate_limiter, PRELOGIN_EMAIL_LIMIT, &email)?;
 
     let user = sqlx::query!(
@@ -172,17 +172,16 @@ async fn register(
         return Err(AppError::RegistrationDisabled);
     }
 
-    if !req.email.contains('@') || req.email.len() > 320 {
+    let email = request_email(&req.email)?;
+    if !email.contains('@') {
         return Err(AppError::Validation("invalid email".into()));
     }
     validate_request_auth_key(&req.auth_key)?;
     validate_request_auth_key(&req.recovery_auth_key)?;
-    validate_kdf_salt(&req.kdf_salt)?;
-    validate_kdf_params(&req.kdf_params)?;
+    validate_kdf_salt("kdfSalt", &req.kdf_salt)?;
+    validate_kdf_params("kdfParams", &req.kdf_params)?;
     validate_wrapped_key("wrappedAk", &req.wrapped_ak)?;
     validate_wrapped_key("recoveryWrappedAk", &req.recovery_wrapped_ak)?;
-
-    let email = normalize_email(&req.email);
 
     let password_hash = hash_password_async(req.auth_key.clone(), &state.argon2_semaphore)
         .await
@@ -276,7 +275,7 @@ async fn login(
 
     // Per-account limit, so guesses spread across many IPs are still
     // throttled. Checked before the DB lookup and Argon2 to save CPU.
-    let email = normalize_email(&req.email);
+    let email = request_email(&req.email)?;
     enforce(&state.rate_limiter, LOGIN_EMAIL_LIMIT, &email)?;
 
     validate_request_auth_key(&req.auth_key)?;
@@ -515,6 +514,12 @@ async fn change_password(
 
     validate_request_auth_key(&req.current_auth_key)?;
     validate_request_auth_key(&req.new_auth_key)?;
+    // Same checks as at registration: a malformed salt or out-of-bounds
+    // params stored here would lock the account out, since every client
+    // refuses to derive keys from them.
+    validate_kdf_salt("newKdfSalt", &req.new_kdf_salt)?;
+    validate_kdf_params("newKdfParams", &req.new_kdf_params)?;
+    validate_wrapped_key("newWrappedAk", &req.new_wrapped_ak)?;
 
     let row = sqlx::query!(
         "SELECT password_hash FROM users WHERE id = $1",
@@ -617,6 +622,7 @@ async fn regenerate_recovery_code(
 
     validate_request_auth_key(&req.current_auth_key)?;
     validate_request_auth_key(&req.recovery_auth_key)?;
+    validate_wrapped_key("recoveryWrappedAk", &req.recovery_wrapped_ak)?;
 
     let row = sqlx::query!(
         "SELECT password_hash FROM users WHERE id = $1",
@@ -731,7 +737,7 @@ async fn recover_prepare(
     let ip = client_ip(&headers, addr, state.config.behind_proxy);
     enforce(&state.rate_limiter, RECOVER_LIMIT, &rate_limit_ip_key(ip))?;
 
-    let email = normalize_email(&req.email);
+    let email = request_email(&req.email)?;
     enforce(&state.rate_limiter, RECOVER_EMAIL_LIMIT, &email)?;
 
     validate_request_auth_key(&req.recovery_auth_key)?;
@@ -773,12 +779,16 @@ async fn recover_complete(
     let ip = client_ip(&headers, addr, state.config.behind_proxy);
     enforce(&state.rate_limiter, RECOVER_LIMIT, &rate_limit_ip_key(ip))?;
 
-    let email = normalize_email(&req.email);
+    let email = request_email(&req.email)?;
     enforce(&state.rate_limiter, RECOVER_EMAIL_LIMIT, &email)?;
 
     validate_request_auth_key(&req.recovery_auth_key)?;
     validate_request_auth_key(&req.new_auth_key)?;
     validate_request_auth_key(&req.new_recovery_auth_key)?;
+    validate_kdf_salt("newKdfSalt", &req.new_kdf_salt)?;
+    validate_kdf_params("newKdfParams", &req.new_kdf_params)?;
+    validate_wrapped_key("newWrappedAk", &req.new_wrapped_ak)?;
+    validate_wrapped_key("newRecoveryWrappedAk", &req.new_recovery_wrapped_ak)?;
 
     let Some(account) = verify_recovery_code(&state, &email, &req.recovery_auth_key).await? else {
         return Err(AppError::Unauthorized);

@@ -1,0 +1,10 @@
+The HelixSync server includes the following third-party crates.
+{{#each licenses}}
+
+------------------------------------------------------------------------
+{{{name}}} ({{id}}), used by:
+{{#each used_by}}  {{crate.name}} {{crate.version}}
+{{/each}}------------------------------------------------------------------------
+
+{{{text}}}
+{{/each}}

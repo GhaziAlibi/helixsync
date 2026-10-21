@@ -519,9 +519,13 @@ const loadTabRestorePolicy = singleFlight(async (): Promise<TabRestorePolicy> =>
   return settings.tabRestorePolicy;
 });
 
-export async function fetchSettings(): Promise<UserSettingsDto> {
-  const cached = await settingsCache.readFresh();
-  if (cached) return cached.value;
+/** `fresh` skips the cache, for the popup's settings form: it must show what
+ * the server holds now, not what another device changed up to a minute ago. */
+export async function fetchSettings(options?: { fresh?: boolean }): Promise<UserSettingsDto> {
+  if (!options?.fresh) {
+    const cached = await settingsCache.readFresh();
+    if (cached) return cached.value;
+  }
   return loadSettings();
 }
 

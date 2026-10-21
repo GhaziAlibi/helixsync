@@ -59,6 +59,7 @@ services:
       REQUIRE_ENCRYPTION: ${REQUIRE_ENCRYPTION:-true}
       ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
       MAX_ACCOUNT_STORAGE_BYTES: ${MAX_ACCOUNT_STORAGE_BYTES:-5368709120}
+      MAX_DEVICES_PER_ACCOUNT: ${MAX_DEVICES_PER_ACCOUNT:-25}
       # Always true here: per the comment below, `server` has no published
       # port and is only ever reached through `web`'s nginx, which sets
       # X-Real-IP/X-Forwarded-For (web/nginx.conf). This tells the rate
@@ -72,7 +73,13 @@ services:
       WEB_SESSION_TTL_SECS: ${WEB_SESSION_TTL_SECS:-1209600}
       COMPACTION_INTERVAL_SECS: ${COMPACTION_INTERVAL_SECS:-3600}
       TOMBSTONE_RETENTION_SECS: ${TOMBSTONE_RETENTION_SECS:-2592000}
+      AUDIT_LOG_RETENTION_SECS: ${AUDIT_LOG_RETENTION_SECS:-7776000}
       RUST_LOG: ${RUST_LOG:-info}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+    # On stop the server drains requests for up to SHUTDOWN_DEADLINE_SECS
+    # (30s) and then closes its database connections; Docker's default of
+    # 10s would kill it partway through.
+    stop_grace_period: 40s
     # No `ports:` mapping — the backend is never reachable from outside the
     # docker network. `web`'s nginx (web/nginx.conf) proxies /api/* to it
     # over the internal `helixsync` network instead.

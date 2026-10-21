@@ -5,22 +5,21 @@ use std::time::Duration;
 
 use helixsync_server::auth::account::delete_user_by_email;
 use helixsync_server::auth::normalize_email;
-use helixsync_server::config::Config;
+use helixsync_server::config::{Config, LogFormat};
 use helixsync_server::middleware::rate_limit::RateLimiter;
 use helixsync_server::state::AppState;
 use helixsync_server::websocket::ConnectionRegistry;
 use helixsync_server::{app, database};
 
+/// How long shutdown waits for in-use database connections to be returned
+/// before exiting anyway (e.g. a compaction pass still running).
+const POOL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    init_tracing(LogFormat::from_env()?);
 
     let config = Config::from_env()?;
 
@@ -41,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     database::run_migrations(&db).await?;
     tracing::info!("database migrations applied");
 
-    let bind_addr = config.bind_addr.clone();
+    let addr = config.bind_addr;
     let shutdown_deadline = Duration::from_secs(config.shutdown_deadline_secs);
 
     let state = AppState {
@@ -68,10 +67,10 @@ async fn main() -> anyhow::Result<()> {
         state.web_session_cache.clone(),
     );
 
+    let db = state.db.clone();
     let router = app(state);
 
-    let addr: SocketAddr = bind_addr.parse()?;
-    tracing::info!(%addr, "starting HelixSync server");
+    tracing::info!(%addr, version = env!("CARGO_PKG_VERSION"), "starting HelixSync server");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
@@ -104,6 +103,13 @@ async fn main() -> anyhow::Result<()> {
     tokio::select! {
         result = serve_future => {
             result?;
+            // Hands connections back to Postgres cleanly instead of dropping
+            // them mid-session. Not done after the deadline below: requests
+            // still running there hold connections it would wait for.
+            if tokio::time::timeout(POOL_CLOSE_TIMEOUT, db.close()).await.is_err() {
+                tracing::warn!("database connections still in use at exit");
+            }
+            tracing::info!("shutdown complete");
         }
         _ = deadline_future => {
             tracing::warn!(
@@ -114,6 +120,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// `RUST_LOG` picks what is logged (default `info`); `LOG_FORMAT` how.
+fn init_tracing(format: LogFormat) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let subscriber = tracing_subscriber::fmt().with_env_filter(filter);
+    match format {
+        LogFormat::Text => subscriber.init(),
+        LogFormat::Json => subscriber.json().init(),
+    }
 }
 
 async fn run_command(config: &Config, args: &[String]) -> anyhow::Result<()> {

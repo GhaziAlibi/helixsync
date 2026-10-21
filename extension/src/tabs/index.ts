@@ -59,7 +59,12 @@ const WINDOW_TYPE: ObjectType = "window";
 const TAB_TYPE: ObjectType = "tab";
 const GROUP_TYPE: ObjectType = "tabGroup";
 
-const tabGroupsSupported = typeof chrome.tabGroups !== "undefined";
+// `tabGroups` is an optional permission: chrome.tabGroups exists only once
+// the user has granted it from the popup, which can happen while this worker
+// runs, so availability is checked at each use rather than once at load.
+function tabGroupsSupported(): boolean {
+  return typeof chrome.tabGroups !== "undefined";
+}
 
 // Remote-apply chrome.tabs/tabGroups mutations run inside guard.run so their
 // synchronous events aren't recaptured. A tab's later async loading events
@@ -79,7 +84,7 @@ function opKey(lamportTimestamp: number, deviceId: string, operationId: string, 
 }
 
 function hasTabGroup(tab: chrome.tabs.Tab): boolean {
-  return tabGroupsSupported && tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE;
+  return tabGroupsSupported() && tab.groupId !== undefined && tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE;
 }
 
 /** Per-flush memo of Chromium id -> objectId per type, so a burst sharing
@@ -456,9 +461,18 @@ function tabGroupPayloadsEqual(a: TabGroupPayload, b: TabGroupPayload): boolean 
   return a.title === b.title && a.color === b.color && a.collapsed === b.collapsed;
 }
 
+// Tabs materializeTab is opening for remote tabs, until their mapping is
+// stored. Their first events must not be taken for a new local tab.
+const materializingTabIds = new Set<number>();
+
 /** A navigation fires onUpdated in several async stages, most of them after
  * materializeTab's guard window has closed. Those stages echo a payload the
- * remote apply already recorded, so the equality check drops them. */
+ * remote apply already recorded, so the equality check drops them.
+ *
+ * A tab with no object yet is created here. Chromium reports a new tab to
+ * onCreated before it has a URL (only `pendingUrl`), so stageTabCreated skips
+ * it, and the URL arrives as an update. Tabs that were open before capture
+ * started reach this path too (see registerCapture). */
 async function stageTabUpdated(
   tabId: number,
   tab: chrome.tabs.Tab,
@@ -467,7 +481,10 @@ async function stageTabUpdated(
   titleOnly?: boolean,
 ): Promise<StagedTabOp | null> {
   const objectId = await cachedLookupObjectId(TAB_TYPE, String(tabId), caches.tab);
-  if (!objectId) return null;
+  if (!objectId) {
+    if (materializingTabIds.has(tabId)) return null;
+    return stageTabCreated(tab, overlay, caches);
+  }
   const payload = await tabPayload(tab, caches);
   if (!payload) return null;
   const current = (await overlayOrFieldState(overlay, objectId, "state")) as TabPayload | undefined;
@@ -515,7 +532,7 @@ function stageTabRemoved(tabId: number, caches: TabFlushCaches): Promise<StagedT
  * applies its synced metadata. Called only once a member tab has actually
  * been materialized (§8.5: membership follows each tab's group). */
 async function syncTabGroup(chromiumTabId: string, groupObjectId: string): Promise<void> {
-  if (!tabGroupsSupported) return;
+  if (!tabGroupsSupported()) return;
 
   await groupSyncLock.run(groupObjectId, async () => {
     const existingGroupId = await lookupChromiumLocalId(groupObjectId);
@@ -549,7 +566,10 @@ async function stageGroupUpdated(
   return {
     objectType: GROUP_TYPE,
     objectId,
-    operationType: "update",
+    // No recorded state means the server has never seen this group, and it
+    // refuses an update to an object that was never created. The mapping
+    // alone doesn't tell: a member tab's payload creates it first.
+    operationType: current === undefined ? "create" : "update",
     payload,
     fields: [
       { field: "state", value: payload },
@@ -804,6 +824,7 @@ export function handleTabRemoved(
 }
 
 let captureRegistered = false;
+let groupCaptureRegistered = false;
 
 // In-memory dedup of repeated onActivated for the same tab, so repeats never
 // reach the queue. The field-state check is the backstop across restarts.
@@ -811,6 +832,7 @@ let lastActiveTabId: number | undefined;
 
 export function resetCaptureStateForTesting(): void {
   captureRegistered = false;
+  groupCaptureRegistered = false;
   lastActiveTabId = undefined;
   tabsCaptureEnabled = true;
   tabGroupsCaptureEnabled = true;
@@ -818,7 +840,10 @@ export function resetCaptureStateForTesting(): void {
 }
 
 export function registerCapture(): void {
-  // Called on every startup and settings save; must stay idempotent.
+  // Called on every startup and settings save; must stay idempotent. The
+  // group listeners are tracked apart: the permission they need can be
+  // granted after the tab listeners were added.
+  registerGroupCapture();
   if (captureRegistered) return;
   captureRegistered = true;
 
@@ -837,21 +862,12 @@ export function registerCapture(): void {
     if (guard.isSuppressed()) return;
     enqueueTabEvent({ kind: "tabCreated", tab });
   });
-  // The native `properties` filter keeps status/favicon/audible updates from
-  // waking the worker at all; handleTabUpdated re-checks for runtimes that
-  // ignore it. @types/chrome doesn't model the filter argument.
-  type OnUpdatedWithFilter = {
-    addListener(
-      cb: (tabId: number, changeInfo: TabChangeInfo, tab: chrome.tabs.Tab) => void,
-      filter?: { properties?: Array<keyof TabChangeInfo> },
-    ): void;
-  };
-  (chrome.tabs.onUpdated as unknown as OnUpdatedWithFilter).addListener(
-    (tabId, changeInfo, tab) => {
-      handleTabUpdated(tabId, changeInfo, tab);
-    },
-    { properties: ["url", "title", "pinned", "groupId"] },
-  );
+  // No `properties` filter: only Firefox has one, and Chromium throws "This
+  // event does not support filters", which aborted this whole registration.
+  // handleTabUpdated drops status/favicon/audible updates itself.
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+    handleTabUpdated(tabId, changeInfo, tab);
+  });
   chrome.tabs.onActivated.addListener((info) => {
     // Checked before the dedup update so re-enabling sees fresh state.
     if (!tabsCaptureEnabled) return;
@@ -863,19 +879,34 @@ export function registerCapture(): void {
     handleTabRemoved(tabId);
   });
 
-  if (tabGroupsSupported) {
-    chrome.tabGroups.onUpdated.addListener((group) => {
-      if (!tabGroupsCaptureEnabled) return;
-      if (guard.isSuppressed()) return;
-      enqueueTabEvent({ kind: "groupUpdated", group });
-    });
-    chrome.tabGroups.onRemoved.addListener((group) => {
-      if (!tabGroupsCaptureEnabled) return;
-      enqueueTabEvent({ kind: "groupRemoved", group });
-    });
-  } else {
-    console.info("HelixSync: chrome.tabGroups unavailable, tab group sync disabled (feature detection)");
-  }
+  // Tabs already open when capture starts (tab sync just turned on, or
+  // changes made while the worker was stopped) go through the update path:
+  // a mapped, unchanged tab produces nothing; a tab without an object is created.
+  void chrome.tabs
+    .query({})
+    .then((tabs) => {
+      for (const tab of tabs) {
+        if (tab.id !== undefined) enqueueTabEvent({ kind: "tabUpdated", tabId: tab.id, tab });
+      }
+    })
+    .catch((e) => console.error("HelixSync: could not read open tabs", e));
+}
+
+/** Adds the tab group listeners once chrome.tabGroups exists: at startup when
+ * the permission was granted earlier, otherwise on the settings save that
+ * granted it. Without the permission, tab group sync stays off. */
+function registerGroupCapture(): void {
+  if (groupCaptureRegistered || !tabGroupsSupported()) return;
+  groupCaptureRegistered = true;
+  chrome.tabGroups.onUpdated.addListener((group) => {
+    if (!tabGroupsCaptureEnabled) return;
+    if (guard.isSuppressed()) return;
+    enqueueTabEvent({ kind: "groupUpdated", group });
+  });
+  chrome.tabGroups.onRemoved.addListener((group) => {
+    if (!tabGroupsCaptureEnabled) return;
+    enqueueTabEvent({ kind: "groupRemoved", group });
+  });
 }
 
 // --- Remote apply ------------------------------------------------------------
@@ -968,7 +999,12 @@ async function materializeTab(objectId: string, p: TabPayload): Promise<void> {
     const created = await guard.run(() => chrome.tabs.create({ url: p.url, pinned: p.pinned, active: false }));
     if (created.id !== undefined) {
       chromiumId = String(created.id);
-      await establishMapping(TAB_TYPE, chromiumId, objectId);
+      materializingTabIds.add(created.id);
+      try {
+        await establishMapping(TAB_TYPE, chromiumId, objectId);
+      } finally {
+        materializingTabIds.delete(created.id);
+      }
     }
   }
 
@@ -1028,7 +1064,7 @@ async function applyGroupRemote(op: OperationOut, payload: unknown): Promise<voi
 
   // Groups are created from the tab side once a member tab is restored. If
   // the local group already exists, apply the new metadata right away.
-  if (tabGroupsSupported) {
+  if (tabGroupsSupported()) {
     const existingGroupId = await lookupChromiumLocalId(op.objectId);
     if (existingGroupId !== undefined) {
       await guard.run(() =>
@@ -1152,7 +1188,7 @@ async function applyGroupRemoteBatch(items: RemoteItem[]): Promise<void> {
 
   // As in applyGroupRemote, only groups that already exist locally get
   // their metadata applied. chrome.tabGroups has no bulk update.
-  if (tabGroupsSupported && metadataUpdates.length > 0) {
+  if (tabGroupsSupported() && metadataUpdates.length > 0) {
     const mappings = await getMappingsByObjectIds(metadataUpdates.map((u) => u.objectId));
     const runnable = metadataUpdates.flatMap((u) => {
       const chromiumId = mappings.get(u.objectId)?.chromiumLocalId;

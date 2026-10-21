@@ -19,7 +19,7 @@ use sqlx::PgPool;
 fn test_config() -> Config {
     Config {
         database_url: String::new(),
-        bind_addr: "127.0.0.1:0".into(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
         jwt_signing_key: b"test-signing-key-at-least-32-bytes-long".to_vec(),
         access_token_ttl_secs: 900,
         refresh_token_ttl_secs: 60 * 60 * 24 * 30,
@@ -86,6 +86,9 @@ fn browser(state: &AppState) -> TestServer {
 const EMAIL: &str = "owner@example.com";
 const PASSWORD: &str = "correct horse battery staple";
 const NEW_PASSWORD: &str = "a brand new passphrase";
+/// The salt a recovery sets: bytes 16..32, a different valid salt than
+/// `common::test_kdf_salt()`.
+const NEW_KDF_SALT: &str = "EBESExQVFhcYGRobHB0eHw";
 
 /// Registers `EMAIL` with `common::test_recovery_auth_key()` as its
 /// recovery code and returns the CSRF token.
@@ -128,7 +131,7 @@ fn complete_json(recovery_auth_key: &str, new_code_seed: &str) -> serde_json::Va
         "email": EMAIL,
         "recoveryAuthKey": recovery_auth_key,
         "newAuthKey": common::test_auth_key(NEW_PASSWORD),
-        "newKdfSalt": "new-kdf-salt",
+        "newKdfSalt": NEW_KDF_SALT,
         "newKdfParams": common::test_kdf_params(),
         "newWrappedAk": "new-wrapped-account-key",
         "newRecoveryAuthKey": common::test_auth_key(new_code_seed),
@@ -286,7 +289,7 @@ async fn complete_resets_the_password_rotates_the_code_and_ends_every_session(po
     let me = fresh.get("/api/v1/auth/me").await;
     me.assert_status_ok();
     let me: serde_json::Value = me.json();
-    assert_eq!(me["kdfSalt"], "new-kdf-salt");
+    assert_eq!(me["kdfSalt"], NEW_KDF_SALT);
     assert_eq!(me["wrappedAk"], "new-wrapped-account-key");
 
     // Every session from before the reset is gone.
@@ -352,6 +355,48 @@ async fn complete_with_a_wrong_code_changes_nothing(pool: PgPool) {
     server.get("/api/v1/auth/me").await.assert_status_ok();
 }
 
+/// The new password's KDF fields are checked like at registration, before
+/// the recovery code is: values no client accepts would lock the account
+/// out, and the code must stay usable.
+#[sqlx::test(migrations = "./migrations")]
+async fn complete_rejects_malformed_kdf_fields_and_keeps_the_code(pool: PgPool) {
+    let state = state_for(pool);
+    let server = browser(&state);
+    register(&server).await;
+
+    let bad_fields = [
+        ("newKdfSalt", json!("not-16-bytes")),
+        ("newKdfParams", json!({ "m": 1, "t": 2, "p": 1 })),
+        (
+            "newKdfParams",
+            json!({ "m": 19456, "t": 2, "p": 1, "extra": 1 }),
+        ),
+        ("newWrappedAk", json!("x".repeat(2000))),
+        ("newRecoveryWrappedAk", json!("x".repeat(2000))),
+    ];
+    for (field, value) in bad_fields {
+        let mut body = complete_json(&common::test_recovery_auth_key(), "second code");
+        body[field] = value;
+        server
+            .post("/api/v1/auth/recover/complete")
+            .json(&body)
+            .await
+            .assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    // Nothing changed: the old password still works and the code is unused.
+    let fresh = browser(&state);
+    assert_eq!(login(&fresh, PASSWORD).await, StatusCode::OK);
+    server
+        .post("/api/v1/auth/recover/complete")
+        .json(&complete_json(
+            &common::test_recovery_auth_key(),
+            "second code",
+        ))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+}
+
 fn regenerate_json(current_password_seed: &str, new_code_seed: &str) -> serde_json::Value {
     json!({
         "currentAuthKey": common::test_auth_key(current_password_seed),
@@ -399,6 +444,29 @@ async fn regenerate_needs_the_current_password_and_replaces_the_code(pool: PgPoo
         prepared.json::<serde_json::Value>()["recoveryWrappedAk"],
         "recovery-wrapped-under-second code"
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn regenerate_rejects_an_oversized_wrapped_key(pool: PgPool) {
+    let state = state_for(pool);
+    let server = browser(&state);
+    let csrf = register(&server).await;
+
+    let mut body = regenerate_json(PASSWORD, "second code");
+    body["recoveryWrappedAk"] = json!("x".repeat(2000));
+    server
+        .patch("/api/v1/auth/recovery-code")
+        .add_header("x-csrf-token", &csrf)
+        .json(&body)
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+
+    // The original code still works.
+    server
+        .post("/api/v1/auth/recover/prepare")
+        .json(&prepare_json(EMAIL, &common::test_recovery_auth_key()))
+        .await
+        .assert_status_ok();
 }
 
 #[sqlx::test(migrations = "./migrations")]

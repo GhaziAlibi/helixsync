@@ -132,7 +132,6 @@ describe("scheduleLocalSync throttle", () => {
     // the 10s mark after it — wait it out.
     await sleep(10_500);
     const cycles = downloadChangesMock.mock.calls.length;
-    console.log(`THROTTLE-RESULT nudges=3 syncCycles=${cycles}`);
     expect(cycles).toBe(2);
   }, 30000);
 

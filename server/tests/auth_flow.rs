@@ -21,7 +21,7 @@ use uuid::Uuid;
 fn test_config() -> Config {
     Config {
         database_url: String::new(),
-        bind_addr: "127.0.0.1:0".into(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
         jwt_signing_key: b"test-signing-key-at-least-32-bytes-long".to_vec(),
         access_token_ttl_secs: 900,
         refresh_token_ttl_secs: 60 * 60 * 24 * 30,
@@ -301,6 +301,90 @@ async fn change_password_requires_correct_current_password(pool: PgPool) {
         ))
         .await;
     new_login.assert_status_ok();
+}
+
+/// The new KDF fields are checked like at registration, before the current
+/// password is: stored values no client accepts would lock the account out.
+#[sqlx::test(migrations = "./migrations")]
+async fn change_password_rejects_malformed_kdf_fields(pool: PgPool) {
+    let server = server_for(pool);
+
+    let register_res = server
+        .post("/api/v1/auth/register")
+        .json(&register_json(
+            "kdf-check@example.com",
+            "correct horse battery staple",
+        ))
+        .await;
+    register_res.assert_status_ok();
+    let body: serde_json::Value = register_res.json();
+    let csrf = body["csrfToken"].as_str().unwrap().to_string();
+
+    let bad_fields = [
+        ("newKdfSalt", json!("not-16-bytes")),
+        ("newKdfParams", json!({ "m": 19456, "t": 1, "p": 1 })),
+        ("newKdfParams", json!("19456,2,1")),
+        ("newWrappedAk", json!("x".repeat(2000))),
+    ];
+    for (field, value) in bad_fields {
+        let mut body =
+            change_password_json("correct horse battery staple", "a brand new long password");
+        body[field] = value;
+        server
+            .patch("/api/v1/auth/password")
+            .add_header("x-csrf-token", &csrf)
+            .json(&body)
+            .await
+            .assert_status(axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    // Nothing changed.
+    server
+        .post("/api/v1/auth/login")
+        .json(&login_json(
+            "kdf-check@example.com",
+            "correct horse battery staple",
+        ))
+        .await
+        .assert_status_ok();
+}
+
+/// An email longer than any account can have is refused before it is used as
+/// a rate-limit key, on every unauthenticated route that takes one.
+#[sqlx::test(migrations = "./migrations")]
+async fn overlong_emails_are_rejected_before_lookup(pool: PgPool) {
+    let server = server_for(pool);
+    let long_email = format!("{}@example.com", "a".repeat(400));
+
+    let requests = [
+        ("/api/v1/auth/prelogin", json!({ "email": long_email })),
+        ("/api/v1/auth/login", login_json(&long_email, "pw")),
+        (
+            "/api/v1/auth/register",
+            register_json(&long_email, "correct horse battery staple"),
+        ),
+        (
+            "/api/v1/devices/register",
+            device_register_json(&long_email, "pw", "Laptop"),
+        ),
+        (
+            "/api/v1/auth/recover/prepare",
+            json!({ "email": long_email, "recoveryAuthKey": common::test_recovery_auth_key() }),
+        ),
+        (
+            "/api/v1/auth/requests",
+            json!({ "email": long_email, "kind": "web", "publicKey": "unchecked" }),
+        ),
+    ];
+    for (path, body) in requests {
+        let res = server.post(path).json(&body).await;
+        res.assert_status(axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            res.json::<serde_json::Value>()["error"],
+            "validation_error",
+            "{path}"
+        );
+    }
 }
 
 /// SEC-01/docs/encryption.md §2: `POST /auth/prelogin` returns the account's

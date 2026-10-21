@@ -31,6 +31,7 @@ import type {
   ObjectType,
   OperationOut,
   OperationType,
+  SnapshotObject,
   SnapshotResponse,
   UploadRejection,
 } from "./types";
@@ -410,6 +411,13 @@ export async function downloadAndApply(): Promise<boolean> {
       if (op.objectType !== "historyVisit") cycleMovedSignificantOps++;
     }
 
+    // docs/protocol.md §4.2: receiving operations moves the clock past them,
+    // before any is applied. Otherwise an edit made right after a remote
+    // change shows up could carry an older timestamp than that change, lose
+    // to it on every other device, and leave the devices disagreeing.
+    const newestReceived = response.operations.reduce((max, op) => Math.max(max, op.lamportTimestamp), 0);
+    if (newestReceived > 0) await tickLamportClock(newestReceived);
+
     const alreadyApplied = await getAppliedOperationIds(
       response.operations.map((op) => op.operationId),
     );
@@ -526,16 +534,23 @@ const SNAPSHOT_DISPATCH_CHUNK = 500;
 // Tombstones touch distinct objects, so they can be applied concurrently.
 const TOMBSTONE_APPLY_CONCURRENCY = 10;
 
+/** `fields` with an ordering key is a snapshot object: it keeps the key of the
+ * operation that produced it, so later operations are arbitrated against it
+ * exactly as on the devices that applied that operation directly. History
+ * visits (never arbitrated, see SNAPSHOT_DEVICE_ID), tombstones and objects
+ * from snapshots without a stored key get `lamportTimestamp` and synthetic ids. */
 function syntheticSnapshotOp(
   snapshot: SnapshotResponse,
   lamportTimestamp: number,
-  fields: Pick<OperationOut, "objectType" | "objectId" | "operationType" | "encryptionVersion" | "payload">,
+  fields: Pick<OperationOut, "objectType" | "objectId" | "operationType" | "encryptionVersion" | "payload"> &
+    Partial<Pick<SnapshotObject, "lamportTimestamp" | "deviceId" | "operationId">>,
 ): OperationOut {
+  const keepKey = !!fields.lamportTimestamp && !!fields.deviceId && !!fields.operationId && fields.objectType !== "historyVisit";
   return {
-    operationId: uuidv7(),
-    deviceId: SNAPSHOT_DEVICE_ID,
+    operationId: keepKey ? fields.operationId! : uuidv7(),
+    deviceId: keepKey ? fields.deviceId! : SNAPSHOT_DEVICE_ID,
     deviceSequence: 0,
-    lamportTimestamp,
+    lamportTimestamp: keepKey ? fields.lamportTimestamp! : lamportTimestamp,
     objectType: fields.objectType,
     objectId: fields.objectId,
     operationType: fields.operationType,
@@ -561,7 +576,9 @@ export async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRe
 
   await clearFieldState();
 
-  const lamportTimestamp = await tickLamportClock();
+  // §4.2, as in downloadAndApply: the clock moves past every object received.
+  const newestReceived = snapshot.objects.reduce((max, obj) => Math.max(max, obj.lamportTimestamp ?? 0), 0);
+  const lamportTimestamp = await tickLamportClock(newestReceived);
 
   let sinceYield = 0;
   const maybeYield = async () => {

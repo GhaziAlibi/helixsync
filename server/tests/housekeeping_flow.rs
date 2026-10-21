@@ -12,7 +12,7 @@ use uuid::Uuid;
 fn test_config() -> Config {
     Config {
         database_url: String::new(),
-        bind_addr: "127.0.0.1:0".into(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
         jwt_signing_key: b"test-signing-key-at-least-32-bytes-long".to_vec(),
         access_token_ttl_secs: 900,
         refresh_token_ttl_secs: 60 * 60 * 24 * 30,

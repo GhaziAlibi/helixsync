@@ -936,10 +936,7 @@ async fn process_batch(
         //
         //
         // History visit counts live in `history_visit_hours`, written below.
-        if bookmark_delta != 0
-            || tab_delta != 0
-            || batch_storage_bytes != 0
-        {
+        if bookmark_delta != 0 || tab_delta != 0 || batch_storage_bytes != 0 {
             sqlx::query!(
                 r#"
                 INSERT INTO sync_stats (user_id, bookmark_count, tab_count, storage_bytes)

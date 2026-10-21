@@ -4,9 +4,10 @@
 //! concerned — it's derived client-side (Argon2id + HKDF) from the account
 //! password, and the server never re-derives or validates it against
 //! anything. Tests therefore don't need real KDF logic: any 32 bytes,
-//! base64url-encoded (no padding), is a valid `authKey`. `kdf_salt`/
-//! `kdf_params`/`wrapped_ak` are similarly opaque to the server — arbitrary
-//! placeholder strings/JSON are fine.
+//! base64url-encoded (no padding), is a valid `authKey`. The server only
+//! checks the shape of `kdf_salt` (16 bytes of base64url), `kdf_params`
+//! (bounded `m`/`t`/`p`) and `wrapped_ak` (a length cap), so fixed
+//! placeholders of the right shape are fine.
 
 use sha2::{Digest, Sha256};
 
@@ -19,10 +20,11 @@ pub fn test_auth_key(seed: &str) -> String {
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, digest)
 }
 
-/// Placeholder `kdfSalt` for tests — opaque to the server.
+/// Placeholder `kdfSalt` for tests: bytes 0..16, base64url without padding,
+/// the shape the server requires of a real salt.
 #[allow(dead_code)]
 pub fn test_kdf_salt() -> &'static str {
-    "test-kdf-salt"
+    "AAECAwQFBgcICQoLDA0ODw"
 }
 
 /// Placeholder `kdfParams` for tests — opaque to the server, must be valid JSON.

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::auth::extractors::{
     write_device_revocation_cache_entry, AuthenticatedDevice, CsrfProtectedUser,
 };
-use crate::auth::normalize_email;
+use crate::auth::request_email;
 use crate::crypto::{
     generate_opaque_token, hash_password_async, hash_token, validate_auth_key,
     verify_password_async,
@@ -92,19 +92,22 @@ const KDF_M_RANGE: RangeInclusive<u64> = 19456..=262144;
 const KDF_T_RANGE: RangeInclusive<u64> = 2..=10;
 const KDF_P_RANGE: RangeInclusive<u64> = 1..=4;
 
-pub(crate) fn validate_kdf_salt(salt: &str) -> AppResult<()> {
+pub(crate) fn validate_kdf_salt(field: &str, salt: &str) -> AppResult<()> {
     let decoded = base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, salt);
     if !matches!(decoded, Ok(bytes) if bytes.len() == 16) {
-        return Err(AppError::Validation(
-            "kdfSalt must be 16 bytes of base64url".into(),
-        ));
+        return Err(AppError::Validation(format!(
+            "{field} must be 16 bytes of base64url"
+        )));
     }
     Ok(())
 }
 
-pub(crate) fn validate_kdf_params(params: &serde_json::Value) -> AppResult<()> {
-    let invalid =
-        || AppError::Validation("kdfParams must be { m, t, p } integers within bounds".into());
+pub(crate) fn validate_kdf_params(field: &str, params: &serde_json::Value) -> AppResult<()> {
+    let invalid = || {
+        AppError::Validation(format!(
+            "{field} must be {{ m, t, p }} integers within bounds"
+        ))
+    };
     let obj = params.as_object().ok_or_else(invalid)?;
     if obj.len() != 3 {
         return Err(invalid());
@@ -187,7 +190,7 @@ async fn register_device(
 
     // Per-account limit, like `auth::routes::login`. Checked before the DB
     // lookup and Argon2.
-    let email = normalize_email(&req.email);
+    let email = request_email(&req.email)?;
     enforce(&state.rate_limiter, DEVICE_REGISTER_EMAIL_LIMIT, &email)?;
 
     let user = sqlx::query!(

@@ -83,6 +83,11 @@ export interface SnapshotObject {
   operationType: OperationType;
   encryptionVersion: number;
   payload: unknown;
+  // Ordering key of the operation that produced this state (§8.1). A
+  // snapshot written before the server stored it has 0 and the nil UUID.
+  lamportTimestamp: number;
+  deviceId: string;
+  operationId: string;
 }
 
 export interface SnapshotTombstone {

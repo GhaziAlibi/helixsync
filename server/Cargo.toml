@@ -2,6 +2,10 @@
 name = "helixsync-server"
 version = "0.4.0"
 edition = "2021"
+description = "Self-hosted, end-to-end encrypted browser sync server"
+license = "MIT"
+repository = "https://github.com/GhaziAlibi/helixsync"
+publish = false
 default-run = "helixsync-server"
 
 [lib]
@@ -25,7 +29,7 @@ uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 time = "0.3"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 argon2 = "0.5"
 jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 rand = "0.8"

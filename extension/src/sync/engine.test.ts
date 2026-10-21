@@ -590,6 +590,9 @@ describe("applySnapshot synthetic ID write prevention (EXT-02 fix)", () => {
           operationType: "create" as const,
           encryptionVersion: 1,
           payload: envelope,
+          lamportTimestamp: 7,
+          deviceId: "dev-2",
+          operationId: "op-b-1",
         },
       ],
       tombstones: [
@@ -1046,13 +1049,16 @@ describe("envelope version handling in downloadAndApply / applySnapshot", () => 
     const snapshot = {
       snapshotCursor: 42,
       objects: [
-        { objectType: "bookmark" as const, objectId: "b-1", operationType: "create" as const, encryptionVersion: 1, payload: good.payload },
+        { objectType: "bookmark" as const, objectId: "b-1", operationType: "create" as const, encryptionVersion: 1, payload: good.payload, lamportTimestamp: 1, deviceId: "dev-2", operationId: "op-1" },
         {
           objectType: "bookmark" as const,
           objectId: "b-2",
           operationType: "create" as const,
           encryptionVersion: 1,
           payload: { ...(good.payload as object), v: 1 },
+          lamportTimestamp: 2,
+          deviceId: "dev-2",
+          operationId: "op-2",
         },
       ],
       tombstones: [],
@@ -1089,6 +1095,113 @@ describe("envelope version handling in downloadAndApply / applySnapshot", () => 
     expect(last[1]).toMatch(/Update the HelixSync extension/);
     expect(markedApplied()).not.toContain("op-unreadable");
     expect(updateSyncState).not.toHaveBeenCalled();
+  });
+});
+
+// docs/protocol.md §4.2. Without it, an edit made on this device right after
+// a remote change arrived could get a lower Lamport timestamp than that
+// change, lose to it on every other device, and the devices would diverge
+// (found end to end: a rename made in one browser never reached the other).
+describe("Lamport clock observes received operations (§4.2)", () => {
+  const device = {
+    id: "self" as const,
+    deviceId: "dev-1",
+    userId: "user-1",
+    email: "test@example.com",
+    serverUrl: "http://localhost:8080",
+    accessToken: "token",
+    refreshToken: "refresh",
+    accessTokenExpiresAt: new Date(Date.now() + 3600000).toISOString(),
+    accountKey: "rek",
+    accountKeyVersion: 1,
+  };
+  const events: string[] = [];
+  const appliedOps: Array<{ deviceId: string; operationId: string; lamportTimestamp: number }> = [];
+
+  async function remoteOp(operationId: string, objectId: string, lamportTimestamp: number) {
+    return {
+      operationId,
+      deviceId: "dev-2",
+      deviceSequence: 1,
+      lamportTimestamp,
+      objectType: "bookmark" as const,
+      objectId,
+      operationType: "create" as const,
+      encryptionVersion: 1,
+      payload: await encryptPayload({ title: objectId }, device.accountKey, 1, buildOperationAad("bookmark", objectId, "create")),
+      serverCursor: 1,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  beforeEach(async () => {
+    events.length = 0;
+    appliedOps.length = 0;
+    const { tickLamportClock } = await import("../storage/db");
+    vi.mocked(tickLamportClock).mockReset();
+    vi.mocked(tickLamportClock).mockImplementation(async (observed?: number) => {
+      events.push(`tick ${observed ?? "-"}`);
+      return (observed ?? 0) + 1;
+    });
+    registerApplier("bookmark", async (op) => {
+      events.push(`apply ${op.operationId}`);
+      appliedOps.push({ deviceId: op.deviceId, operationId: op.operationId, lamportTimestamp: op.lamportTimestamp });
+    });
+    vi.mocked(getDevice).mockReset();
+    vi.mocked(getDevice).mockResolvedValue(device);
+    vi.mocked(getSyncState).mockReset();
+    vi.mocked(getSyncState).mockResolvedValue({ id: "self", cursor: 0, lamportClock: 1, deviceSequence: 1 });
+    vi.mocked(updateSyncState).mockReset();
+    vi.mocked(getAppliedOperationIds).mockReset();
+    vi.mocked(getAppliedOperationIds).mockResolvedValue(new Set());
+    vi.mocked(markAppliedBatch).mockReset();
+    vi.mocked(downloadChanges).mockReset();
+  });
+
+  it("moves the clock past the newest received operation before applying any", async () => {
+    vi.mocked(downloadChanges).mockResolvedValue({
+      operations: [await remoteOp("op-a", "b-a", 5), await remoteOp("op-b", "b-b", 9)],
+      nextCursor: 2,
+      hasMore: false,
+    });
+
+    await downloadAndApply();
+
+    expect(events).toEqual(["tick 9", "apply op-a", "apply op-b"]);
+  });
+
+  it("leaves the clock alone for an empty page", async () => {
+    vi.mocked(downloadChanges).mockResolvedValue({ operations: [], nextCursor: 0, hasMore: false });
+
+    await downloadAndApply();
+
+    expect(events).toEqual([]);
+  });
+
+  it("applies a snapshot with each object's own ordering key and observes the newest", async () => {
+    const op = await remoteOp("op-a", "b-a", 12);
+    await applySnapshot(
+      {
+        snapshotCursor: 5,
+        objects: [
+          {
+            objectType: "bookmark",
+            objectId: "b-a",
+            operationType: "create",
+            encryptionVersion: 1,
+            payload: op.payload,
+            lamportTimestamp: 12,
+            deviceId: "dev-2",
+            operationId: "op-a",
+          },
+        ],
+        tombstones: [],
+      },
+      device,
+    );
+
+    expect(events[0]).toBe("tick 12");
+    expect(appliedOps).toEqual([{ deviceId: "dev-2", operationId: "op-a", lamportTimestamp: 12 }]);
   });
 });
 
