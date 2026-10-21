@@ -13,7 +13,7 @@
   "dependencies": {
     "@noble/ciphers": "^2.4.0",
     "@noble/hashes": "^2.4.0",
-    "idb": "^8.0.0"
+    "idb": "^8.0.4"
   },
   "devDependencies": {
     "@types/chrome": "^0.3.0",
