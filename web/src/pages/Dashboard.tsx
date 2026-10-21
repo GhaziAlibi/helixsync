@@ -15,7 +15,7 @@ function timeAgo(iso: string | null): string {
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
-    <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+    <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5">
       <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
       <div className="text-2xl font-semibold mt-1">{value}</div>
       {sub && <div className="text-xs text-slate-400 mt-1">{sub}</div>}
@@ -40,7 +40,7 @@ function StorageCard({ usedBytes, limitBytes }: { usedBytes: number; limitBytes:
   const percent = Math.round(fraction * 100);
   const barColor = fraction >= 0.9 ? "bg-red-500" : fraction >= 0.7 ? "bg-amber-500" : "bg-blue-500";
   return (
-    <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+    <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5">
       <div className="text-xs uppercase tracking-wide text-slate-500">Storage used</div>
       <div className="text-2xl font-semibold mt-1">
         {formatBytes(usedBytes)}
@@ -106,7 +106,7 @@ export default function Dashboard() {
         {stats && <StorageCard usedBytes={stats.storageBytes} limitBytes={stats.storageLimitBytes} />}
       </div>
 
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+      <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5">
         <h2 className="font-medium mb-3">Recent devices</h2>
         {!devices ? (
           <p className="text-sm text-slate-500">Loading…</p>

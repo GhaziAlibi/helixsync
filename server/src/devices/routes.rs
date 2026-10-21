@@ -1,10 +1,11 @@
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use std::ops::RangeInclusive;
 use uuid::Uuid;
 
 use crate::auth::extractors::{
@@ -55,6 +56,81 @@ pub(crate) fn validate_device_name(name: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Longest browser, version or platform string accepted, in bytes.
+const MAX_DEVICE_FIELD_LEN: usize = 100;
+/// Longest stored User-Agent, in bytes. Longer ones are cut, not rejected.
+const MAX_USER_AGENT_LEN: usize = 512;
+/// Longest wrapped account key accepted, in bytes (a real one is under 300).
+const MAX_WRAPPED_KEY_LEN: usize = 1024;
+
+fn validate_field_len(field: &str, value: Option<&str>, max: usize) -> AppResult<()> {
+    if value.is_some_and(|v| v.len() > max) {
+        return Err(AppError::Validation(format!("{field} is too long")));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_device_info(
+    browser: Option<&str>,
+    browser_version: Option<&str>,
+    platform: Option<&str>,
+    extension_version: Option<&str>,
+) -> AppResult<()> {
+    validate_field_len("browser", browser, MAX_DEVICE_FIELD_LEN)?;
+    validate_field_len("browserVersion", browser_version, MAX_DEVICE_FIELD_LEN)?;
+    validate_field_len("platform", platform, MAX_DEVICE_FIELD_LEN)?;
+    validate_field_len("extensionVersion", extension_version, MAX_DEVICE_FIELD_LEN)
+}
+
+pub(crate) fn validate_wrapped_key(field: &str, wrapped: &str) -> AppResult<()> {
+    validate_field_len(field, Some(wrapped), MAX_WRAPPED_KEY_LEN)
+}
+
+/// Argon2id bounds the clients enforce (`assertSaneKdfParams` in
+/// extension/src/crypto/index.ts and web/src/crypto/index.ts).
+const KDF_M_RANGE: RangeInclusive<u64> = 19456..=262144;
+const KDF_T_RANGE: RangeInclusive<u64> = 2..=10;
+const KDF_P_RANGE: RangeInclusive<u64> = 1..=4;
+
+pub(crate) fn validate_kdf_salt(salt: &str) -> AppResult<()> {
+    let decoded = base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, salt);
+    if !matches!(decoded, Ok(bytes) if bytes.len() == 16) {
+        return Err(AppError::Validation(
+            "kdfSalt must be 16 bytes of base64url".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_kdf_params(params: &serde_json::Value) -> AppResult<()> {
+    let invalid =
+        || AppError::Validation("kdfParams must be { m, t, p } integers within bounds".into());
+    let obj = params.as_object().ok_or_else(invalid)?;
+    if obj.len() != 3 {
+        return Err(invalid());
+    }
+    let within = |key: &str, range: &RangeInclusive<u64>| {
+        obj.get(key)
+            .and_then(|v| v.as_u64())
+            .is_some_and(|v| range.contains(&v))
+    };
+    if within("m", &KDF_M_RANGE) && within("t", &KDF_T_RANGE) && within("p", &KDF_P_RANGE) {
+        Ok(())
+    } else {
+        Err(invalid())
+    }
+}
+
+/// The request's User-Agent, cut to `MAX_USER_AGENT_LEN` bytes on a char boundary.
+pub(crate) fn user_agent_from_headers(headers: &HeaderMap) -> Option<String> {
+    let ua = headers.get(header::USER_AGENT)?.to_str().ok()?;
+    let mut end = ua.len().min(MAX_USER_AGENT_LEN);
+    while !ua.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(ua[..end].to_string())
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RegisterDeviceRequest {
@@ -101,6 +177,12 @@ async fn register_device(
     )?;
 
     validate_device_name(&req.name)?;
+    validate_device_info(
+        req.browser.as_deref(),
+        req.browser_version.as_deref(),
+        req.platform.as_deref(),
+        req.extension_version.as_deref(),
+    )?;
     validate_auth_key(&req.auth_key).map_err(|e| AppError::Validation(e.to_string()))?;
 
     // Per-account limit, like `auth::routes::login`. Checked before the DB
@@ -457,6 +539,8 @@ async fn revoke_device(
     Path(id): Path<Uuid>,
     State(state): State<AppState>,
 ) -> AppResult<Json<DevicePublic>> {
+    let mut tx = state.db.begin().await?;
+
     let device = sqlx::query_as!(
         DevicePublic,
         r#"
@@ -467,7 +551,7 @@ async fn revoke_device(
         id,
         user.user_id
     )
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or(AppError::NotFound)?;
 
@@ -475,8 +559,10 @@ async fn revoke_device(
         "UPDATE device_credentials SET revoked_at = now() WHERE device_id = $1 AND revoked_at IS NULL",
         id
     )
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     // Update the revocation cache now so the old access token stops working
     // immediately. Uses the shared writer so a stale read can't undo it.

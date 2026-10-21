@@ -14,6 +14,7 @@ use crate::crypto::{
     fake_kdf_salt_for_unknown_email, hash_password_async, hash_token, token_hash_matches,
     validate_auth_key, verify_password_async,
 };
+use crate::devices::routes::{validate_kdf_params, validate_kdf_salt, validate_wrapped_key};
 use crate::error::{AppError, AppResult};
 use crate::middleware::client_ip::{client_ip, rate_limit_ip_key};
 use crate::middleware::rate_limit::{
@@ -176,6 +177,10 @@ async fn register(
     }
     validate_request_auth_key(&req.auth_key)?;
     validate_request_auth_key(&req.recovery_auth_key)?;
+    validate_kdf_salt(&req.kdf_salt)?;
+    validate_kdf_params(&req.kdf_params)?;
+    validate_wrapped_key("wrappedAk", &req.wrapped_ak)?;
+    validate_wrapped_key("recoveryWrappedAk", &req.recovery_wrapped_ak)?;
 
     let email = normalize_email(&req.email);
 
@@ -331,10 +336,7 @@ pub(super) async fn finish_login(
     account_key_version: i32,
     ip: std::net::IpAddr,
 ) -> AppResult<(CookieJar, Json<AuthResponse>)> {
-    let user_agent = headers
-        .get(axum::http::header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    let user_agent = crate::devices::routes::user_agent_from_headers(&headers);
 
     let (session_cookie, csrf_cookie) =
         create_session(state, user_id, user_agent, Some(ip.to_string()))

@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod auth;
+pub mod background;
 pub mod config;
 pub mod crypto;
 pub mod database;

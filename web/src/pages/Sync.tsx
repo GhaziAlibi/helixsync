@@ -40,7 +40,7 @@ export default function Sync() {
     <div>
       <h1 className="text-2xl font-semibold mb-6">Synchronization</h1>
 
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-5 mb-6">
+      <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5 mb-6">
         <h2 className="font-medium mb-4">Sync features</h2>
         <div className="flex flex-col gap-3">
           {FEATURE_TOGGLES.map((f) => (
@@ -56,7 +56,7 @@ export default function Sync() {
         </div>
       </div>
 
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-5 mb-6">
+      <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5 mb-6">
         <h2 className="font-medium mb-4">Tab restore policy</h2>
         <select
           className="border border-slate-300 rounded px-3 py-2 text-sm"
@@ -69,7 +69,7 @@ export default function Sync() {
         </select>
       </div>
 
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-5 mb-6">
+      <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5 mb-6">
         <h2 className="font-medium mb-4">History retention</h2>
         <select
           className="border border-slate-300 rounded px-3 py-2 text-sm"

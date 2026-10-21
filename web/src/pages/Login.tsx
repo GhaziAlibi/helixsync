@@ -288,7 +288,7 @@ export default function Login() {
 function LoginCard({ subtitle, children }: { subtitle: string; children: React.ReactNode }) {
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50">
-      <div className="w-full max-w-sm bg-white rounded-lg shadow p-8">
+      <div className="w-full max-w-sm bg-white rounded-lg shadow-sm p-8">
         <h1 className="text-xl font-semibold mb-1">HelixSync</h1>
         <p className="text-sm text-slate-500 mb-6">{subtitle}</p>
         {children}

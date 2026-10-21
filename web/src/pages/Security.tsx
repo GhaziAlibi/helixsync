@@ -241,7 +241,7 @@ export default function Security() {
     <div>
       <h1 className="text-2xl font-semibold mb-6">Security</h1>
 
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-5 mb-6">
+      <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5 mb-6">
         <h2 className="font-medium mb-2">Encryption status</h2>
         <p className="text-sm text-slate-600">
           {settings === null
@@ -252,12 +252,12 @@ export default function Security() {
         </p>
       </div>
 
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-5 mb-6">
+      <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5 mb-6">
         <h2 className="font-medium mb-4">Active sessions</h2>
         <SessionsList />
       </div>
 
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-5">
+      <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5">
         <h2 className="font-medium mb-4">Change password</h2>
         <p className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded px-3 py-2 mb-4">
           Your data stays readable across a password change: the encryption
@@ -270,7 +270,7 @@ export default function Security() {
         <ChangePasswordForm />
       </div>
 
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 p-5 mt-6">
+      <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5 mt-6">
         <h2 className="font-medium mb-4">Recovery code</h2>
         <p className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded px-3 py-2 mb-4">
           Your recovery code lets you set a new password from the sign-in page if you forget yours, without losing
@@ -280,7 +280,7 @@ export default function Security() {
         <RecoveryCodeForm />
       </div>
 
-      <div className="bg-white rounded-lg shadow-sm border border-red-200 p-5 mt-6">
+      <div className="bg-white rounded-lg shadow-xs border border-red-200 p-5 mt-6">
         <h2 className="font-medium text-red-700 mb-4">Danger zone</h2>
         <p className="text-sm text-slate-600 bg-red-50 border border-red-100 rounded px-3 py-2 mb-4">
           Deleting your account permanently removes everything stored on this server: your devices, all synced

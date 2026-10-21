@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_KDF_PARAMS,
   deriveKek,
@@ -18,9 +18,16 @@ import {
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
+  // client.ts reads VITE_API_BASE_URL at import time; the tests expect relative paths.
+  vi.stubEnv("VITE_API_BASE_URL", "");
   vi.resetModules();
   fetchMock = vi.fn();
   vi.stubGlobal("fetch", fetchMock);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
 function jsonResponse(body: unknown, status = 200): Response {

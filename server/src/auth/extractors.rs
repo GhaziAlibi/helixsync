@@ -7,6 +7,7 @@ use axum_extra::extract::CookieJar;
 use uuid::Uuid;
 
 pub use crate::auth::model::{AuthenticatedDevice, AuthenticatedUser};
+use crate::background::run_pass;
 use crate::crypto::hash_token;
 use crate::error::AppError;
 use crate::state::{AppState, DeviceRevocationCache, WebSessionCache};
@@ -37,7 +38,10 @@ pub fn spawn_web_session_cache_sweeper(cache: Arc<WebSessionCache>) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            sweep_web_session_cache(&cache);
+            run_pass("web_session_cache_sweep", async {
+                sweep_web_session_cache(&cache)
+            })
+            .await;
         }
     });
 }

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
+use crate::background::run_pass;
 use crate::error::AppError;
 
 /// Token-bucket state for one (bucket, key). `tokens` is fractional so it
@@ -375,7 +376,7 @@ pub fn spawn_sweeper(limiter: Arc<RateLimiter>) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            limiter.sweep();
+            run_pass("rate_limit_sweep", async { limiter.sweep() }).await;
         }
     });
 }

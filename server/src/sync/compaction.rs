@@ -13,6 +13,7 @@ use futures::StreamExt;
 use sqlx::Acquire;
 use uuid::Uuid;
 
+use crate::background::run_pass;
 use crate::error::AppResult;
 use crate::state::AppState;
 
@@ -31,9 +32,12 @@ pub fn spawn(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            if let Err(e) = run_once(&state).await {
-                tracing::error!(error = %e, "compaction run failed");
-            }
+            run_pass("compaction", async {
+                if let Err(e) = run_once(&state).await {
+                    tracing::error!(error = %e, "compaction run failed");
+                }
+            })
+            .await;
         }
     });
 }

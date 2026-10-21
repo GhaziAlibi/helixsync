@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 
+use crate::background::run_pass;
 use crate::error::AppResult;
 use crate::state::AppState;
 
@@ -30,7 +31,7 @@ pub fn spawn(state: AppState) {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            run_once(&state).await;
+            run_pass("housekeeping", run_once(&state)).await;
         }
     });
 }

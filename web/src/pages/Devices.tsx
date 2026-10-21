@@ -39,7 +39,7 @@ export default function Devices() {
     <div>
       <h1 className="text-2xl font-semibold mb-6">Devices</h1>
       {error && <p className="text-red-600 text-sm mb-4">{error}</p>}
-      <div className="bg-white rounded-lg shadow-sm border border-slate-200 overflow-hidden">
+      <div className="bg-white rounded-lg shadow-xs border border-slate-200 overflow-hidden">
         {loading ? (
           <p className="p-5 text-sm text-slate-500">Loading…</p>
         ) : devices.length === 0 ? (

@@ -39,7 +39,7 @@ export default function Recover() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50">
-      <div className="w-full max-w-sm bg-white rounded-lg shadow p-8">
+      <div className="w-full max-w-sm bg-white rounded-lg shadow-sm p-8">
         <h1 className="text-xl font-semibold mb-1">HelixSync</h1>
         {newCode ? (
           <>

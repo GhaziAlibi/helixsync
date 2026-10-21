@@ -1126,24 +1126,24 @@ async fn download(
     }
 
     // Two-phase fetch (SEC-03): first read only cursor + byte size for up to
-    // `limit + 1` rows, sized in the DB via `octet_length`, so no payload
+    // `limit + 1` rows, sized from the stored `payload_bytes`, so no payload
     // reaches Rust yet. Bulk-import payloads are legitimately tens of MB, and
     // pulling every row's full payload before applying the byte cap let an
     // attacker force the server to materialize hundreds of megabytes in one
     // request.
     let fetch_limit = limit + 1;
-    let sized_rows = sqlx::query!(
+    let sized_rows = sqlx::query_as::<_, SizedOpRow>(
         r#"
-        SELECT server_cursor, octet_length(payload::text) AS "payload_bytes!"
+        SELECT server_cursor, payload_bytes
         FROM sync_operations
         WHERE user_id = $1 AND server_cursor > $2
         ORDER BY server_cursor ASC
         LIMIT $3
         "#,
-        device.user_id,
-        cursor,
-        fetch_limit
     )
+    .bind(device.user_id)
+    .bind(cursor)
+    .bind(fetch_limit)
     .fetch_all(&state.db)
     .await?;
 
@@ -1194,6 +1194,12 @@ async fn download(
         next_cursor,
         has_more,
     }))
+}
+
+#[derive(sqlx::FromRow)]
+struct SizedOpRow {
+    server_cursor: i64,
+    payload_bytes: i32,
 }
 
 #[derive(sqlx::FromRow)]

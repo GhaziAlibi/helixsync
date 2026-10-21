@@ -10,7 +10,7 @@
 use std::net::SocketAddr;
 
 use axum::extract::{ConnectInfo, Path, State};
-use axum::http::{header, HeaderMap};
+use axum::http::HeaderMap;
 use axum::Json;
 use axum_extra::extract::CookieJar;
 use chrono::{DateTime, Duration, Utc};
@@ -21,7 +21,9 @@ use uuid::Uuid;
 use crate::auth::extractors::AuthenticatedDevice;
 use crate::auth::normalize_email;
 use crate::crypto::{generate_opaque_token, token_hash_matches, validate_ecdh_public_key};
-use crate::devices::routes::{insert_device, validate_device_name, NewDevice};
+use crate::devices::routes::{
+    insert_device, user_agent_from_headers, validate_device_info, validate_device_name, NewDevice,
+};
 use crate::error::{AppError, AppResult};
 use crate::middleware::client_ip::{client_ip, rate_limit_ip_key};
 use crate::middleware::rate_limit::{
@@ -110,21 +112,39 @@ pub(crate) async fn create_auth_request(
     let (secret, secret_hash) = generate_opaque_token();
     let expires_at = Utc::now() + Duration::seconds(AUTH_REQUEST_TTL_SECS);
 
+    let user_agent = user_agent_from_headers(&headers);
+
     let user_id = sqlx::query_scalar!("SELECT id FROM users WHERE email = $1", email)
         .fetch_optional(&state.db)
         .await?;
     let Some(user_id) = user_id else {
+        // The same statement and audit write as a real request, but selecting
+        // from no user, so nothing is stored and the timing doesn't reveal
+        // whether the email exists.
+        sqlx::query(
+            r#"
+            INSERT INTO auth_requests
+                (user_id, kind, secret_hash, public_key, device_name, request_ip, user_agent, expires_at)
+            SELECT id, $1, $2, $3, $4, $5, $6, $7 FROM users WHERE FALSE
+            "#,
+        )
+        .bind(req.kind.as_str())
+        .bind(&secret_hash)
+        .bind(&req.public_key)
+        .bind(&device_name)
+        .bind(ip.to_string())
+        .bind(&user_agent)
+        .bind(expires_at)
+        .execute(&state.db)
+        .await?;
+        crate::audit::log(&state, None, None, "auth_request_created").await;
+
         return Ok(Json(CreateAuthRequestResponse {
             id: Uuid::new_v4(),
             secret,
             expires_at,
         }));
     };
-
-    let user_agent = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
 
     let id = sqlx::query_scalar!(
         r#"
@@ -234,6 +254,12 @@ pub(crate) async fn poll_auth_request(
     if row.kind == "web" {
         collect_web_approval(&state, jar, headers, id, ip).await
     } else {
+        validate_device_info(
+            req.browser.as_deref(),
+            req.browser_version.as_deref(),
+            req.platform.as_deref(),
+            req.extension_version.as_deref(),
+        )?;
         let body = collect_device_approval(&state, id, req).await?;
         Ok((jar, body))
     }
