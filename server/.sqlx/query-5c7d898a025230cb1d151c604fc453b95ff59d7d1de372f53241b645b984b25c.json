@@ -1,0 +1,83 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE user_settings SET\n            sync_bookmarks = COALESCE($2, sync_bookmarks),\n            sync_history = COALESCE($3, sync_history),\n            sync_tabs = COALESCE($4, sync_tabs),\n            sync_tab_groups = COALESCE($5, sync_tab_groups),\n            sync_extensions = COALESCE($6, sync_extensions),\n            tab_restore_policy = COALESCE($7, tab_restore_policy),\n            history_retention = COALESCE($8, history_retention),\n            updated_at = now()\n        WHERE user_id = $1\n        RETURNING sync_bookmarks, sync_history, sync_tabs, sync_tab_groups, sync_extensions,\n                  tab_restore_policy, history_retention, require_encryption,\n                  extension_storage_allowlist, extension_storage_denylist\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sync_bookmarks",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "sync_history",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 2,
+        "name": "sync_tabs",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 3,
+        "name": "sync_tab_groups",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "sync_extensions",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 5,
+        "name": "tab_restore_policy",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "history_retention",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "require_encryption",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "extension_storage_allowlist",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 9,
+        "name": "extension_storage_denylist",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool",
+        "Bool",
+        "Bool",
+        "Bool",
+        "Bool",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5c7d898a025230cb1d151c604fc453b95ff59d7d1de372f53241b645b984b25c"
+}

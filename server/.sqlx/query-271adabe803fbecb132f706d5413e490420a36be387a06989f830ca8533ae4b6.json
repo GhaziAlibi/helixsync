@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT kdf_salt, kdf_params FROM users WHERE email = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "kdf_salt",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "kdf_params",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "271adabe803fbecb132f706d5413e490420a36be387a06989f830ca8533ae4b6"
+}

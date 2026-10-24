@@ -1,0 +1,49 @@
+name: Feature request
+description: Suggest an improvement or a new capability.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        HelixSync is deliberately small: it syncs bookmarks, history and (optionally) tabs, windows and tab groups,
+        end-to-end encrypted. Passwords, cookies and site sessions are out of scope.
+        Changes to sync behavior or the encryption model start from the documents in `docs/`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation, not only the solution you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would you like to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Browser extension
+        - Web dashboard
+        - Server (API / sync)
+        - Docker / deployment
+        - Documentation
+        - Not sure
+    validations:
+      required: true
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and the documentation.
+          required: true
+        - label: This does not weaken end-to-end encryption or the privacy model in docs/encryption.md.
+          required: true

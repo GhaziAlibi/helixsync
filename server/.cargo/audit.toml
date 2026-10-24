@@ -1,0 +1,18 @@
+[advisories]
+ignore = [
+    # `rsa` (Marvin timing side channel) is compiled in as a dependency of
+    # `jsonwebtoken`'s `rust_crypto` backend, which jsonwebtoken 11 needs in
+    # order to sign and verify anything. The server only issues and verifies
+    # HS256 (HMAC) tokens (src/auth/tokens.rs) and never loads an RSA key, so
+    # the vulnerable code is not reachable. It is also in Cargo.lock through
+    # the optional `sqlx-mysql` driver, which is not enabled. No fixed `rsa`
+    # release exists. Re-check this if RSA keys are ever used.
+    "RUSTSEC-2023-0071",
+    # `crypto-bigint` 0.5 (timing variability) comes in through `elliptic-curve`
+    # 0.13, used only by `jsonwebtoken`'s ECDSA (`p256`/`p384`) support in the
+    # same `rust_crypto` backend. The server never signs or verifies an ECDSA
+    # token (HS256 only, src/auth/tokens.rs), so the affected code is not
+    # reachable. The fix is in crypto-bigint 0.7, which elliptic-curve 0.13
+    # cannot use. Re-check when jsonwebtoken moves to a newer elliptic-curve.
+    "RUSTSEC-2026-0387",
+]

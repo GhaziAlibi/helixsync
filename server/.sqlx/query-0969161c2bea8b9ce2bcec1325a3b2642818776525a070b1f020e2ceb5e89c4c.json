@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT u.id as \"user_id!\", u.email as \"email!\"\n            FROM web_sessions s\n            JOIN users u ON u.id = s.user_id\n            WHERE s.session_hash = $1\n              AND s.revoked_at IS NULL\n              AND s.expires_at > now()\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id!",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "email!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "0969161c2bea8b9ce2bcec1325a3b2642818776525a070b1f020e2ceb5e89c4c"
+}

@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE auth_requests r SET consumed_at = now()\n        FROM users u\n        WHERE r.id = $1 AND r.user_id = u.id AND r.status = 'approved'\n          AND r.consumed_at IS NULL AND r.expires_at > now()\n        RETURNING r.user_id, r.device_name, r.encrypted_account_key, r.approver_public_key,\n                  u.account_key_version\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "device_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "encrypted_account_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "approver_public_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "account_key_version",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "8e7b3211c9ea75bbb700662b2144121a63cb6b487bc8d156b639d143c6605142"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE web_sessions\n        SET revoked_at = now()\n        WHERE user_id = $1 AND revoked_at IS NULL AND session_hash IS DISTINCT FROM $2\n        RETURNING session_hash\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "session_hash",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "817e33377303e799bf333e49f3980737cda249c4997bf178decbddb7f4dd72a9"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM audit_logs WHERE id IN ( SELECT id FROM audit_logs WHERE created_at < $1 ORDER BY created_at ASC LIMIT $2 )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7be742dab977ee66f46c07ecce641e118db5803e91c881b9991d0c91da093ce1"
+}

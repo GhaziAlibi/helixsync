@@ -1,0 +1,27 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Rust
+server/target/
+server/.env
+
+# Node / web / extension
+node_modules/
+dist/
+web/dist/
+extension/dist/
+extension/*.zip
+*.local
+
+# Local TLS material, logs, coverage reports
+*.pem
+*.key
+*.log
+coverage/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/

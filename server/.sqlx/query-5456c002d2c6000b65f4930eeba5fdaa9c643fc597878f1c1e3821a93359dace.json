@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE web_sessions SET revoked_at = now() WHERE session_hash = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5456c002d2c6000b65f4930eeba5fdaa9c643fc597878f1c1e3821a93359dace"
+}

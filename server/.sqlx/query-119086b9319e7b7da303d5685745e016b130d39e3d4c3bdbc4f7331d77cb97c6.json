@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT wrapped_account_key, kdf_salt, kdf_params, account_key_version FROM users WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "wrapped_account_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "kdf_salt",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "kdf_params",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 3,
+        "name": "account_key_version",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "119086b9319e7b7da303d5685745e016b130d39e3d4c3bdbc4f7331d77cb97c6"
+}

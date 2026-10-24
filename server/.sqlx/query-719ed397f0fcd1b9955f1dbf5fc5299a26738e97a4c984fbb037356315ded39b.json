@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM tombstones WHERE id IN ( SELECT id FROM tombstones WHERE object_type IN ('tab', 'window') AND created_at < $1 ORDER BY created_at ASC LIMIT $2 ) RETURNING user_id, object_type, object_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "object_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "object_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "719ed397f0fcd1b9955f1dbf5fc5299a26738e97a4c984fbb037356315ded39b"
+}

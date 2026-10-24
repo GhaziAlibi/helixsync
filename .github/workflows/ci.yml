@@ -1,0 +1,167 @@
+name: CI
+
+# Runs the same checks a contributor should run locally (see CONTRIBUTING.md).
+# Also called by release.yml via `workflow_call`: nothing is published until
+# every job here has passed.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A new push to a pull request supersedes its earlier run. The workflow name is
+# part of the group so a run of this file called from release.yml (where
+# `github.workflow` is "Release") never competes with the standalone run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  server:
+    name: Server (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          # A superuser, because `sqlx::test` creates a database per test.
+          POSTGRES_USER: helix
+          POSTGRES_PASSWORD: helix
+          POSTGRES_DB: helixsync_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U helix -d helixsync_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgres://helix:helix@localhost:5432/helixsync_test
+      # Not a secret: only the throwaway CI database uses it. Must be at least
+      # 32 characters and must not look like a placeholder (config.rs).
+      JWT_SIGNING_KEY: ci-only-signing-key-0123456789abcdefghij
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: server
+
+      - run: rustup component add clippy rustfmt
+
+      # The query macros are checked against this schema while the test
+      # targets compile, so it has to exist before the first cargo command
+      # that builds them.
+      - name: Apply the database schema
+        run: |
+          command -v psql >/dev/null || sudo apt-get install -y --no-install-recommends postgresql-client
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f migrations/0001_init.sql
+
+      - run: cargo fmt --check
+
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
+      - run: cargo test --locked
+
+      # The Docker build compiles with SQLX_OFFLINE=true against the committed
+      # .sqlx/ cache. This fails if a query was added or changed without
+      # re-running `cargo sqlx prepare` (see CONTRIBUTING.md).
+      - name: Check the sqlx offline cache is current
+        env:
+          SQLX_OFFLINE: "true"
+        run: cargo check --locked --lib --bins
+
+  extension:
+    name: Extension (typecheck, tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  web:
+    name: Web (typecheck, tests, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  # Known-vulnerability scan of what ships: runtime npm dependencies (high and
+  # above) and every crate in server/Cargo.lock. Kept as its own job so a new
+  # advisory shows up as "Audit" failing, separate from the build and tests.
+  # Each step runs even if an earlier one failed, so one run reports everything.
+  audit:
+    name: Audit (npm, cargo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: npm audit (extension)
+        working-directory: extension
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: npm audit (web)
+        if: ${{ !cancelled() }}
+        working-directory: web
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Cache cargo-audit
+        if: ${{ !cancelled() }}
+        id: cargo-audit-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-0.22-${{ runner.os }}
+
+      - name: Install cargo-audit
+        if: ${{ !cancelled() && steps.cargo-audit-cache.outputs.cache-hit != 'true' }}
+        run: cargo install cargo-audit --version '^0.22' --locked
+
+      # Reads server/.cargo/audit.toml, which documents the one ignored
+      # advisory (a lockfile-only crate that is never compiled).
+      - name: cargo audit
+        if: ${{ !cancelled() }}
+        working-directory: server
+        run: cargo audit

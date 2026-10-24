@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT object_id FROM sync_objects\n            WHERE user_id = $1 AND object_type = 'historyVisit' AND object_id = ANY($2)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "object_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5c8b63abc12fb14b4f51a5e18e0a1d76dd87f749f350832c10112f023eeb0199"
+}
