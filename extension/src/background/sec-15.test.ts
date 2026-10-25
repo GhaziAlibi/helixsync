@@ -35,6 +35,7 @@ vi.mock("../bookmarks", () => ({
   }),
   registerCapture: vi.fn(),
   setBookmarkCaptureEnabled: vi.fn(),
+  setLinkExistingBookmarks: vi.fn(),
 }));
 
 vi.mock("../history", () => ({
@@ -115,6 +116,7 @@ vi.mock("../storage/db", () => ({
 
 vi.mock("../sync/engine", () => ({
   clearSyncBlockedState: vi.fn(),
+  downloadEverything: vi.fn(async () => {}),
   getPendingCount: vi.fn(async () => 0),
   notifyPeerChanges: vi.fn(),
   onStatusChange: vi.fn(),

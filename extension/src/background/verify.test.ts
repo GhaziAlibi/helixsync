@@ -56,6 +56,7 @@ vi.mock("../bookmarks", () => ({
   }),
   registerCapture: vi.fn(),
   setBookmarkCaptureEnabled: vi.fn(),
+  setLinkExistingBookmarks: vi.fn(),
 }));
 
 // Change 2 (exact live/import partition): records the relative order of
@@ -171,6 +172,7 @@ let scheduleLocalSyncCalls = 0;
 let notifyPeerChangesCalls = 0;
 vi.mock("../sync/engine", () => ({
   clearSyncBlockedState: vi.fn(),
+  downloadEverything: vi.fn(async () => {}),
   getPendingCount: vi.fn(async () => 0),
   notifyPeerChanges: vi.fn(() => {
     notifyPeerChangesCalls++;

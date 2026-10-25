@@ -4,6 +4,28 @@ All notable changes to HelixSync are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Bookmark sync on Chromium-based browsers for Android, such as Bare. Android
+  hides an empty Bookmarks bar and Other bookmarks from extensions, and
+  desktop hides an empty Mobile bookmarks, so the extension keeps a folder
+  of that name inside a shown one (Mobile bookmarks on Android, Other
+  bookmarks on desktop) until the real one is shown again. Removing that
+  folder brings it back with its contents.
+
+### Fixed
+
+- Connecting a browser that already has some of the account's bookmarks,
+  including disconnecting and reconnecting the same browser, no longer
+  duplicates them on every device: the extension downloads the account
+  first and links matching bookmarks (same folder, title and URL) instead of
+  uploading them again. Duplicates made before this fix stay until removed
+  in one browser.
+- A bookmark moved further down within its own folder by another device no
+  longer lands one place too early.
+
 ## [1.0.0] - 2026-10-24
 
 Initial release. HelixSync is a self-hosted, end-to-end encrypted sync server

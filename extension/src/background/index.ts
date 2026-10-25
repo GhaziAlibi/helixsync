@@ -40,6 +40,7 @@ import {
 } from "../storage/db";
 import {
   clearSyncBlockedState,
+  downloadEverything,
   getPendingCount,
   notifyPeerChanges,
   onStatusChange,
@@ -53,6 +54,7 @@ import {
   backfillExisting as backfillBookmarks,
   registerCapture as registerBookmarkCapture,
   setBookmarkCaptureEnabled,
+  setLinkExistingBookmarks,
 } from "../bookmarks";
 import {
   backfillExisting as backfillHistory,
@@ -203,6 +205,17 @@ async function runInitialImport(device: DeviceRecord): Promise<void> {
   const importStartedAt = Date.now();
   initialImportInFlight = (async () => {
     try {
+      // The account first, so bookmarks this browser already shares with it
+      // are linked to the account's copies rather than uploaded as second
+      // ones (bookmarks/index.ts). History is unaffected: its import stops
+      // at historyBulkEndMs, before any visit replayed by this download.
+      setLinkExistingBookmarks(true);
+      try {
+        await downloadEverything();
+      } finally {
+        setLinkExistingBookmarks(false);
+      }
+      console.log("HelixSync: account download before import returned", { elapsedMs: Date.now() - importStartedAt });
       // Sequential: both saturate the same thread, so running them together
       // only doubles peak memory.
       await backfillBookmarks();

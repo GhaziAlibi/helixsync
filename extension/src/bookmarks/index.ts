@@ -1,7 +1,7 @@
 // Bookmark sync (docs/protocol.md §8.2). Chromium bookmark ids are local, so
 // every node gets a HelixSync objectId through the mapping table (§1.1).
-// The four built-in root folders exist on every device without a "create"
-// event, so they map to fixed objectIds that all devices agree on.
+// The built-in root folders exist on every device without a "create" event,
+// so they map to fixed objectIds that all devices agree on (roots.ts).
 import {
   commitBookmarkBackfillBatch,
   deleteDeferredMaterialization,
@@ -16,6 +16,7 @@ import {
   getMappingsByObjectIds,
   mappingKey,
   putDeferredMaterialization,
+  putDeferredMaterializationsBatch,
   putMappingsBatch,
   recordConflict,
   type FieldStateRecord,
@@ -42,6 +43,13 @@ import { isSyncableUrl } from "../util/url-scheme";
 import { fetchSettings } from "../api/client";
 import { createMicroBatchQueue, flushAllMicroBatchQueuesAndWait } from "../sync/micro-batch";
 import { createSuppressionGuard } from "../sync/suppress";
+import {
+  ROOT_OBJECT_IDS,
+  bookmarkRoots,
+  invalidateBookmarkRoots,
+  standInRootObjectId,
+  type BookmarkRoots,
+} from "./roots";
 import { chunk } from "../util/chunk";
 import { keyBetween } from "../util/fractional-index";
 import { uuidv7 } from "../util/uuid";
@@ -57,15 +65,7 @@ const MAP_TYPE: ObjectType = "bookmark";
 // re-captured, re-uploaded and bounce between devices forever.
 const guard = createSuppressionGuard();
 
-const ROOT_OBJECT_IDS: Record<string, string> = {
-  "0": "00000000-0000-7000-8000-000000000000",
-  "1": "00000000-0000-7000-8000-000000000001", // Bookmarks Bar
-  "2": "00000000-0000-7000-8000-000000000002", // Other Bookmarks
-  "3": "00000000-0000-7000-8000-000000000003", // Mobile Bookmarks
-};
-const ROOT_CHROMIUM_IDS: Record<string, string> = Object.fromEntries(
-  Object.entries(ROOT_OBJECT_IDS).map(([chromiumId, objectId]) => [objectId, chromiumId]),
-);
+const roots = (): Promise<BookmarkRoots> => bookmarkRoots(guard);
 
 type BookmarkMove = { parent: string; position: string };
 type RecordedMove = { parent?: string | null; position?: string };
@@ -89,7 +89,7 @@ async function objectIdFor(
   newMappings?: NewMappingCollector,
   overlay?: Map<string, unknown>,
 ): Promise<string> {
-  const root = ROOT_OBJECT_IDS[chromiumId];
+  const root = (await roots()).objectIdByChromiumId.get(chromiumId);
   if (root) return root;
   const cached = mappingCache?.get(chromiumId);
   if (cached) return cached;
@@ -123,14 +123,15 @@ async function cachedObjectId(chromiumId: string, mappingCache?: Map<string, str
 }
 
 async function chromiumIdFor(objectId: string): Promise<string | undefined> {
-  return ROOT_CHROMIUM_IDS[objectId] ?? (await lookupChromiumLocalId(objectId));
+  return (await roots()).chromiumIdByObjectId.get(objectId) ?? (await lookupChromiumLocalId(objectId));
 }
 
 async function chromiumIdsFor(objectIds: string[]): Promise<Map<string, string>> {
+  const { chromiumIdByObjectId } = await roots();
   const result = new Map<string, string>();
   const needsLookup: string[] = [];
   for (const id of objectIds) {
-    const root = ROOT_CHROMIUM_IDS[id];
+    const root = chromiumIdByObjectId.get(id);
     if (root) result.set(id, root);
     else needsLookup.push(id);
   }
@@ -184,8 +185,16 @@ export async function computePosition(
     siblings = await chrome.bookmarks.getChildren(parentChromiumId);
     siblingCache?.set(parentChromiumId, siblings);
   }
-  const beforeId = siblings[index - 1]?.id;
-  const afterId = siblings[index + 1]?.id;
+  // A stand-in root has no position, so the neighbours are the nearest
+  // siblings that aren't one.
+  const { standInIds } = await roots();
+  const isStandIn = (i: number) => standInIds.has(siblings[i]?.id ?? "");
+  let before = index - 1;
+  while (before >= 0 && isStandIn(before)) before--;
+  let after = index + 1;
+  while (after < siblings.length && isStandIn(after)) after++;
+  const beforeId = siblings[before]?.id;
+  const afterId = siblings[after]?.id;
   const [beforeObjectId, afterObjectId] = await Promise.all([
     beforeId ? objectIdFor(beforeId, mappingCache, newMappings, overlay) : Promise.resolve(undefined),
     afterId ? objectIdFor(afterId, mappingCache, newMappings, overlay) : Promise.resolve(undefined),
@@ -600,6 +609,7 @@ const BACKFILL_CHUNK_COOLDOWN_MS = 150;
  * chunks. */
 async function flattenForBackfill(
   root: chrome.bookmarks.BookmarkTreeNode,
+  rootObjectIdByChromiumId: ReadonlyMap<string, string>,
   alreadyMapped: ReadonlySet<string>,
   mappingsForAlreadyMapped: Map<string, { objectId: string }>,
   positionsForAlreadyMapped: Map<string, string>,
@@ -611,23 +621,40 @@ async function flattenForBackfill(
     children: chrome.bookmarks.BookmarkTreeNode[] | undefined,
     parentObjectId: string | null,
   ): Promise<void> {
+    const siblings = children ?? [];
+    const existingPositionOf = (node: chrome.bookmarks.BookmarkTreeNode): string | undefined => {
+      if (rootObjectIdByChromiumId.has(node.id) || !alreadyMapped.has(node.id)) return undefined;
+      return positionsForAlreadyMapped.get(mappingsForAlreadyMapped.get(node.id)!.objectId);
+    };
+    // The nearest following sibling's existing position bounds each new
+    // node from above, so a new node between two existing ones (linked to
+    // the account's, or left by an interrupted run) keeps the folder's
+    // order.
+    const nextExistingPosition: Array<string | null> = new Array(siblings.length).fill(null);
+    for (let i = siblings.length - 2; i >= 0; i--) {
+      nextExistingPosition[i] = existingPositionOf(siblings[i + 1]) ?? nextExistingPosition[i + 1];
+    }
     let runningLo: string | null = null;
 
-    for (const child of children ?? []) {
+    let i = -1;
+    for (const child of siblings) {
+      i++;
       if (++visited % BACKFILL_WALK_YIELD_CHUNK === 0) await yieldToEventLoop();
-      const isRoot = child.id in ROOT_OBJECT_IDS;
-      const isAlreadyMapped = !isRoot && alreadyMapped.has(child.id);
+      const rootObjectId = rootObjectIdByChromiumId.get(child.id);
+      const isAlreadyMapped = !rootObjectId && alreadyMapped.has(child.id);
 
       let ownObjectId: string;
-      if (isRoot) {
-        ownObjectId = ROOT_OBJECT_IDS[child.id];
+      if (rootObjectId) {
+        ownObjectId = rootObjectId;
       } else if (isAlreadyMapped) {
         ownObjectId = mappingsForAlreadyMapped.get(child.id)!.objectId;
         const existingPosition = positionsForAlreadyMapped.get(ownObjectId);
         if (existingPosition !== undefined) runningLo = existingPosition;
       } else {
         ownObjectId = uuidv7();
-        const position = keyBetween(runningLo, null);
+        const hi = nextExistingPosition[i] ?? null;
+        // Existing siblings already out of order leave no gap to fill.
+        const position = keyBetween(runningLo, hi !== null && (runningLo === null || runningLo < hi) ? hi : null);
         runningLo = position;
 
         await emit(
@@ -657,6 +684,8 @@ export async function backfillExisting(): Promise<void> {
   // Live capture is already registered, and a queued event hasn't written
   // its mapping yet; draining first keeps such a node from being minted twice.
   await flushAllMicroBatchQueuesAndWait();
+  // Before the tree is read, so stand-in roots it creates are in it.
+  const { objectIdByChromiumId: rootObjectIdByChromiumId } = await roots();
   const [root] = await chrome.bookmarks.getTree();
   const rawMapped = await getMappedChromiumIdsByType(MAP_TYPE);
   const mappingsForAlreadyMapped = await getMappingsByLocalIds(MAP_TYPE, [...rawMapped]);
@@ -741,7 +770,7 @@ export async function backfillExisting(): Promise<void> {
     await backfillCooldown();
   }
 
-  await flattenForBackfill(root, alreadyMapped, mappingsForAlreadyMapped, positionsForAlreadyMapped, async (mapping, node) => {
+  await flattenForBackfill(root, rootObjectIdByChromiumId, alreadyMapped, mappingsForAlreadyMapped, positionsForAlreadyMapped, async (mapping, node) => {
     pendingMappings.push(mapping);
     pendingNodes.push(node);
     if (pendingNodes.length >= BACKFILL_FLUSH_CHUNK) await flushBackfillChunk();
@@ -762,14 +791,28 @@ export function registerCapture(): void {
   captureRegistered = true;
 
   chrome.bookmarks.onCreated.addListener((id, node) => {
+    // A built-in root fires onCreated when it's shown and onRemoved when
+    // it's hidden. Re-resolved before the queued events that follow, which
+    // may be the root's first child.
+    if (id in ROOT_OBJECT_IDS) {
+      invalidateBookmarkRoots();
+      return;
+    }
     if (!bookmarkCaptureEnabled) return;
     if (guard.isSuppressed()) return;
     bookmarkLayoutGeneration++;
     enqueueBookmarkEvent({ kind: "created", id, node });
   });
   chrome.bookmarks.onRemoved.addListener((id, info) => {
-    if (!bookmarkCaptureEnabled) return;
+    if (id in ROOT_OBJECT_IDS) {
+      invalidateBookmarkRoots();
+      return;
+    }
     if (guard.isSuppressed()) return;
+    // Whether or not bookmark sync is on: a stand-in root, like a real one,
+    // can't be removed. The event is still queued; it maps to nothing.
+    void restoreIfStandInRoot(id, info);
+    if (!bookmarkCaptureEnabled) return;
     bookmarkLayoutGeneration++;
     enqueueBookmarkEvent({ kind: "removed", id, removeInfo: info });
   });
@@ -786,7 +829,75 @@ export function registerCapture(): void {
   });
 }
 
+/** Recreates a stand-in root removed on this device and rebuilds what was
+ * in it from local field state. Nothing is deleted on other devices. */
+async function restoreIfStandInRoot(chromiumId: string, removeInfo: BookmarkRemoveInfo): Promise<void> {
+  try {
+    const rootObjectId = await standInRootObjectId(chromiumId);
+    if (!rootObjectId) return;
+
+    // removeInfo.node carries the whole removed subtree.
+    const removed: Array<{ node: chrome.bookmarks.BookmarkTreeNode; parentChromiumId: string }> = [];
+    const collect = (parent: chrome.bookmarks.BookmarkTreeNode) => {
+      for (const child of parent.children ?? []) {
+        removed.push({ node: child, parentChromiumId: parent.id });
+        collect(child);
+      }
+    };
+    collect(removeInfo.node);
+    const mappings = await getMappingsByLocalIds(MAP_TYPE, removed.map(({ node }) => node.id));
+
+    // Each node waits on its parent, so recreating the stand-in cascades
+    // through retryDeferredParent.
+    const createdAt = new Date().toISOString();
+    const deferred = [];
+    for (const { node, parentChromiumId } of removed) {
+      const objectId = mappings.get(node.id)?.objectId;
+      const waitingOnParent =
+        parentChromiumId === chromiumId ? rootObjectId : mappings.get(parentChromiumId)?.objectId;
+      if (objectId && waitingOnParent) {
+        deferred.push({ objectId, objectType: bookmarkObjectType(node), waitingOnParent, createdAt });
+      }
+    }
+    await putDeferredMaterializationsBatch(deferred);
+    await deleteMappingsBatch(MAP_TYPE, [...mappings.keys()]);
+
+    invalidateBookmarkRoots();
+    await roots();
+    await retryDeferredParent(rootObjectId);
+  } catch (e) {
+    console.error("HelixSync: could not restore a removed stand-in bookmark root", chromiumId, e);
+  }
+}
+
 // --- Remote apply: operation -> browser mutation -------------------------
+
+// On while a newly connected device downloads the account, before its first
+// bookmark import. A remote bookmark then links to a matching one this
+// browser already has (same folder, title and URL) instead of being created
+// next to it, and the import uploads only what didn't match. Two browsers
+// that each had the same bookmarks would otherwise both end up with two of
+// each.
+let linkExistingBookmarks = false;
+
+export function setLinkExistingBookmarks(enabled: boolean): void {
+  linkExistingBookmarks = enabled;
+}
+
+/** A child of `parentChromiumId` matching `p` that isn't linked to any
+ * object yet. */
+async function findUnlinkedMatch(parentChromiumId: string, p: BookmarkPayload): Promise<string | undefined> {
+  const { standInIds } = await roots();
+  const candidates = (await chrome.bookmarks.getChildren(parentChromiumId)).filter(
+    (node) => !standInIds.has(node.id) && node.title === p.title && (node.url ?? null) === (p.url ?? null),
+  );
+  if (candidates.length === 0) return undefined;
+  const linked = await getMappingsByLocalIds(
+    MAP_TYPE,
+    candidates.map((node) => node.id),
+  );
+  return candidates.find((node) => !linked.has(node.id))?.id;
+}
 
 function deferUntilParentMaterializes(objectId: string, objectType: ObjectType, parent: string): Promise<void> {
   return putDeferredMaterialization({
@@ -842,6 +953,19 @@ async function materialize(
     return;
   }
 
+  if (linkExistingBookmarks) {
+    const linkedId = await findUnlinkedMatch(parentChromiumId, p);
+    if (linkedId) {
+      await establishMapping(MAP_TYPE, linkedId, objectId);
+      prefetched?.set(objectId, linkedId);
+      await deleteDeferredMaterialization(objectId);
+      // Where the account has it, so the folder's order matches positions.
+      await applyMove(objectId, objectType, { parent: p.parent!, position: p.position });
+      await retryDeferredParent(objectId);
+      return;
+    }
+  }
+
   const created = await guard.run(() =>
     chrome.bookmarks.create({
       parentId: parentChromiumId,
@@ -878,8 +1002,16 @@ async function retryDeferredParent(parentObjectId: string): Promise<void> {
     ]);
   await deleteDeferredMaterializationsBatch(deferredObjectIds);
 
+  // Each create goes at the end of its parent, so creating in position order
+  // keeps the synced order.
+  const positionOfRecord = (objectId: string) =>
+    (moveByObjectId.get(objectId)?.value as RecordedMove | undefined)?.position ?? "";
+  const ordered = [...deferred].sort((a, b) =>
+    byPosition({ position: positionOfRecord(a.objectId) }, { position: positionOfRecord(b.objectId) }),
+  );
+
   let sinceYield = 0;
-  for (const record of deferred) {
+  for (const record of ordered) {
     if (++sinceYield >= DEFERRED_RETRY_YIELD_CHUNK) {
       sinceYield = 0;
       await yieldToEventLoop();
@@ -963,10 +1095,28 @@ async function applyMove(
     if (position) withPositions.push({ chromiumId: siblingChromiumId, position });
   }
   withPositions.sort(byPosition);
-  let index = withPositions.findIndex((s) => s.position > p.position);
-  if (index === -1) index = withPositions.length;
+  const before = withPositions.find((s) => s.position > p.position)?.chromiumId;
+  const index = moveIndex(
+    siblings.map((s) => s.id),
+    chromiumId,
+    before,
+  );
 
   await guard.run(() => chrome.bookmarks.move(chromiumId, { parentId: parentChromiumId, index }));
+}
+
+/** The chrome.bookmarks.move index that puts `moverId` just before
+ * `beforeId` among `liveOrder` (the destination's current children), or
+ * last when `beforeId` is undefined. Siblings without a position (stand-in
+ * roots, nodes not yet imported) are stepped over rather than counted.
+ * Chromium reads the index as if the mover were still in place when it's
+ * already in that folder. */
+export function moveIndex(liveOrder: readonly string[], moverId: string, beforeId: string | undefined): number {
+  const others = liveOrder.filter((id) => id !== moverId);
+  const at = beforeId === undefined ? -1 : others.indexOf(beforeId);
+  const target = at === -1 ? others.length : at;
+  const oldIndex = liveOrder.indexOf(moverId);
+  return oldIndex !== -1 && target >= oldIndex ? target + 1 : target;
 }
 
 interface RemoteMove extends BookmarkMove {
@@ -977,6 +1127,9 @@ interface RemoteMove extends BookmarkMove {
 interface CachedParentOrder {
   generation: number;
   childChromiumIds: Set<string>;
+  // Live child order, kept current like `sorted`; move indexes are counted
+  // in it.
+  liveOrder: string[];
   objectIdByChromiumId: Map<string, string>;
   positionByObjectId: Map<string, string>;
   // Siblings with known positions, ascending. Movers are removed and
@@ -1045,6 +1198,7 @@ async function applyMovesBatch(moves: RemoteMove[]): Promise<void> {
     const order: CachedParentOrder = {
       generation: bookmarkLayoutGeneration,
       childChromiumIds: new Set(childChromiumIds),
+      liveOrder: childChromiumIds,
       objectIdByChromiumId,
       positionByObjectId,
       sorted,
@@ -1067,15 +1221,21 @@ async function applyMovesBatch(moves: RemoteMove[]): Promise<void> {
     const cur = order.sorted.findIndex((s) => s.chromiumId === chromiumId);
     if (cur !== -1) order.sorted.splice(cur, 1);
     const index = sortedInsertIndex(order.sorted, move.position);
+    const before = order.sorted[index]?.chromiumId;
+    const liveIndex = moveIndex(order.liveOrder, chromiumId, before);
 
-    await guard.run(() => chrome.bookmarks.move(chromiumId, { parentId: parentChromiumId, index }));
+    await guard.run(() => chrome.bookmarks.move(chromiumId, { parentId: parentChromiumId, index: liveIndex }));
     // The mover has left whichever cached parent it was in before.
     for (const cached of cacheByParent.values()) {
       cached.childChromiumIds.delete(chromiumId);
       const at = cached.sorted.findIndex((s) => s.chromiumId === chromiumId);
       if (at !== -1) cached.sorted.splice(at, 1);
+      const atLive = cached.liveOrder.indexOf(chromiumId);
+      if (atLive !== -1) cached.liveOrder.splice(atLive, 1);
     }
     order.childChromiumIds.add(chromiumId);
+    const beforeAt = before === undefined ? -1 : order.liveOrder.indexOf(before);
+    order.liveOrder.splice(beforeAt === -1 ? order.liveOrder.length : beforeAt, 0, chromiumId);
     order.objectIdByChromiumId.set(chromiumId, move.objectId);
     order.positionByObjectId.set(move.objectId, move.position);
     order.sorted.splice(index, 0, { chromiumId, position: move.position });

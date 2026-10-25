@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PendingLocalOperation } from "../sync/engine";
+import { keyBetween } from "../util/fractional-index";
 
 const getChildrenMock = vi.fn<(parentId: string) => Promise<chrome.bookmarks.BookmarkTreeNode[]>>();
 const getMock = vi.fn<(id: string) => Promise<chrome.bookmarks.BookmarkTreeNode[]>>();
@@ -99,7 +100,24 @@ vi.mock("../sync/engine", () => ({
   scheduleLocalSync: () => scheduleLocalSyncMock(),
 }));
 
-const { positionOf, computePosition, flushBookmarkEvents, backfillExisting, sortedInsertIndex } = await import("./index");
+// Desktop roots: all four built-in folders present, no stand-ins.
+vi.mock("./roots", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./roots")>();
+  const objectIdByChromiumId = new Map(Object.entries(actual.ROOT_OBJECT_IDS));
+  const roots = {
+    objectIdByChromiumId,
+    chromiumIdByObjectId: new Map([...objectIdByChromiumId].map(([chromiumId, objectId]) => [objectId, chromiumId])),
+    standInIds: new Set<string>(),
+  };
+  return {
+    ...actual,
+    bookmarkRoots: async () => roots,
+    standInRootObjectId: async () => undefined,
+  };
+});
+
+const { positionOf, computePosition, flushBookmarkEvents, backfillExisting, sortedInsertIndex, moveIndex } =
+  await import("./index");
 
 describe("EXT-03: Sibling IPC and Transaction Amplification in bookmarks", () => {
   beforeEach(() => {
@@ -673,6 +691,34 @@ describe("EXT-05: Non-Atomic Mapping vs. Operation Creation in backfillExisting"
     expect(batch.fieldStates).toHaveLength(4);
   });
 
+  it("positions a new node between existing siblings, keeping the folder's order", async () => {
+    // Linked on connect: "a" and "c" already carry the account's positions.
+    const lo = keyBetween(null, null);
+    const hi = keyBetween(lo, null);
+    getTreeMock.mockResolvedValue([
+      { syncing: false, id: "0", title: "Root", children: [
+        { syncing: false, id: "1", title: "Bookmarks Bar", children: [
+          { syncing: false, id: "a", title: "A", url: "https://a.example" },
+          { syncing: false, id: "b", title: "B", url: "https://b.example" },
+          { syncing: false, id: "c", title: "C", url: "https://c.example" },
+        ] },
+      ] },
+    ]);
+    getMappedChromiumIdsByTypeMock.mockResolvedValue(new Set(["a", "c"]));
+    getMappingsByLocalIdsMock.mockResolvedValue(new Map([["a", { objectId: "obj-a" }], ["c", { objectId: "obj-c" }]]));
+    getFieldStatesForObjectsMock.mockResolvedValue(
+      new Map([["obj-a", { value: { parent: "p", position: lo } }], ["obj-c", { value: { parent: "p", position: hi } }]]),
+    );
+
+    await backfillExisting();
+
+    const batch = commitBookmarkBackfillBatchMock.mock.calls[0][0];
+    expect(batch.mappings.map((m: { chromiumLocalId: string }) => m.chromiumLocalId)).toEqual(["b"]);
+    const position = (createLocalOperationsBatchMock.mock.calls[0][0][0].payload as { position: string }).position;
+    expect(position > lo).toBe(true);
+    expect(position < hi).toBe(true);
+  });
+
   it("commits the first chunk before the walk reaches later nodes (streaming, bounded peak)", async () => {
     // 1200 leaves under one folder. The child iterator refuses to yield past
     // the first 500 until at least one commit has landed: a flatten-everything-
@@ -763,6 +809,29 @@ describe("sortedInsertIndex (perf: move-batch sort-once)", () => {
     expect(
       sortedInsertIndex([{ position: "m" }, { position: "m" }, { position: "z" }], "m"),
     ).toBe(2);
+  });
+});
+
+describe("moveIndex", () => {
+  it("puts a node from another folder just before the target", () => {
+    expect(moveIndex(["a", "b", "c"], "x", "b")).toBe(1);
+    expect(moveIndex(["a", "b", "c"], "x", undefined)).toBe(3);
+  });
+
+  it("counts the mover's old slot when it moves down within its folder", () => {
+    // [x, a, b] -> [a, x, b]: Chromium needs 2, since it subtracts one.
+    expect(moveIndex(["x", "a", "b"], "x", "b")).toBe(2);
+    expect(moveIndex(["x", "a", "b"], "x", undefined)).toBe(3);
+  });
+
+  it("needs no adjustment when it moves up within its folder", () => {
+    // [a, b, x] -> [x, a, b]
+    expect(moveIndex(["a", "b", "x"], "x", "a")).toBe(0);
+  });
+
+  it("steps over siblings without a position, such as stand-in roots", () => {
+    // Positioned order: a, b. Stand-ins at the top stay there.
+    expect(moveIndex(["bar", "other", "a", "b"], "x", "a")).toBe(2);
   });
 });
 

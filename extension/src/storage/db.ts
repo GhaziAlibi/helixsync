@@ -850,6 +850,14 @@ export async function putDeferredMaterialization(record: DeferredMaterialization
   await (await getDb()).put("deferred_materializations", record);
 }
 
+export async function putDeferredMaterializationsBatch(records: DeferredMaterializationRecord[]): Promise<void> {
+  if (records.length === 0) return;
+  const db = await getDb();
+  const tx = db.transaction("deferred_materializations", "readwrite");
+  await putAllChunked(records.map((record) => () => tx.store.put(record)));
+  await tx.done;
+}
+
 export async function getDeferredMaterializationsWaitingOn(
   parentObjectId: string,
 ): Promise<DeferredMaterializationRecord[]> {

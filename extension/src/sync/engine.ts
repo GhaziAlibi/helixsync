@@ -712,6 +712,16 @@ let syncInFlight = false;
 // than being dropped, which matters most for WebSocket pushes.
 let rerunRequested = false;
 
+// Resolved whenever the sync slot (`syncInFlight`) is released.
+let syncSlotWaiters: Array<() => void> = [];
+
+function releaseSyncSlot(): void {
+  syncInFlight = false;
+  const waiters = syncSlotWaiters;
+  syncSlotWaiters = [];
+  for (const resolve of waiters) resolve();
+}
+
 // Upload+download pairs chained per call when backlog remains. Bounded by
 // count and wall-clock so a growing backlog can't pin the worker; progress
 // is durable per batch, so the rest resumes on the next wake.
@@ -813,7 +823,35 @@ export async function runSyncCycle(): Promise<void> {
     // Every cycle, whatever triggered it, restarts the local-sync throttle
     // interval.
     lastLocalSyncFire = Date.now();
-    syncInFlight = false;
+    releaseSyncSlot();
+  }
+}
+
+/** Downloads and applies everything the account holds. Unlike runSyncCycle,
+ * it waits for a cycle already running instead of returning, isn't bounded
+ * by the chaining limits, and throws on failure. A newly connected device
+ * runs it before its first bookmark import, so its bookmarks can be linked
+ * to the account's instead of uploaded again. */
+export async function downloadEverything(): Promise<void> {
+  while (syncInFlight) {
+    await new Promise<void>((resolve) => syncSlotWaiters.push(resolve));
+  }
+  await ensureSyncBlockedUntilHydrated();
+  if (Date.now() < syncBlockedUntil) {
+    throw new Error("HelixSync: sync is rate limited, account download postponed");
+  }
+  syncInFlight = true;
+  try {
+    while (await downloadAndApply()) {
+      await yieldToEventLoop();
+    }
+  } finally {
+    releaseSyncSlot();
+    // A trigger that arrived meanwhile still gets its cycle.
+    if (rerunRequested) {
+      rerunRequested = false;
+      void runSyncCycle();
+    }
   }
 }
 
