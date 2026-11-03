@@ -3,7 +3,7 @@ use argon2::password_hash::{
 };
 use argon2::Argon2;
 use hmac::{Hmac, KeyInit, Mac};
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
@@ -70,7 +70,7 @@ pub fn generate_opaque_token() -> (String, String) {
 /// `N` cryptographically secure random bytes as URL-safe base64 (no padding).
 pub fn random_urlsafe_token<const N: usize>() -> String {
     let mut bytes = [0u8; N];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
 }
 
@@ -197,7 +197,7 @@ mod tests {
     #[test]
     fn auth_key_validation_accepts_32_bytes_base64url() {
         let mut bytes = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         let encoded =
             base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes);
         assert!(validate_auth_key(&encoded).is_ok());
