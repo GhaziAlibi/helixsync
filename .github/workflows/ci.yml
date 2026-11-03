@@ -23,8 +23,51 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Decides which of the jobs below run. Plain git, no third-party action. A
+  # change to this file, or an event with no usable base, runs everything.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      server: ${{ steps.changes.outputs.server }}
+      web: ${{ steps.changes.outputs.web }}
+      extension: ${{ steps.changes.outputs.extension }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          case "$EVENT_NAME" in
+            push) base="$BEFORE" ;;
+            pull_request) base="$BASE_SHA" ;;
+            *) base="" ;;
+          esac
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            files=".github/workflows/ci.yml"
+          else
+            files="$(git diff --name-only "$base" HEAD)"
+          fi
+          touched() { echo "$files" | grep -qE "$1"; }
+          for area in server web extension; do
+            if touched '^\.github/workflows/ci\.yml$' || touched "^$area/"; then
+              echo "$area=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$area=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
   server:
     name: Server (fmt, clippy, tests)
+    needs: changes
+    if: needs.changes.outputs.server == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     services:
@@ -83,6 +126,8 @@ jobs:
 
   extension:
     name: Extension (typecheck, tests, build)
+    needs: changes
+    if: needs.changes.outputs.extension == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -104,6 +149,8 @@ jobs:
 
   web:
     name: Web (typecheck, tests, build)
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -129,6 +176,8 @@ jobs:
   # Each step runs even if an earlier one failed, so one run reports everything.
   audit:
     name: Audit (npm, cargo)
+    needs: changes
+    if: needs.changes.outputs.server == 'true' || needs.changes.outputs.web == 'true' || needs.changes.outputs.extension == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
