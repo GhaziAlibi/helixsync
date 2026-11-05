@@ -355,12 +355,22 @@ describe("an interrupted restore", () => {
     await loaded.restore.startRestore({ pointId: point.id as string, mode: "merge", scope: "all" });
     const failed = await settled(loaded);
     expect(failed.phase).toBe("error");
-    const job = await loaded.db.getRestoreJob();
-    expect(job).toBeDefined();
-    expect(job!.applied).toBe(loaded.restore.RESTORE_CHUNK_SIZE);
-    expect(job!.total).toBe(1101);
+    // A failed run clears its job; a killed worker would have left it behind.
+    expect(await loaded.db.getRestoreJob()).toBeUndefined();
     const partway = (await titlesOf(loaded)).length;
     expect(partway).toBe(loaded.restore.RESTORE_CHUNK_SIZE);
+    const preRestoreId = [...stored].find(([, v]) => v.meta.kind === "pre_restore")![0];
+    await loaded.db.putRestoreJob({
+      id: "current",
+      pointId: point.id as string,
+      mode: "merge",
+      scope: "all",
+      preRestorePointId: preRestoreId,
+      startedAt: new Date().toISOString(),
+      applied: loaded.restore.RESTORE_CHUNK_SIZE,
+      total: 1101,
+      phase: "applying",
+    });
 
     // A fresh worker finds the job.
     failCreateOnCall = undefined;
