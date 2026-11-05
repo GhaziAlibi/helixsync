@@ -1018,8 +1018,16 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
 
     const title = document.createElement("div");
     title.className = "item-title";
-    title.textContent =
-      request.kind === "web" ? "Web dashboard sign-in" : `New browser: ${request.deviceName ?? "unnamed"}`;
+    const isReset = request.kind === "reset";
+    // The first of the two approvals carries no key; the second hands over
+    // the account key.
+    const completesReset = isReset && (request.approvals ?? 0) >= 1;
+    title.textContent = isReset
+      ? "PASSWORD RESET"
+      : request.kind === "web"
+        ? "Web dashboard sign-in"
+        : `New browser: ${request.deviceName ?? "unnamed"}`;
+    if (isReset) card.classList.add("password-reset");
 
     const meta = document.createElement("div");
     meta.className = "item-meta";
@@ -1028,10 +1036,16 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
 
     const consequence = document.createElement("div");
     consequence.className = "item-meta";
-    consequence.textContent =
-      request.kind === "web"
+    consequence.textContent = isReset
+      ? `WARNING: this lets someone set a new password for your account. Approve only if YOU asked to reset your password. ${request.approvals ?? 0} of 2 approvals so far; ${
+          completesReset
+            ? "approving now completes it and hands your encryption key to that page."
+            : "a second browser must also approve."
+        }`
+      : request.kind === "web"
         ? "Approving signs that browser in to your dashboard."
         : "Approving gives that browser your encryption key and all your synced data.";
+    if (isReset) consequence.style.fontWeight = "600";
 
     const prompt = document.createElement("div");
     prompt.className = "item-meta";
@@ -1042,10 +1056,12 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
     fingerprint.textContent = await authRequestFingerprint(request.publicKey);
 
     const keyCheckParts: HTMLElement[] = [];
-    if (request.kind === "device") {
+    if (request.kind === "device" || completesReset) {
       const keyCheckLabel = document.createElement("div");
       keyCheckLabel.className = "item-meta";
-      keyCheckLabel.textContent = "After you approve, the new browser asks you to confirm this key check phrase:";
+      keyCheckLabel.textContent = isReset
+        ? "After you approve, the reset page asks you to confirm this key check phrase:"
+        : "After you approve, the new browser asks you to confirm this key check phrase:";
       const keyCheck = document.createElement("div");
       keyCheck.className = "fingerprint";
       keyCheck.textContent = await accountKeyCheckPhrase(fromB64(device.accountKey));
@@ -1069,7 +1085,7 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
       deny.disabled = true;
       error.textContent = "";
       try {
-        if (approved && request.kind === "device") {
+        if (approved && (request.kind === "device" || completesReset)) {
           const keys = await encryptAccountKeyForRequest(device.accountKey, request.publicKey, request.id);
           await respondAuthRequest(request.id, { approve: true, ...keys });
         } else {
@@ -1080,7 +1096,9 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
         error.textContent =
           err instanceof ApiError && err.status === 404
             ? "This request was already answered or has expired."
-            : `Failed: ${errorMessage(err)}`;
+            : err instanceof ApiError && (err.status === 409 || err.status === 422) && isReset
+              ? "This reset changed (this browser already approved, or another one did first). Reopen the popup."
+              : `Failed: ${errorMessage(err)}`;
         approve.disabled = false;
         deny.disabled = false;
       }

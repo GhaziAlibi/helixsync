@@ -361,7 +361,7 @@ extension that is already connected to the account (docs/encryption.md §9.2).
 POST /api/v1/auth/requests
 Content-Type: application/json
 
-{ "email": "...", "kind": "web" | "device", "publicKey": "<raw P-256 point, base64url>",
+{ "email": "...", "kind": "web" | "device" | "reset", "publicKey": "<raw P-256 point, base64url>",
   "deviceName": "<kind = device only>" }
 ```
 
@@ -378,7 +378,9 @@ Authorization: Bearer <deviceAccessToken>
 ```
 
 The account's unanswered, unexpired requests:
-`[{ id, kind, publicKey, deviceName, requestIp, userAgent, createdAt, expiresAt }]`.
+`[{ id, kind, publicKey, deviceName, requestIp, userAgent, createdAt, expiresAt, approvals }]`.
+`approvals` is how many devices have approved so far; it matters only for
+`reset` (§7.4.1). A `reset` request this device already approved is left out.
 
 ```http
 POST /api/v1/devices/auth-requests/{id}/respond
@@ -416,6 +418,33 @@ wrong secret also reads `pending`. An approval is handed out once (afterwards
 
 `429` past 120 polls per minute per IP.
 
+#### 7.4.1 Two-device password reset
+
+`kind: "reset"` (docs/encryption.md §9.4) takes no `deviceName`. Two different
+connected devices must approve through the same `respond` route:
+
+- the first approval is `{ "approve": true }` with no key fields (`400`
+  otherwise); the request stays `pending`; `200 { ok, approvals: 1 }`;
+- the second, from a different device, must carry `encryptedAccountKey` and
+  `approverPublicKey`; the request becomes `approved`; `200 { ok, approvals: 2 }`;
+- the same device approving again is `409 already_approved`; a denial from
+  any device denies the request.
+
+Polling a `reset` request returns, once approved, `{ status: "approved",
+encryptedAccountKey, approverPublicKey }` **without consuming it**.
+
+```http
+POST /api/v1/auth/requests/{id}/reset
+{ "secret": "...", "newAuthKey": "...", "newKdfSalt": "...", "newKdfParams": {...},
+  "newWrappedAk": "...", "newRecoveryAuthKey": "...", "newRecoveryWrappedAk": "..." }
+```
+
+`204` after consuming the request and, in one transaction, swapping in the
+new password and recovery code (left unconfirmed) and revoking every web
+session. `401` for an unknown id, a wrong secret, or a request that is not
+approved, is consumed or expired, or lacks two distinct active approving
+devices. `400` for malformed fields; `429` past 5 per minute per IP.
+
 ### 7.5 Password recovery
 
 Resetting a forgotten password with the recovery code (docs/encryption.md
@@ -448,6 +477,18 @@ Cookie + X-CSRF-Token, as in §7.3
 
 Replaces the recovery code from a signed-in dashboard; `401` for a wrong
 `currentAuthKey`, `429` past 5 per minute per account.
+
+```http
+POST /api/v1/auth/recovery-code/confirm
+Cookie + X-CSRF-Token, as in §7.3
+{ "recoveryAuthKey": "<base64url, 32 bytes>" }
+```
+
+Records that the user holds the current recovery code: `200 { ok }` when the
+key matches the stored hash (compared in constant time), `401` when it does
+not (including a stale code), `429` past 10 per minute per account. `GET
+/auth/me` returns `recoveryCodeConfirmed`; every route that replaces the code
+leaves it false.
 
 ---
 

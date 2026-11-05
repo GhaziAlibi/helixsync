@@ -1,1 +1,19 @@
 @import "tailwindcss";
+
+/* The recovery kit prints alone: everything else on the page is hidden. */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .recovery-kit-print,
+  .recovery-kit-print * {
+    visibility: visible;
+  }
+  .recovery-kit-print {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    display: block !important;
+  }
+}

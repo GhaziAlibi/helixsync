@@ -2,6 +2,10 @@
 //! modeled on Bitwarden's: a dashboard or a new browser asks to sign in
 //! without the password, and an already-connected extension approves it.
 //!
+//! A `reset` request (docs/encryption.md §9.4) resets a forgotten password
+//! and needs two different connected extensions to approve; only the second
+//! approval carries the account key.
+//!
 //! A dashboard approval only starts a web session; the dashboard never holds
 //! the account key. A new-browser approval also carries the account key,
 //! encrypted by the approving extension to the requester's one-time public
@@ -18,21 +22,25 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::auth::extractors::AuthenticatedDevice;
+use crate::auth::extractors::{write_web_session_cache_entry, AuthenticatedDevice};
 use crate::auth::request_email;
-use crate::crypto::{generate_opaque_token, token_hash_matches, validate_ecdh_public_key};
+use crate::crypto::{
+    generate_opaque_token, hash_password_async, hash_token, token_hash_matches,
+    validate_ecdh_public_key,
+};
 use crate::devices::routes::{
-    insert_device, user_agent_from_headers, validate_device_info, validate_device_name, NewDevice,
+    insert_device, user_agent_from_headers, validate_device_info, validate_device_name,
+    validate_kdf_params, validate_kdf_salt, validate_wrapped_key, NewDevice,
 };
 use crate::error::{AppError, AppResult};
 use crate::middleware::client_ip::{client_ip, rate_limit_ip_key};
 use crate::middleware::rate_limit::{
     enforce, AUTH_REQUEST_DEVICE_LIMIT, AUTH_REQUEST_EMAIL_LIMIT, AUTH_REQUEST_LIMIT,
-    AUTH_REQUEST_POLL_LIMIT,
+    AUTH_REQUEST_POLL_LIMIT, AUTH_REQUEST_RESET_LIMIT,
 };
 use crate::state::AppState;
 
-use super::routes::finish_login;
+use super::routes::{finish_login, validate_request_auth_key};
 
 /// How long a request waits for an answer, as in Bitwarden.
 const AUTH_REQUEST_TTL_SECS: i64 = 15 * 60;
@@ -47,6 +55,7 @@ const MAX_ENCRYPTED_ACCOUNT_KEY_LEN: usize = 1024;
 enum AuthRequestKind {
     Web,
     Device,
+    Reset,
 }
 
 impl AuthRequestKind {
@@ -54,6 +63,7 @@ impl AuthRequestKind {
         match self {
             AuthRequestKind::Web => "web",
             AuthRequestKind::Device => "device",
+            AuthRequestKind::Reset => "reset",
         }
     }
 }
@@ -106,7 +116,7 @@ pub(crate) async fn create_auth_request(
             validate_device_name(&name)?;
             Some(name)
         }
-        AuthRequestKind::Web => None,
+        AuthRequestKind::Web | AuthRequestKind::Reset => None,
     };
 
     let (secret, secret_hash) = generate_opaque_token();
@@ -253,6 +263,9 @@ pub(crate) async fn poll_auth_request(
 
     if row.kind == "web" {
         collect_web_approval(&state, jar, headers, id, ip).await
+    } else if row.kind == "reset" {
+        let body = collect_reset_approval(&state, id).await?;
+        Ok((jar, body))
     } else {
         validate_device_info(
             req.browser.as_deref(),
@@ -305,6 +318,30 @@ async fn collect_web_approval(
     )
     .await?;
     Ok((jar, approved(auth)?))
+}
+
+/// A reset approval is read without consuming it: the dashboard decrypts the
+/// account key, lets the user pick a new password, and `complete_reset`
+/// consumes the request. Only an approved request has key material (the
+/// second approval sets it).
+async fn collect_reset_approval(state: &AppState, id: Uuid) -> AppResult<Json<serde_json::Value>> {
+    let row = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        r#"
+        SELECT encrypted_account_key, approver_public_key FROM auth_requests
+        WHERE id = $1 AND kind = 'reset' AND status = 'approved'
+          AND consumed_at IS NULL AND expires_at > now()
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((Some(encrypted_account_key), Some(approver_public_key))) = row else {
+        return Ok(status_only("expired"));
+    };
+    approved(json!({
+        "encryptedAccountKey": encrypted_account_key,
+        "approverPublicKey": approver_public_key,
+    }))
 }
 
 async fn collect_device_approval(
@@ -394,7 +431,7 @@ async fn collect_device_approval(
     })
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, sqlx::FromRow)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AuthRequestPublic {
     id: Uuid,
@@ -405,6 +442,9 @@ pub(crate) struct AuthRequestPublic {
     user_agent: Option<String>,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
+    /// Devices that have approved so far (only a `reset` request collects
+    /// more than one; it needs two).
+    approvals: i64,
 }
 
 /// The account's unanswered, unexpired requests, for a connected extension
@@ -420,16 +460,23 @@ pub(crate) async fn list_auth_requests(
         &device.device_id.to_string(),
     )?;
 
-    let requests = sqlx::query_as!(
-        AuthRequestPublic,
+    // A reset request this device already approved stays hidden from it.
+    let requests = sqlx::query_as::<_, AuthRequestPublic>(
         r#"
-        SELECT id, kind, public_key, device_name, request_ip, user_agent, created_at, expires_at
-        FROM auth_requests
-        WHERE user_id = $1 AND status = 'pending' AND expires_at > now()
-        ORDER BY created_at DESC
+        SELECT r.id, r.kind, r.public_key, r.device_name, r.request_ip, r.user_agent,
+               r.created_at, r.expires_at,
+               (SELECT count(*) FROM auth_request_approvals a WHERE a.request_id = r.id) AS approvals
+        FROM auth_requests r
+        WHERE r.user_id = $1 AND r.status = 'pending' AND r.expires_at > now()
+          AND NOT EXISTS (
+              SELECT 1 FROM auth_request_approvals a
+              WHERE a.request_id = r.id AND a.device_id = $2
+          )
+        ORDER BY r.created_at DESC
         "#,
-        device.user_id
     )
+    .bind(device.user_id)
+    .bind(device.device_id)
     .fetch_all(&state.db)
     .await?;
 
@@ -469,21 +516,16 @@ pub(crate) async fn respond_auth_request(
     .await?
     .ok_or(AppError::NotFound)?;
 
+    if req.approve && kind == "reset" {
+        return approve_reset(&state, &device, id, req).await;
+    }
+
     let (encrypted_account_key, approver_public_key) = if req.approve && kind == "device" {
-        let (Some(encrypted_account_key), Some(approver_public_key)) =
-            (req.encrypted_account_key, req.approver_public_key)
-        else {
-            return Err(AppError::Validation(
-                "approving a new browser needs encryptedAccountKey and approverPublicKey".into(),
-            ));
-        };
-        if encrypted_account_key.is_empty()
-            || encrypted_account_key.len() > MAX_ENCRYPTED_ACCOUNT_KEY_LEN
-        {
-            return Err(AppError::Validation("invalid encryptedAccountKey".into()));
-        }
-        validate_ecdh_public_key(&approver_public_key)
-            .map_err(|e| AppError::Validation(e.to_string()))?;
+        let (encrypted_account_key, approver_public_key) = require_key_material(
+            req.encrypted_account_key,
+            req.approver_public_key,
+            "approving a new browser",
+        )?;
         (Some(encrypted_account_key), Some(approver_public_key))
     } else {
         if req.encrypted_account_key.is_some() || req.approver_public_key.is_some() {
@@ -531,4 +573,252 @@ pub(crate) async fn respond_auth_request(
     .await;
 
     Ok(Json(json!({ "ok": true })))
+}
+
+/// The approver's encrypted account key and one-time public key, both
+/// required and well-formed.
+fn require_key_material(
+    encrypted_account_key: Option<String>,
+    approver_public_key: Option<String>,
+    what: &str,
+) -> AppResult<(String, String)> {
+    let (Some(encrypted_account_key), Some(approver_public_key)) =
+        (encrypted_account_key, approver_public_key)
+    else {
+        return Err(AppError::Validation(format!(
+            "{what} needs encryptedAccountKey and approverPublicKey"
+        )));
+    };
+    if encrypted_account_key.is_empty()
+        || encrypted_account_key.len() > MAX_ENCRYPTED_ACCOUNT_KEY_LEN
+    {
+        return Err(AppError::Validation("invalid encryptedAccountKey".into()));
+    }
+    validate_ecdh_public_key(&approver_public_key)
+        .map_err(|e| AppError::Validation(e.to_string()))?;
+    Ok((encrypted_account_key, approver_public_key))
+}
+
+/// Approves a `reset` request. The first device's approval is only recorded
+/// and must carry no key material; the request stays `pending`. A second,
+/// different device's approval must carry the account key and makes the
+/// request `approved`. One device approving twice is a `409`. Locking the
+/// request row makes two simultaneous approvals take turns, so exactly one
+/// of them is the second.
+async fn approve_reset(
+    state: &AppState,
+    device: &AuthenticatedDevice,
+    id: Uuid,
+    req: RespondAuthRequest,
+) -> AppResult<Json<serde_json::Value>> {
+    let mut tx = state.db.begin().await?;
+
+    let locked = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id FROM auth_requests
+        WHERE id = $1 AND user_id = $2 AND kind = 'reset' AND status = 'pending'
+          AND expires_at > now()
+        FOR UPDATE
+        "#,
+    )
+    .bind(id)
+    .bind(device.user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if locked.is_none() {
+        return Err(AppError::NotFound);
+    }
+
+    let approvers = sqlx::query_scalar::<_, Uuid>(
+        "SELECT device_id FROM auth_request_approvals WHERE request_id = $1",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    if approvers.contains(&device.device_id) {
+        return Err(AppError::Conflict("already_approved".into()));
+    }
+
+    if approvers.is_empty() {
+        if req.encrypted_account_key.is_some() || req.approver_public_key.is_some() {
+            return Err(AppError::Validation(
+                "the first approval of a password reset carries no key".into(),
+            ));
+        }
+        sqlx::query("INSERT INTO auth_request_approvals (request_id, device_id) VALUES ($1, $2)")
+            .bind(id)
+            .bind(device.device_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        // The approver's other extensions now show "1 of 2" instead.
+        state.ws_registry.notify_auth_request(device.user_id);
+        crate::audit::log(
+            state,
+            Some(device.user_id),
+            Some(device.device_id),
+            "password_reset_first_approval",
+        )
+        .await;
+        return Ok(Json(json!({ "ok": true, "approvals": 1 })));
+    }
+
+    let (encrypted_account_key, approver_public_key) = require_key_material(
+        req.encrypted_account_key,
+        req.approver_public_key,
+        "the second approval of a password reset",
+    )?;
+    sqlx::query("INSERT INTO auth_request_approvals (request_id, device_id) VALUES ($1, $2)")
+        .bind(id)
+        .bind(device.device_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE auth_requests
+        SET status = 'approved', responded_by_device_id = $1, responded_at = now(),
+            encrypted_account_key = $2, approver_public_key = $3
+        WHERE id = $4
+        "#,
+    )
+    .bind(device.device_id)
+    .bind(encrypted_account_key)
+    .bind(approver_public_key)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    state.ws_registry.notify_auth_request(device.user_id);
+    crate::audit::log(
+        state,
+        Some(device.user_id),
+        Some(device.device_id),
+        "auth_request_approved",
+    )
+    .await;
+    Ok(Json(json!({ "ok": true, "approvals": 2 })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CompleteResetRequest {
+    secret: String,
+    new_auth_key: String,
+    new_kdf_salt: String,
+    new_kdf_params: serde_json::Value,
+    new_wrapped_ak: String,
+    new_recovery_auth_key: String,
+    new_recovery_wrapped_ak: String,
+}
+
+/// Finishes a two-device password reset (docs/encryption.md §9.4): the
+/// dashboard decrypted the account key from the approval, and wraps it under
+/// a new password and a new recovery code. Needs the request's secret, and
+/// the request approved, unconsumed, unexpired and approved by two distinct
+/// devices that are still active. In one transaction it consumes the request,
+/// swaps in the new fields, marks the new recovery code unconfirmed and
+/// revokes every web session; device credentials are left alone. An unknown
+/// id, a wrong secret and a request that isn't completable are the same `401`.
+pub(crate) async fn complete_reset(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(req): Json<CompleteResetRequest>,
+) -> AppResult<axum::http::StatusCode> {
+    let ip = client_ip(&headers, addr, state.config.behind_proxy);
+    enforce(
+        &state.rate_limiter,
+        AUTH_REQUEST_RESET_LIMIT,
+        &rate_limit_ip_key(ip),
+    )?;
+
+    validate_request_auth_key(&req.new_auth_key)?;
+    validate_request_auth_key(&req.new_recovery_auth_key)?;
+    validate_kdf_salt("newKdfSalt", &req.new_kdf_salt)?;
+    validate_kdf_params("newKdfParams", &req.new_kdf_params)?;
+    validate_wrapped_key("newWrappedAk", &req.new_wrapped_ak)?;
+    validate_wrapped_key("newRecoveryWrappedAk", &req.new_recovery_wrapped_ak)?;
+
+    let secret_hash = sqlx::query_scalar::<_, String>(
+        "SELECT secret_hash FROM auth_requests WHERE id = $1 AND kind = 'reset'",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?;
+    if !secret_hash.is_some_and(|hash| token_hash_matches(&req.secret, &hash)) {
+        return Err(AppError::Unauthorized);
+    }
+
+    let new_hash = hash_password_async(req.new_auth_key, &state.argon2_semaphore)
+        .await
+        .map_err(AppError::Internal)?;
+
+    let mut tx = state.db.begin().await?;
+
+    // The single claim: approved, unconsumed, unexpired and two distinct
+    // active approving devices, all checked in the statement that consumes it.
+    let user_id = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE auth_requests r SET consumed_at = now()
+        WHERE r.id = $1 AND r.kind = 'reset' AND r.status = 'approved'
+          AND r.consumed_at IS NULL AND r.expires_at > now()
+          AND (
+              SELECT count(DISTINCT a.device_id)
+              FROM auth_request_approvals a
+              JOIN devices d ON d.id = a.device_id AND d.revoked_at IS NULL
+              WHERE a.request_id = r.id
+          ) >= 2
+        RETURNING r.user_id
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(user_id) = user_id else {
+        return Err(AppError::Unauthorized);
+    };
+
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET password_hash = $1, kdf_salt = $2, kdf_params = $3, wrapped_account_key = $4,
+            recovery_auth_hash = $5, recovery_wrapped_account_key = $6,
+            recovery_code_confirmed_at = NULL, updated_at = now()
+        WHERE id = $7
+        "#,
+    )
+    .bind(new_hash)
+    .bind(&req.new_kdf_salt)
+    .bind(&req.new_kdf_params)
+    .bind(&req.new_wrapped_ak)
+    .bind(hash_token(&req.new_recovery_auth_key))
+    .bind(&req.new_recovery_wrapped_ak)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let revoked_sessions = sqlx::query_scalar::<_, String>(
+        r#"
+        UPDATE web_sessions SET revoked_at = now()
+        WHERE user_id = $1 AND revoked_at IS NULL
+        RETURNING session_hash
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    // Tombstones, not removals; see `revoke_session`.
+    let revoked_at = std::time::Instant::now();
+    for session_hash in revoked_sessions {
+        write_web_session_cache_entry(&state.web_session_cache, session_hash, revoked_at, None);
+    }
+
+    crate::audit::log(&state, Some(user_id), None, "password_reset_by_devices").await;
+    Ok(axum::http::StatusCode::NO_CONTENT)
 }

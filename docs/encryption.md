@@ -504,6 +504,8 @@ manager, adapted to a self-hosted server that sends no email:
 |---|---|---|
 | Your recovery code | Reset the password with it (§9.1) | Yes |
 | A browser where the extension is still connected | Approve a new browser or a dashboard sign-in from it (§9.2) | Yes |
+| Two browsers where the extension is still connected | Approve a password reset from both (§9.4) | Yes |
+| A passkey that sealed the recovery code | Unseal the code, then reset with it (§9.5) | Yes |
 | Neither | Ask the operator to delete the account, then register again (§9.3) | Only what your browsers still hold |
 
 ### 9.1 Recovery code
@@ -554,6 +556,21 @@ replace the code with one the attacker knows.
 The recovery code is as powerful as the password: anyone who has it and the
 email can set a new password and decrypt the account's data. The dashboard
 asks the user to keep it offline.
+
+**Making a lost code rarer.** The dashboard shows a code in one place (signup,
+recovery, regeneration) and will not continue until the user types it back
+(`parseRecoveryCode` equality, so case, dashes and I/L/O don't matter; pasting
+is allowed, since this checks that they hold a copy, not their memory). It
+offers a printable recovery kit (account email, server address, code, date,
+steps, a warning that each code works once) and the same as a `.txt`, both
+built in the browser. `POST /api/v1/auth/recovery-code/confirm
+{ recoveryAuthKey }` (session + CSRF) compares the key with the stored hash
+in constant time and sets `users.recovery_code_confirmed_at`; `GET /auth/me`
+returns `recoveryCodeConfirmed`. Every place that replaces the code (register,
+`recover_complete`, regeneration, §9.4) leaves the column `NULL`, and the
+dashboard shows a banner until it is set. It is a flag, not a secret, and
+existing accounts start unconfirmed. The recovery page has no session, so a
+code typed back there is confirmed on the next visit to the Security page.
 
 ### 9.2 Login with device
 
@@ -629,3 +646,87 @@ device tokens for up to 30 seconds (the cache lifetime).
 Nothing in the browsers is deleted. After registering again, connecting a
 browser uploads its bookmarks and history through the extension's initial
 import, as far back as the browser itself still keeps them.
+
+### 9.4 Two-device password reset
+
+A forgotten password can be reset when two different connected extensions
+approve; one alone (say, someone at an unlocked PC) cannot. Nothing new is
+stored on the server beyond the request and who approved it.
+
+```text
+1. Dashboard: Forgot your password? -> Reset with two of my browsers. It
+   creates a one-time ECDH key pair and sends POST /api/v1/auth/requests
+   { email, kind: "reset", publicKey }. An unknown email gets the same
+   response with nothing stored, as in §9.2.
+2. Each connected extension lists it, marked PASSWORD RESET with a strong
+   warning, the fingerprint phrase of §9.2 and "N of 2 approvals".
+3. First approval: recorded in auth_request_approvals; it carries no key and
+   the request stays pending.
+4. Second approval, from a different device: carries encryptedAccountKey and
+   approverPublicKey, built as in §9.2. The request becomes approved.
+5. The dashboard polls, decrypts AK and shows the key check phrase
+   (HKDF(AK, "helixsync-key-check-v1")); the user confirms it matches the
+   one the second approving extension shows.
+6. The user picks a new password. The dashboard derives the new
+   authKey/KEK, wraps AK, generates a NEW recovery code and wraps AK under it.
+7. POST /api/v1/auth/requests/{id}/reset { secret, newAuthKey, newKdfSalt,
+   newKdfParams, newWrappedAk, newRecoveryAuthKey, newRecoveryWrappedAk }.
+   In one transaction the server consumes the request, requires it approved,
+   unexpired and approved by two distinct devices that are still active,
+   swaps the fields as in §9.1, leaves the recovery code unconfirmed and
+   revokes every web session.
+8. The new recovery code is shown with the type-back of §9.1.
+```
+
+Audit events: `password_reset_first_approval`, `password_reset_by_devices`.
+A denial from any device denies the request; one device approving twice is a
+`409`; an account with fewer than two active devices can't complete one, and
+nothing tells the requester why. Device credentials keep working.
+
+Known limit: two Chromium profiles on the same PC, both connected, count as
+two devices; the server can't tell they are one machine.
+
+### 9.5 Passkey-sealed recovery code
+
+A passkey (Windows Hello, Touch ID, a phone or a security key) can unlock the
+recovery code, so someone at an unlocked PC still needs a fingerprint or the
+OS PIN. It seals the **recovery code**, not AK: unsealing gives back the code,
+and the user goes through §9.1 unchanged. **No server change, and nothing new
+stored on the server.**
+
+WebAuthn is used only for its PRF output, never to authenticate to the
+server: `credentials.create/get` run with a client-generated random challenge
+and nothing is sent.
+
+```text
+Enrol (Security page, after typing the current code):
+1. Offer it only where WebAuthn exists and PRF is not reported as missing;
+   enrolment re-checks prf.enabled on the create() result.
+2. create() a passkey with rp.id = the dashboard hostname,
+   userVerification "required", extensions.prf.eval.first = prfSalt
+   (32 random bytes).
+3. If create() returned no PRF output, get() once to obtain it.
+4. sealKey = HKDF(prfOutput, "helixsync-passkey-seal-v1");
+   sealed = XChaCha20-Poly1305(sealKey, recoveryCodeBytes),
+   AAD = lowercase(email) || "\n" || credentialId.
+5. Keep { v: 1, email, serverUrl, credentialId, prfSalt, sealed, createdAt }
+   in this browser's localStorage and in a downloadable rescue file (.json).
+
+Rescue (Forgot your password? -> Use my passkey):
+1. Load the record from localStorage or an uploaded rescue file.
+2. get() with allowCredentials = [credentialId], prf.eval.first = prfSalt,
+   userVerification "required".
+3. Unseal; the code fills the §9.1 reset form.
+4. After the reset, re-seal the NEW code with the same passkey (one more
+   prompt) and offer a new rescue file.
+```
+
+The rescue file is useless without the passkey, so unlike the recovery code it
+can be kept online. Every recovery or regeneration makes the old sealed record
+stale; the dashboard re-seals on the spot, and "Check it still works" derives
+`recoveryAuthKey` from the unsealed code and calls the confirm route, where a
+`401` means stale. Limits: the passkey is bound to the dashboard hostname (a
+self-hoster who changes the domain must enrol again); a lost, unsynced passkey
+ends this path but not the recovery code; support is uneven (Chromium 128+,
+phone via QR or a security key on Linux; Firefox and Safari are detected at
+runtime and not promised). The recovery code stays the baseline.

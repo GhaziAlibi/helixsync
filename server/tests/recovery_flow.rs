@@ -505,3 +505,127 @@ async fn recovery_attempts_are_rate_limited_per_email(pool: PgPool) {
     );
     assert_eq!(*statuses.last().unwrap(), StatusCode::TOO_MANY_REQUESTS);
 }
+
+async fn confirmed(pool: &PgPool) -> bool {
+    sqlx::query_scalar::<_, bool>("SELECT recovery_code_confirmed_at IS NOT NULL FROM users")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+fn confirm_json(recovery_auth_key: &str) -> serde_json::Value {
+    json!({ "recoveryAuthKey": recovery_auth_key })
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn confirm_sets_the_flag_only_for_the_current_code(pool: PgPool) {
+    let state = state_for(pool.clone());
+    let server = browser(&state);
+    let csrf = register(&server).await;
+
+    // A new account starts unconfirmed, and /me says so.
+    assert!(!confirmed(&pool).await);
+    let me: serde_json::Value = server.get("/api/v1/auth/me").await.json();
+    assert_eq!(me["recoveryCodeConfirmed"], false);
+
+    server
+        .post("/api/v1/auth/recovery-code/confirm")
+        .add_header("x-csrf-token", &csrf)
+        .json(&confirm_json(&common::test_auth_key("not the code")))
+        .await
+        .assert_status_unauthorized();
+    assert!(!confirmed(&pool).await);
+    assert_eq!(audit_count(&pool, "recovery_code_confirm_failed").await, 1);
+
+    server
+        .post("/api/v1/auth/recovery-code/confirm")
+        .add_header("x-csrf-token", &csrf)
+        .json(&confirm_json(&common::test_recovery_auth_key()))
+        .await
+        .assert_status_ok();
+    assert!(confirmed(&pool).await);
+    let me: serde_json::Value = server.get("/api/v1/auth/me").await.json();
+    assert_eq!(me["recoveryCodeConfirmed"], true);
+    assert_eq!(audit_count(&pool, "recovery_code_confirmed").await, 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn confirm_needs_a_session_and_a_csrf_token(pool: PgPool) {
+    let state = state_for(pool.clone());
+    let server = browser(&state);
+    register(&server).await;
+
+    server
+        .post("/api/v1/auth/recovery-code/confirm")
+        .json(&confirm_json(&common::test_recovery_auth_key()))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    browser(&state)
+        .post("/api/v1/auth/recovery-code/confirm")
+        .json(&confirm_json(&common::test_recovery_auth_key()))
+        .await
+        .assert_status_unauthorized();
+    assert!(!confirmed(&pool).await);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn confirm_rejects_a_key_that_is_not_32_bytes(pool: PgPool) {
+    let state = state_for(pool);
+    let server = browser(&state);
+    let csrf = register(&server).await;
+
+    server
+        .post("/api/v1/auth/recovery-code/confirm")
+        .add_header("x-csrf-token", &csrf)
+        .json(&confirm_json("ABCD-EFGH-the-raw-code"))
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn regenerating_or_recovering_resets_the_flag_and_makes_the_old_code_stale(pool: PgPool) {
+    let state = state_for(pool.clone());
+    let server = browser(&state);
+    let csrf = register(&server).await;
+    server
+        .post("/api/v1/auth/recovery-code/confirm")
+        .add_header("x-csrf-token", &csrf)
+        .json(&confirm_json(&common::test_recovery_auth_key()))
+        .await
+        .assert_status_ok();
+    assert!(confirmed(&pool).await);
+
+    server
+        .patch("/api/v1/auth/recovery-code")
+        .add_header("x-csrf-token", &csrf)
+        .json(&regenerate_json(PASSWORD, "second code"))
+        .await
+        .assert_status_ok();
+    assert!(!confirmed(&pool).await);
+
+    // The old code is stale: confirming it fails.
+    server
+        .post("/api/v1/auth/recovery-code/confirm")
+        .add_header("x-csrf-token", &csrf)
+        .json(&confirm_json(&common::test_recovery_auth_key()))
+        .await
+        .assert_status_unauthorized();
+    server
+        .post("/api/v1/auth/recovery-code/confirm")
+        .add_header("x-csrf-token", &csrf)
+        .json(&confirm_json(&common::test_auth_key("second code")))
+        .await
+        .assert_status_ok();
+    assert!(confirmed(&pool).await);
+
+    let other = browser(&state);
+    other
+        .post("/api/v1/auth/recover/complete")
+        .json(&complete_json(
+            &common::test_auth_key("second code"),
+            "third code",
+        ))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    assert!(!confirmed(&pool).await);
+}
