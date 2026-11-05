@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { Link, NavLink, Outlet } from "react-router-dom";
 import { useAuth } from "../auth/context";
 
 const navItems = [
@@ -41,6 +41,14 @@ export default function Layout() {
         </button>
       </aside>
       <main className="flex-1 p-8">
+        {user?.recoveryCodeConfirmed === false && (
+          <div role="alert" className="mb-6 text-sm text-amber-900 bg-amber-50 border border-amber-300 rounded px-4 py-3">
+            You haven't confirmed your recovery code. Without it, a forgotten password means losing your data.{" "}
+            <Link to="/security" className="font-medium underline">
+              Confirm it or generate a new one
+            </Link>
+          </div>
+        )}
         <Outlet />
       </main>
     </div>

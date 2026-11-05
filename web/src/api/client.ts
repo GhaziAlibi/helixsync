@@ -3,6 +3,7 @@
 // requests, unlike the extension, which uses device bearer tokens.
 import {
   DEFAULT_KDF_PARAMS,
+  decryptAccountKeyFromApproval,
   deriveAuthKey,
   deriveKek,
   deriveMasterKey,
@@ -61,6 +62,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 export interface UserPublic {
   id: string;
   email: string;
+  /** Whether the user has proved they hold the current recovery code. Only
+   * `me()` knows it; login responses leave it out. */
+  recoveryCodeConfirmed?: boolean;
 }
 
 interface WireAuthResponse {
@@ -221,12 +225,77 @@ export async function pollAuthRequest(id: string, secret: string): Promise<AuthR
   return { status: result.status };
 }
 
+// --- Two-device password reset (docs/encryption.md §9.4) ---
+
+/** Asks two connected extensions to approve a password reset. `publicKey`
+ * comes from `generateResetKeyPair`. */
+export async function createResetRequest(email: string, publicKey: string): Promise<AuthRequestCreated> {
+  return request("/api/v1/auth/requests", {
+    method: "POST",
+    body: JSON.stringify({ email, kind: "reset", publicKey }),
+  });
+}
+
+export type ResetPoll =
+  | { status: "pending" | "denied" | "expired" }
+  | { status: "approved"; encryptedAccountKey: string; approverPublicKey: string };
+
+/** Checks on a reset request. Approved means a second device sent the account
+ * key; reading it does not consume the request. */
+export async function pollResetRequest(id: string, secret: string): Promise<ResetPoll> {
+  return request(`/api/v1/auth/requests/${encodeURIComponent(id)}/poll`, {
+    method: "POST",
+    body: JSON.stringify({ secret }),
+  });
+}
+
+/** Decrypts the account key from an approved reset. */
+export function accountKeyFromReset(
+  privateKey: CryptoKey,
+  requestId: string,
+  approval: { encryptedAccountKey: string; approverPublicKey: string },
+): Promise<Uint8Array> {
+  return decryptAccountKeyFromApproval(privateKey, approval.approverPublicKey, approval.encryptedAccountKey, requestId);
+}
+
+/** Finishes the reset: wraps the account key under the new password and a new
+ * recovery code and returns that code (each code works once). Every web
+ * session ends; sign in again afterwards. */
+export async function completeReset(
+  id: string,
+  secret: string,
+  accountKey: Uint8Array,
+  newPassword: string,
+): Promise<string> {
+  const newKdfSalt = generateKdfSalt();
+  const newKdfParams = DEFAULT_KDF_PARAMS;
+  const newMasterKey = await deriveMasterKey(newPassword, newKdfSalt, newKdfParams);
+  const newAuthKey = await deriveAuthKey(newMasterKey);
+  const newWrappedAk = wrapAccountKey(await deriveKek(newMasterKey), accountKey);
+  const next = await newRecoveryCode(accountKey);
+
+  await request(`/api/v1/auth/requests/${encodeURIComponent(id)}/reset`, {
+    method: "POST",
+    body: JSON.stringify({
+      secret,
+      newAuthKey,
+      newKdfSalt,
+      newKdfParams,
+      newWrappedAk,
+      newRecoveryAuthKey: next.recoveryAuthKey,
+      newRecoveryWrappedAk: next.recoveryWrappedAk,
+    }),
+  });
+  return next.code;
+}
+
 export async function logout(): Promise<void> {
   await request("/api/v1/auth/logout", { method: "POST" });
   csrfToken = null;
 }
 
 interface MeResponse extends UserPublic {
+  recoveryCodeConfirmed: boolean;
   wrappedAk: string;
   kdfSalt: string;
   kdfParams: KdfParams;
@@ -235,7 +304,18 @@ interface MeResponse extends UserPublic {
 
 export async function me(): Promise<UserPublic> {
   const result = await request<MeResponse>("/api/v1/auth/me");
-  return { id: result.id, email: result.email };
+  return { id: result.id, email: result.email, recoveryCodeConfirmed: result.recoveryCodeConfirmed };
+}
+
+/** Tells the server the user holds the current recovery code (they typed it
+ * back): sends only its derived `recoveryAuthKey`. A `401` means the code is
+ * wrong or stale. */
+export async function confirmRecoveryCode(code: string): Promise<void> {
+  const { authKey } = await deriveRecoveryKeys(parseRecoveryCode(code));
+  await request("/api/v1/auth/recovery-code/confirm", {
+    method: "POST",
+    body: JSON.stringify({ recoveryAuthKey: authKey }),
+  });
 }
 
 /** The account's current wrapped-key material (docs/encryption.md §2),

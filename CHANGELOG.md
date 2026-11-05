@@ -8,6 +8,21 @@ All notable changes to HelixSync are documented here. The format follows
 
 ### Added
 
+- Safer account recovery. The dashboard now makes you type your recovery code
+  back before it continues, offers a printable recovery kit (or a `.txt`),
+  and shows a banner until the current code is confirmed. A forgotten
+  password can also be reset when two different connected extensions approve
+  (the extension marks it PASSWORD RESET and shows "1 of 2 approvals"), and a
+  passkey (fingerprint, OS PIN, phone or security key) can seal the recovery
+  code, with a rescue file kept outside the browser. Nothing new secret is
+  stored on the server. The server adds migration `0003_recovery_safeguards.sql`
+  (a nullable column, a wider CHECK and a new table); it is additive and runs
+  automatically.
+
+## [1.0.8] - 2026-11-05
+
+### Added
+
 - Bookmark restore points: timestamped, encrypted snapshots of your bookmarks
   that you can roll back to, in full or for one folder, either by merging
   (bring back what is missing, undo edits, delete nothing) or exactly (also

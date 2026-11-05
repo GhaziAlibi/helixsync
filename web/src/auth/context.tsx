@@ -11,9 +11,21 @@ interface AuthState {
   pollDeviceLogin: (id: string, secret: string) => Promise<api.AuthRequestPoll>;
   logout: () => Promise<void>;
   deleteAccount: (password: string) => Promise<void>;
+  /** The user typed the current recovery code back and the server accepted it. */
+  markRecoveryCodeConfirmed: () => void;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
+
+/** Fills in what login responses leave out (the recovery-code flag). A failure
+ * keeps the signed-in user as is. */
+async function refreshUser(setUser: (user: api.UserPublic) => void): Promise<void> {
+  try {
+    setUser(await api.me());
+  } catch {
+    // The flag stays unknown and no banner shows.
+  }
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<api.UserPublic | null>(null);
@@ -40,17 +52,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (email: string, password: string) => {
     const result = await api.login(email, password);
     setUser(result.user);
+    await refreshUser(setUser);
   }, []);
 
   const register = useCallback(async (email: string, password: string) => {
     const result = await api.register(email, password);
-    setUser(result.user);
+    setUser({ ...result.user, recoveryCodeConfirmed: false });
     return result.recoveryCode;
   }, []);
 
   const pollDeviceLogin = useCallback(async (id: string, secret: string) => {
     const result = await api.pollAuthRequest(id, secret);
-    if (result.status === "approved") setUser(result.user);
+    if (result.status === "approved") {
+      setUser(result.user);
+      await refreshUser(setUser);
+    }
     return result;
   }, []);
 
@@ -64,9 +80,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
+  const markRecoveryCodeConfirmed = useCallback(() => {
+    setUser((u) => (u ? { ...u, recoveryCodeConfirmed: true } : u));
+  }, []);
+
   const value = useMemo(
-    () => ({ user, loading, login, register, pollDeviceLogin, logout, deleteAccount }),
-    [user, loading, login, register, pollDeviceLogin, logout, deleteAccount],
+    () => ({ user, loading, login, register, pollDeviceLogin, logout, deleteAccount, markRecoveryCodeConfirmed }),
+    [user, loading, login, register, pollDeviceLogin, logout, deleteAccount, markRecoveryCodeConfirmed],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

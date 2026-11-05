@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_KDF_PARAMS,
+  accountKeyCheckPhrase,
   authRequestFingerprint,
   deriveAuthKey,
   deriveKek,
@@ -12,7 +13,10 @@ import {
   generateKdfSalt,
   generateRecoveryCode,
   parseRecoveryCode,
+  recoveryCodesMatch,
+  sealRecoveryCode,
   toB64,
+  unsealRecoveryCode,
   unwrapAccountKey,
   wrapAccountKey,
 } from "./index";
@@ -212,5 +216,62 @@ describe("login-with-device fingerprint", () => {
     expect(fromB64(a)[0]).toBe(0x04);
     expect(await authRequestFingerprint(a)).toMatch(/^([0-9A-HJKMNP-TV-Z]{4}-){3}[0-9A-HJKMNP-TV-Z]{4}$/);
     expect(await authRequestFingerprint(a)).not.toBe(await authRequestFingerprint(b));
+  });
+});
+
+describe("recovery code type-back", () => {
+  it("matches the same code despite case, dashes and I/L/O mix-ups", () => {
+    const code = generateRecoveryCode();
+    expect(recoveryCodesMatch(code, code)).toBe(true);
+    expect(recoveryCodesMatch(code.toLowerCase().replace(/-/g, " "), code)).toBe(true);
+    expect(recoveryCodesMatch(code.replace(/1/g, "l").replace(/0/g, "o"), code)).toBe(true);
+  });
+
+  it("rejects a different, partial or unparseable code", () => {
+    const code = generateRecoveryCode();
+    const other = generateRecoveryCode();
+    expect(recoveryCodesMatch(other, code)).toBe(false);
+    expect(recoveryCodesMatch(code.slice(0, -5), code)).toBe(false);
+    expect(recoveryCodesMatch("not a code", code)).toBe(false);
+    expect(recoveryCodesMatch("", code)).toBe(false);
+  });
+});
+
+describe("passkey-sealed recovery code", () => {
+  const prf = new Uint8Array(32).map((_, i) => i + 1);
+
+  it("round-trips with a fake PRF output", async () => {
+    const code = generateRecoveryCode();
+    const sealed = await sealRecoveryCode(prf, code, "a@example.com", "cred-1");
+    expect(sealed).not.toContain(code);
+    expect(await unsealRecoveryCode(prf, sealed, "a@example.com", "cred-1")).toBe(code);
+  });
+
+  it("fails with another PRF output, email, credential id or an altered seal", async () => {
+    const code = generateRecoveryCode();
+    const sealed = await sealRecoveryCode(prf, code, "a@example.com", "cred-1");
+    const otherPrf = prf.map((b) => b ^ 1);
+    await expect(unsealRecoveryCode(otherPrf, sealed, "a@example.com", "cred-1")).rejects.toThrow();
+    await expect(unsealRecoveryCode(prf, sealed, "b@example.com", "cred-1")).rejects.toThrow();
+    await expect(unsealRecoveryCode(prf, sealed, "a@example.com", "cred-2")).rejects.toThrow();
+    const tampered = JSON.parse(sealed);
+    tampered.ciphertext = tampered.ciphertext.slice(0, -2) + "AA";
+    await expect(unsealRecoveryCode(prf, JSON.stringify(tampered), "a@example.com", "cred-1")).rejects.toThrow();
+  });
+
+  it("treats the email case-insensitively", async () => {
+    const code = generateRecoveryCode();
+    const sealed = await sealRecoveryCode(prf, code, "A@Example.com", "c");
+    expect(await unsealRecoveryCode(prf, sealed, "a@example.com", "c")).toBe(code);
+  });
+});
+
+describe("account key check phrase", () => {
+  it("is deterministic, XXXX-XXXX-XXXX-XXXX and key-specific", async () => {
+    const a = new Uint8Array(32).fill(7);
+    const b = new Uint8Array(32).fill(8);
+    expect(await accountKeyCheckPhrase(a)).toMatch(/^[0-9A-Z]{4}(-[0-9A-Z]{4}){3}$/);
+    expect(await accountKeyCheckPhrase(a)).toBe(await accountKeyCheckPhrase(a));
+    expect(await accountKeyCheckPhrase(a)).not.toBe(await accountKeyCheckPhrase(b));
   });
 });

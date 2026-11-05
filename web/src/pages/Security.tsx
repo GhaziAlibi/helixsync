@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/context";
 import * as api from "../api/client";
 import RecoveryCodeNotice from "../components/RecoveryCodeNotice";
+import { ConfirmRecoveryCodeForm, PasskeySection } from "../components/RecoveryCodeSafeguards";
 
 function ChangePasswordForm() {
   const [current, setCurrent] = useState("");
@@ -277,7 +278,18 @@ export default function Security() {
           your data. Generate a new one if you lost it or think someone else has seen it; the old code stops working
           right away.
         </p>
+        <ConfirmRecoveryCodeForm />
         <RecoveryCodeForm />
+      </div>
+
+      <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5 mt-6">
+        <h2 className="font-medium mb-4">Passkey</h2>
+        <p className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded px-3 py-2 mb-4">
+          A passkey (fingerprint, OS PIN, phone or security key) can unlock your recovery code if you lose the
+          printed copy. The sealed code stays in this browser and in a rescue file that is useless without your
+          passkey. The passkey is tied to this site's address, and your recovery code stays the baseline.
+        </p>
+        <PasskeySection />
       </div>
 
       <div className="bg-white rounded-lg shadow-xs border border-red-200 p-5 mt-6">

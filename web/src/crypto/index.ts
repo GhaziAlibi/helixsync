@@ -258,3 +258,148 @@ export async function authRequestFingerprint(publicKeyB64: string): Promise<stri
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
   return groupsOfFour(toCrockford(digest.slice(0, 10)));
 }
+
+/** True when `typed` and `expected` are the same recovery code, ignoring the
+ * case, dashes and I/L/O mix-ups `parseRecoveryCode` already tolerates.
+ * Anything unparseable is a mismatch. */
+export function recoveryCodesMatch(typed: string, expected: string): boolean {
+  try {
+    const a = parseRecoveryCode(typed);
+    const b = parseRecoveryCode(expected);
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+    return diff === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** A recovery code's canonical `XXXX-XXXX-…` text from its 20 bytes. */
+export function formatRecoveryCode(bytes: Uint8Array): string {
+  return groupsOfFour(toCrockford(bytes));
+}
+
+// --- Two-device password reset (docs/encryption.md §9.4) -------------------
+// The dashboard asks two connected extensions to approve. The second one
+// encrypts the account key to this request's one-time ECDH P-256 key, with the
+// same HKDF + XChaCha20-Poly1305 as login with device (§9.2). Mirrors
+// extension/src/crypto/index.ts.
+
+const ECDH_P256 = { name: "ECDH", namedCurve: "P-256" } as const;
+const KEY_CHECK_LABEL = "helixsync-key-check-v1";
+
+export interface ResetKeyPair {
+  publicKey: string;
+  /** Non-extractable and kept in memory only: a reload abandons the request. */
+  privateKey: CryptoKey;
+}
+
+export async function generateResetKeyPair(): Promise<ResetKeyPair> {
+  const keyPair = await crypto.subtle.generateKey(ECDH_P256, false, ["deriveBits"]);
+  return {
+    publicKey: toB64(new Uint8Array(await crypto.subtle.exportKey("raw", keyPair.publicKey))),
+    privateKey: keyPair.privateKey,
+  };
+}
+
+interface AuthRequestKeyEnvelope {
+  v: 1;
+  alg: "xchacha20poly1305";
+  nonce: string;
+  ciphertext: string;
+}
+
+/** Recovers the account key from the second approver's message. The request
+ * id is the associated data, so the server can't swap in another request's
+ * ciphertext. Throws on any mismatch. */
+export async function decryptAccountKeyFromApproval(
+  privateKey: CryptoKey,
+  approverPublicKeyB64: string,
+  encryptedAccountKey: string,
+  requestId: string,
+): Promise<Uint8Array> {
+  const peer = await crypto.subtle.importKey(
+    "raw",
+    fromB64(approverPublicKeyB64).buffer as ArrayBuffer,
+    ECDH_P256,
+    false,
+    [],
+  );
+  const shared = await crypto.subtle.deriveBits({ name: "ECDH", public: peer }, privateKey, 256);
+  const key = await hkdfSha256(new Uint8Array(shared), AUTH_REQUEST_LABEL);
+  const envelope = JSON.parse(encryptedAccountKey) as AuthRequestKeyEnvelope;
+  if (envelope.v !== 1 || envelope.alg !== "xchacha20poly1305") {
+    throw new Error("unsupported encrypted account key");
+  }
+  return xchacha20poly1305(key, fromB64(envelope.nonce), sharedTextEncoder.encode(requestId)).decrypt(
+    fromB64(envelope.ciphertext),
+  );
+}
+
+/** A phrase derived from the account key itself. The second approver shows it
+ * and the user compares it with this one before choosing a new password; the
+ * server never holds the account key, so it can't produce it for a key it
+ * chose. Mirrors extension/src/crypto/index.ts::accountKeyCheckPhrase. */
+export async function accountKeyCheckPhrase(accountKey: Uint8Array): Promise<string> {
+  return groupsOfFour(toCrockford(await hkdfSha256(accountKey, KEY_CHECK_LABEL, 80)));
+}
+
+// --- Passkey-sealed recovery code (docs/encryption.md §9.5) ----------------
+// A passkey's PRF output keys an XChaCha20-Poly1305 seal of the recovery code
+// (its 20 bytes). The seal lives only in this browser and in a rescue file the
+// user keeps; the server stores nothing new.
+
+const PASSKEY_SEAL_LABEL = "helixsync-passkey-seal-v1";
+
+interface SealedEnvelope {
+  v: 1;
+  alg: "xchacha20poly1305";
+  nonce: string;
+  ciphertext: string;
+}
+
+function sealAad(email: string, credentialId: string): Uint8Array {
+  return sharedTextEncoder.encode(`${email.trim().toLowerCase()}\n${credentialId}`);
+}
+
+/** Seals `recoveryCode` under `prfOutput`. `email` and `credentialId` are the
+ * associated data, so a seal can't be replayed against another account or
+ * passkey. */
+export async function sealRecoveryCode(
+  prfOutput: Uint8Array,
+  recoveryCode: string,
+  email: string,
+  credentialId: string,
+): Promise<string> {
+  const key = await hkdfSha256(prfOutput, PASSKEY_SEAL_LABEL);
+  const nonce = randomBytes(24);
+  const ciphertext = xchacha20poly1305(key, nonce, sealAad(email, credentialId)).encrypt(
+    parseRecoveryCode(recoveryCode),
+  );
+  const envelope: SealedEnvelope = {
+    v: 1,
+    alg: "xchacha20poly1305",
+    nonce: toB64(nonce),
+    ciphertext: toB64(ciphertext),
+  };
+  return JSON.stringify(envelope);
+}
+
+/** Inverse of `sealRecoveryCode`. Throws if the PRF output, email or
+ * credential id is wrong, or the seal was altered. */
+export async function unsealRecoveryCode(
+  prfOutput: Uint8Array,
+  sealed: string,
+  email: string,
+  credentialId: string,
+): Promise<string> {
+  const key = await hkdfSha256(prfOutput, PASSKEY_SEAL_LABEL);
+  const envelope = JSON.parse(sealed) as SealedEnvelope;
+  if (envelope.v !== 1 || envelope.alg !== "xchacha20poly1305") {
+    throw new Error("unsupported sealed recovery code");
+  }
+  const bytes = xchacha20poly1305(key, fromB64(envelope.nonce), sealAad(email, credentialId)).decrypt(
+    fromB64(envelope.ciphertext),
+  );
+  return formatRecoveryCode(bytes);
+}

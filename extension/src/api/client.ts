@@ -337,13 +337,16 @@ export async function pollAuthRequest(
 /** A sign-in request waiting for this account's approval. */
 export interface PendingAuthRequest {
   id: string;
-  kind: "web" | "device";
+  kind: "web" | "device" | "reset";
   publicKey: string;
   deviceName: string | null;
   requestIp: string | null;
   userAgent: string | null;
   createdAt: string;
   expiresAt: string;
+  /** Devices that already approved this request. A password reset needs two
+   * different ones; older servers omit it. */
+  approvals?: number;
 }
 
 export async function listAuthRequests(): Promise<PendingAuthRequest[]> {
@@ -356,7 +359,9 @@ export async function listAuthRequests(): Promise<PendingAuthRequest[]> {
 
 /** Approving a new browser must carry the account key encrypted to its
  * request (crypto::encryptAccountKeyForRequest); a dashboard approval and a
- * denial carry nothing. */
+ * denial carry nothing. A password reset (docs/encryption.md §9.4) needs two
+ * devices: the first approval carries nothing, and only the second carries
+ * the key. */
 export async function respondAuthRequest(
   id: string,
   answer: { approve: boolean; encryptedAccountKey?: string; approverPublicKey?: string },

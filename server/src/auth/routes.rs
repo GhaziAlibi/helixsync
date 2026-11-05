@@ -19,8 +19,8 @@ use crate::error::{AppError, AppResult};
 use crate::middleware::client_ip::{client_ip, rate_limit_ip_key};
 use crate::middleware::rate_limit::{
     enforce, ACCOUNT_DELETE_LIMIT, LOGIN_EMAIL_LIMIT, LOGIN_LIMIT, PASSWORD_CHANGE_LIMIT,
-    PRELOGIN_EMAIL_LIMIT, PRELOGIN_LIMIT, RECOVERY_CODE_LIMIT, RECOVER_EMAIL_LIMIT, RECOVER_LIMIT,
-    REGISTER_LIMIT,
+    PRELOGIN_EMAIL_LIMIT, PRELOGIN_LIMIT, RECOVERY_CODE_LIMIT, RECOVERY_CONFIRM_LIMIT,
+    RECOVER_EMAIL_LIMIT, RECOVER_LIMIT, REGISTER_LIMIT,
 };
 use crate::state::AppState;
 
@@ -38,6 +38,7 @@ pub fn router() -> Router<AppState> {
         .route("/me", axum::routing::get(me))
         .route("/password", patch(change_password))
         .route("/recovery-code", patch(regenerate_recovery_code))
+        .route("/recovery-code/confirm", post(confirm_recovery_code))
         .route("/sessions", axum::routing::get(list_sessions))
         .route("/sessions/{id}/revoke", post(revoke_session_route))
         .route("/account", axum::routing::delete(delete_account))
@@ -58,6 +59,10 @@ pub fn sensitive_router() -> Router<AppState> {
             "/requests/{id}/poll",
             post(super::requests::poll_auth_request),
         )
+        .route(
+            "/requests/{id}/reset",
+            post(super::requests::complete_reset),
+        )
 }
 
 /// Default Argon2id cost for a fresh `kdfParams`, returned for prelogin's
@@ -75,7 +80,7 @@ fn default_kdf_params() -> serde_json::Value {
 /// `authKey` (sent here) and `KEK` (never leaves the client). Rejects
 /// anything that isn't exactly 32 bytes of base64url — in particular, a
 /// raw password by mistake.
-fn validate_request_auth_key(auth_key: &str) -> AppResult<()> {
+pub(super) fn validate_request_auth_key(auth_key: &str) -> AppResult<()> {
     validate_auth_key(auth_key).map_err(|e| AppError::Validation(e.to_string()))
 }
 
@@ -455,6 +460,9 @@ struct MeResponse {
     kdf_salt: String,
     kdf_params: serde_json::Value,
     account_key_version: i32,
+    /// Whether the user has proved they hold the current recovery code
+    /// (docs/encryption.md §9.1). A flag, not a secret.
+    recovery_code_confirmed: bool,
 }
 
 /// Also returns the account's wrapped-key material (docs/encryption.md §2):
@@ -470,6 +478,12 @@ async fn me(user: AuthenticatedUser, State(state): State<AppState>) -> AppResult
     )
     .fetch_one(&state.db)
     .await?;
+    let recovery_code_confirmed = sqlx::query_scalar::<_, bool>(
+        "SELECT recovery_code_confirmed_at IS NOT NULL FROM users WHERE id = $1",
+    )
+    .bind(user.user_id)
+    .fetch_one(&state.db)
+    .await?;
 
     Ok(Json(MeResponse {
         user: UserPublic {
@@ -480,6 +494,7 @@ async fn me(user: AuthenticatedUser, State(state): State<AppState>) -> AppResult
         kdf_salt: row.kdf_salt,
         kdf_params: row.kdf_params,
         account_key_version: row.account_key_version,
+        recovery_code_confirmed,
     }))
 }
 
@@ -660,6 +675,11 @@ async fn regenerate_recovery_code(
     )
     .execute(&state.db)
     .await?;
+    // A new code is unconfirmed until the user types it back.
+    sqlx::query("UPDATE users SET recovery_code_confirmed_at = NULL WHERE id = $1")
+        .bind(user.user_id)
+        .execute(&state.db)
+        .await?;
 
     crate::audit::log(
         &state,
@@ -668,6 +688,59 @@ async fn regenerate_recovery_code(
         "recovery_code_regenerated",
     )
     .await;
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfirmRecoveryCodeRequest {
+    recovery_auth_key: String,
+}
+
+/// Records that the user holds the current recovery code: the dashboard
+/// derived `recoveryAuthKey` from what they typed back, and it must match the
+/// stored hash (compared in constant time). Sets a flag only; nothing new is
+/// stored. A wrong key, including a stale code, is a `401`.
+async fn confirm_recovery_code(
+    CsrfProtectedUser(user): CsrfProtectedUser,
+    State(state): State<AppState>,
+    Json(req): Json<ConfirmRecoveryCodeRequest>,
+) -> AppResult<Json<serde_json::Value>> {
+    enforce(
+        &state.rate_limiter,
+        RECOVERY_CONFIRM_LIMIT,
+        &user.user_id.to_string(),
+    )?;
+    validate_request_auth_key(&req.recovery_auth_key)?;
+
+    let hash =
+        sqlx::query_scalar::<_, String>("SELECT recovery_auth_hash FROM users WHERE id = $1")
+            .bind(user.user_id)
+            .fetch_one(&state.db)
+            .await?;
+    if !token_hash_matches(&req.recovery_auth_key, &hash) {
+        crate::audit::log(
+            &state,
+            Some(user.user_id),
+            None,
+            "recovery_code_confirm_failed",
+        )
+        .await;
+        return Err(AppError::Unauthorized);
+    }
+
+    // Matching on the hash keeps a confirm that raced a regeneration from
+    // marking the new code confirmed.
+    sqlx::query(
+        "UPDATE users SET recovery_code_confirmed_at = now() WHERE id = $1 AND recovery_auth_hash = $2",
+    )
+    .bind(user.user_id)
+    .bind(&hash)
+    .execute(&state.db)
+    .await?;
+
+    crate::audit::log(&state, Some(user.user_id), None, "recovery_code_confirmed").await;
 
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -823,6 +896,11 @@ async fn recover_complete(
     if updated.rows_affected() == 0 {
         return Err(AppError::Unauthorized);
     }
+    // The new code is unconfirmed until the user types it back.
+    sqlx::query("UPDATE users SET recovery_code_confirmed_at = NULL WHERE id = $1")
+        .bind(account.id)
+        .execute(&mut *tx)
+        .await?;
 
     let revoked_sessions = sqlx::query_scalar!(
         r#"

@@ -488,6 +488,20 @@ pub const RECOVERY_CODE_LIMIT: RateLimitConfig = RateLimitConfig {
     window: Duration::from_secs(60),
     partition: RateLimitPartition::Authenticated,
 };
+// Confirming the recovery code compares a hash (no Argon2). Keyed by user id.
+pub const RECOVERY_CONFIRM_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "recovery_confirm",
+    limit: 10,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
+// Finishing a two-device password reset runs Argon2 on the new auth key.
+pub const AUTH_REQUEST_RESET_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "auth_request_reset",
+    limit: 5,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Untrusted,
+};
 // Changing the password re-verifies the current password hash (Argon2).
 // Keyed by user id, like ACCOUNT_DELETE_LIMIT.
 pub const PASSWORD_CHANGE_LIMIT: RateLimitConfig = RateLimitConfig {
