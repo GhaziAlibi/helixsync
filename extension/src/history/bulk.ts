@@ -24,6 +24,7 @@ import {
   reserveSequenceBatch,
 } from "../storage/db";
 import { isBulkContainer } from "../sync/bulk-container";
+import { deflateRaw, inflateRaw, resetDeflateSupportForTesting, supportsDeflateRaw } from "../util/compression";
 import { uploadPending } from "../sync/engine";
 import type {
   BulkHistoryContainer,
@@ -48,30 +49,9 @@ export function setBulkSegmentVisitsForTesting(n: number): void {
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-// Compression is feature-detected, not version-gated: deflate-raw support in
-// a service worker at the minimum Chrome version (116) is unverified. Without
-// it the container simply omits `codec` and ships uncompressed.
-let deflateSupported: boolean | null = null;
-function supportsDeflateRaw(): boolean {
-  if (deflateSupported === null) {
-    deflateSupported = typeof CompressionStream !== "undefined" && typeof DecompressionStream !== "undefined";
-  }
-  return deflateSupported;
-}
-
-export function resetDeflateSupportForTesting(): void {
-  deflateSupported = null;
-}
-
-async function deflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
-  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new CompressionStream("deflate-raw"));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-async function inflateRaw(bytes: Uint8Array): Promise<Uint8Array> {
-  const stream = new Blob([bytes as BlobPart]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
+// Compression is feature-detected, not version-gated (see util/compression.ts):
+// without it the container simply omits `codec` and ships uncompressed.
+export { resetDeflateSupportForTesting };
 
 // A chunk upload can outlast the standard 30s sync timeout.
 export const BULK_UPLOAD_TIMEOUT_MS = 300_000;

@@ -61,7 +61,7 @@ const MAX_CONCURRENT_UPLOADS: usize = 16;
 
 /// Clients below the minimum protocol version can't write, but can still
 /// read (docs/protocol.md §13). The header is required.
-fn reject_if_protocol_too_old(headers: &HeaderMap, state: &AppState) -> AppResult<()> {
+pub(crate) fn reject_if_protocol_too_old(headers: &HeaderMap, state: &AppState) -> AppResult<()> {
     let version = headers
         .get(PROTOCOL_VERSION_HEADER)
         .and_then(|value| value.to_str().ok())

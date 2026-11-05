@@ -572,6 +572,33 @@ pub const SYNC_SETTINGS_LIMIT: RateLimitConfig = RateLimitConfig {
     partition: RateLimitPartition::Authenticated,
 };
 
+// Restore points (docs/protocol.md §16). Uploads and downloads are keyed by
+// device, the rest by `AnyAuthenticatedUser::rate_limit_key`.
+pub const RESTORE_POINT_UPLOAD_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "restore_point_upload",
+    limit: 30,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
+pub const RESTORE_POINT_DOWNLOAD_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "restore_point_download",
+    limit: 30,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
+pub const RESTORE_POINT_READ_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "restore_point_read",
+    limit: 60,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
+pub const RESTORE_POINT_WRITE_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "restore_point_write",
+    limit: 60,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
+
 /// Checks a rate limit and returns `AppError::RateLimited` (with retry
 /// time) if exceeded. Called from handlers since limits differ per route.
 pub fn enforce(limiter: &RateLimiter, config: RateLimitConfig, key: &str) -> Result<(), AppError> {

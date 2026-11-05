@@ -29,6 +29,11 @@ pub(super) struct SyncStats {
     /// The account's storage cap, so the dashboard can render usage
     /// relative to it without hardcoding the default.
     storage_limit_bytes: i64,
+    /// Restore points (docs/protocol.md §16) have their own budget, separate
+    /// from `storage_bytes`.
+    restore_point_count: i64,
+    restore_point_bytes: i64,
+    restore_point_limit_bytes: i64,
 }
 
 /// Sums `history_visit_hours` buckets at or after `cutoff`'s hour (`None` —
@@ -75,7 +80,7 @@ async fn history_visits_in_retention(db: &PgPool, user_id: Uuid) -> AppResult<i6
 /// Takes the per-user tag-1 advisory lock that serializes every
 /// `sync_stats` / `history_visit_hours` writer: upload (`process_batch`)
 /// and compaction's recount. Held until `tx` ends.
-pub(super) async fn lock_user_stats(
+pub(crate) async fn lock_user_stats(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
 ) -> AppResult<()> {
@@ -92,6 +97,11 @@ pub(super) async fn lock_user_stats(
 // never swept; its size is bounded by user count.
 static STATS_CACHE: LazyLock<DashMap<Uuid, (Instant, SyncStats)>> = LazyLock::new(DashMap::new);
 const STATS_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Drops a user's cached stats after a change the dashboard should see at once.
+pub(crate) fn invalidate_stats_cache(user_id: Uuid) {
+    STATS_CACHE.remove(&user_id);
+}
 
 /// Item counts for the dashboard, read from `sync_stats`
 /// (the `sync_stats` table in migrations/0001_init.sql) instead of rebuilding every object.
@@ -110,7 +120,7 @@ pub(super) async fn stats(
     enforce(&state.rate_limiter, SYNC_STATS_LIMIT, &user.rate_limit_key)?;
 
     let row = sqlx::query!(
-        "SELECT bookmark_count, tab_count, storage_bytes FROM sync_stats WHERE user_id = $1",
+        "SELECT bookmark_count, tab_count, storage_bytes, restore_point_bytes FROM sync_stats WHERE user_id = $1",
         user.user_id
     )
     .fetch_optional(&state.db)
@@ -120,10 +130,21 @@ pub(super) async fn stats(
 
     // No `sync_stats` row means no upload has ever changed a count or charged
     // storage for this account, so everything is zero.
-    let (bookmarks, tabs, storage_bytes) = match row {
-        Some(r) => (r.bookmark_count, r.tab_count, r.storage_bytes),
-        None => (0, 0, 0),
+    let (bookmarks, tabs, storage_bytes, restore_point_bytes) = match row {
+        Some(r) => (
+            r.bookmark_count,
+            r.tab_count,
+            r.storage_bytes,
+            r.restore_point_bytes,
+        ),
+        None => (0, 0, 0, 0),
     };
+    let restore_point_count = sqlx::query_scalar!(
+        r#"SELECT COUNT(*) AS "count!" FROM bookmark_restore_points WHERE user_id = $1"#,
+        user.user_id
+    )
+    .fetch_one(&state.db)
+    .await?;
     let history_visits = history_visits_in_retention(&state.db, user.user_id).await?;
     let stats = SyncStats {
         bookmarks,
@@ -131,6 +152,9 @@ pub(super) async fn stats(
         tabs,
         storage_bytes,
         storage_limit_bytes,
+        restore_point_count,
+        restore_point_bytes,
+        restore_point_limit_bytes: state.config.restore_points.max_account_bytes,
     };
 
     STATS_CACHE.insert(user.user_id, (Instant::now(), stats.clone()));

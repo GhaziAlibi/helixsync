@@ -75,6 +75,39 @@ pub struct Config {
     pub upload_semaphore_acquire_timeout_secs: u64,
     /// Max time graceful shutdown waits for requests to finish before exiting.
     pub shutdown_deadline_secs: u64,
+    /// Limits and retention for bookmark restore points (docs/protocol.md §16).
+    pub restore_points: RestorePointLimits,
+}
+
+/// Limits and retention for bookmark restore points. They have their own
+/// budget and never count against `max_account_storage_bytes`.
+#[derive(Debug, Clone)]
+pub struct RestorePointLimits {
+    /// Max size of one stored envelope.
+    pub max_bytes: i64,
+    /// Max total envelope bytes per account.
+    pub max_account_bytes: i64,
+    /// Max points per account, pinned included.
+    pub max_per_account: i64,
+    /// Max pinned points per account.
+    pub max_pinned: i64,
+    /// Unpinned points older than this are pruned; the newest is always kept.
+    pub retention_secs: i64,
+    /// A `scheduled` point is refused if the account has one newer than this.
+    pub scheduled_min_interval_secs: i64,
+}
+
+impl Default for RestorePointLimits {
+    fn default() -> Self {
+        Self {
+            max_bytes: 32 * 1024 * 1024,
+            max_account_bytes: 1024 * 1024 * 1024,
+            max_per_account: 50,
+            max_pinned: 10,
+            retention_secs: 60 * 60 * 24 * 90,
+            scheduled_min_interval_secs: 72_000,
+        }
+    }
 }
 
 // The parse_* helpers take the raw value instead of reading env vars, so
@@ -93,6 +126,22 @@ fn parse_nonnegative_secs(name: &str, raw: Option<&str>, default: i64) -> anyhow
                 return Err(anyhow::anyhow!("{name} must not be negative, got {parsed}"));
             }
             Ok(parsed)
+        }
+    }
+}
+
+/// Parses a number of days (positive) into seconds. `default` is in seconds.
+fn parse_retention_days_as_secs(
+    name: &str,
+    raw: Option<&str>,
+    default: i64,
+) -> anyhow::Result<i64> {
+    match raw {
+        None => Ok(default),
+        Some(v) => {
+            let days = parse_positive_i64(name, Some(v), 0)?;
+            days.checked_mul(60 * 60 * 24)
+                .ok_or_else(|| anyhow::anyhow!("{name} is too large"))
         }
     }
 }
@@ -404,6 +453,42 @@ impl Config {
         let shutdown_deadline_secs =
             env_parse("SHUTDOWN_DEADLINE_SECS", 30, parse_positive_interval_secs)?;
 
+        let restore_point_defaults = RestorePointLimits::default();
+        let restore_points = RestorePointLimits {
+            max_bytes: env_parse(
+                "RESTORE_POINT_MAX_BYTES",
+                restore_point_defaults.max_bytes,
+                parse_positive_i64,
+            )?
+            // `size_bytes` is an INT column.
+            .min(i64::from(i32::MAX)),
+            max_account_bytes: env_parse(
+                "RESTORE_POINT_MAX_ACCOUNT_BYTES",
+                restore_point_defaults.max_account_bytes,
+                parse_positive_i64,
+            )?,
+            max_per_account: env_parse(
+                "RESTORE_POINT_MAX_PER_ACCOUNT",
+                restore_point_defaults.max_per_account,
+                parse_positive_i64,
+            )?,
+            max_pinned: env_parse(
+                "RESTORE_POINT_MAX_PINNED",
+                restore_point_defaults.max_pinned,
+                parse_positive_i64,
+            )?,
+            retention_secs: env_parse(
+                "RESTORE_POINT_RETENTION_DAYS",
+                60 * 60 * 24 * 90,
+                parse_retention_days_as_secs,
+            )?,
+            scheduled_min_interval_secs: env_parse(
+                "RESTORE_POINT_SCHEDULED_MIN_INTERVAL_SECS",
+                restore_point_defaults.scheduled_min_interval_secs,
+                parse_nonnegative_secs,
+            )?,
+        };
+
         Ok(Self {
             database_url,
             bind_addr,
@@ -434,6 +519,7 @@ impl Config {
             websocket_send_timeout_secs,
             upload_semaphore_acquire_timeout_secs,
             shutdown_deadline_secs,
+            restore_points,
         })
     }
 }

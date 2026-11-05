@@ -414,6 +414,8 @@ export interface UserSettingsDto {
   tabRestorePolicy: "disabled" | "ask" | "automatic";
   historyRetention: "7d" | "30d" | "90d" | "1y" | "unlimited";
   requireEncryption: boolean;
+  /** Missing on a server without restore points; read as on. */
+  restorePointsAutomatic?: boolean;
 }
 
 type TabRestorePolicy = UserSettingsDto["tabRestorePolicy"];
@@ -538,7 +540,7 @@ export async function fetchTabRestorePolicy(): Promise<TabRestorePolicy> {
 export type UpdateSettingsRequest = Partial<
   Pick<
     UserSettingsDto,
-    "syncBookmarks" | "syncHistory" | "syncTabs" | "syncTabGroups" | "syncExtensions" | "tabRestorePolicy" | "historyRetention"
+    "syncBookmarks" | "syncHistory" | "syncTabs" | "syncTabGroups" | "syncExtensions" | "tabRestorePolicy" | "historyRetention" | "restorePointsAutomatic"
   >
 >;
 
@@ -556,4 +558,133 @@ export async function updateSettings(patch: UpdateSettingsRequest): Promise<User
   await settingsCache.store(settings);
   await policyCache.store(settings.tabRestorePolicy);
   return settings;
+}
+
+// --- Restore points (docs/protocol.md §16) ---
+
+export type RestorePointKind = "manual" | "scheduled" | "pre_restore" | "pre_import" | "pre_resync" | "mass_delete";
+
+export interface RestorePointMeta {
+  id: string;
+  kind: RestorePointKind;
+  bookmarkCount: number;
+  encryptionVersion: number;
+  codec: "deflate-raw" | null;
+  sizeBytes: number;
+  pinned: boolean;
+  createdAt: string;
+  lastRestoredAt: string | null;
+  deviceId: string | null;
+  deviceName: string | null;
+}
+
+export interface RestorePointDownload extends RestorePointMeta {
+  envelope: unknown;
+}
+
+export interface RestorePointUpload {
+  id: string;
+  kind: RestorePointKind;
+  bookmarkCount: number;
+  encryptionVersion: number;
+  codec?: "deflate-raw";
+  envelope: unknown;
+}
+
+/** A big point is one request, so it gets more than the standard timeout. */
+export const RESTORE_POINT_TRANSFER_TIMEOUT_MS = 120_000;
+
+let restorePointsSupportCache: { serverUrl: string; supported: boolean; at: number } | undefined;
+const RESTORE_POINTS_SUPPORT_TTL_MS = 10 * 60_000;
+
+/** Whether the server reports restore points in `/version`; an older server
+ * omits the field. Cached for a few minutes; a failed lookup reads as
+ * unsupported without being cached. */
+export async function serverSupportsRestorePoints(): Promise<boolean> {
+  const device = await getDevice();
+  if (!device) return false;
+  const cached = restorePointsSupportCache;
+  if (cached && cached.serverUrl === device.serverUrl && Date.now() - cached.at < RESTORE_POINTS_SUPPORT_TTL_MS) {
+    return cached.supported;
+  }
+  try {
+    const res = await fetchWithTimeout(`${device.serverUrl}/api/v1/version`);
+    if (!res.ok) return false;
+    const body = (await res.json()) as { restorePoints?: unknown };
+    const supported = body.restorePoints === true;
+    restorePointsSupportCache = { serverUrl: device.serverUrl, supported, at: Date.now() };
+    return supported;
+  } catch {
+    return false;
+  }
+}
+
+export function resetRestorePointsSupportCache(): void {
+  restorePointsSupportCache = undefined;
+}
+
+export async function listRestorePoints(): Promise<RestorePointMeta[]> {
+  const res = await authedFetch("/api/v1/restore-points");
+  if (!res.ok) {
+    throw await buildApiError(res, `listing restore points failed (${res.status})`);
+  }
+  return ((await res.json()) as { points: RestorePointMeta[] }).points;
+}
+
+export async function uploadRestorePoint(point: RestorePointUpload): Promise<RestorePointMeta> {
+  const res = await authedFetch(
+    "/api/v1/restore-points",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(point),
+    },
+    RESTORE_POINT_TRANSFER_TIMEOUT_MS,
+  );
+  if (!res.ok) {
+    throw await buildApiError(res, `restore point upload failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function downloadRestorePoint(id: string): Promise<RestorePointDownload> {
+  const res = await authedFetch(
+    `/api/v1/restore-points/${encodeURIComponent(id)}`,
+    {},
+    RESTORE_POINT_TRANSFER_TIMEOUT_MS,
+  );
+  if (!res.ok) {
+    throw await buildApiError(res, `restore point download failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function setRestorePointPinned(id: string, pinned: boolean): Promise<RestorePointMeta> {
+  const res = await authedFetch(`/api/v1/restore-points/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pinned }),
+  });
+  if (!res.ok) {
+    throw await buildApiError(res, `updating the restore point failed (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function deleteRestorePoint(id: string): Promise<void> {
+  const res = await authedFetch(`/api/v1/restore-points/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) {
+    throw await buildApiError(res, `deleting the restore point failed (${res.status})`);
+  }
+}
+
+export async function reportRestoreApplied(id: string, mode: "merge" | "exact", partial: boolean): Promise<void> {
+  const res = await authedFetch(`/api/v1/restore-points/${encodeURIComponent(id)}/applied`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode, partial }),
+  });
+  if (!res.ok) {
+    throw await buildApiError(res, `reporting the restore failed (${res.status})`);
+  }
 }

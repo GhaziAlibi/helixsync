@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import * as api from "../api/client";
+import { formatBytes } from "../util/format-bytes";
 
 function timeAgo(iso: string | null): string {
   if (!iso) return "never";
@@ -21,18 +22,6 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
       {sub && <div className="text-xs text-slate-400 mt-1">{sub}</div>}
     </div>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = bytes / 1024;
-  let unitIndex = 0;
-  while (value >= 1024 && unitIndex < units.length - 1) {
-    value /= 1024;
-    unitIndex++;
-  }
-  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }
 
 function StorageCard({ usedBytes, limitBytes }: { usedBytes: number; limitBytes: number }) {

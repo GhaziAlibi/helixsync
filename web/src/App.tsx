@@ -6,6 +6,7 @@ import Login from "./pages/Login";
 import Recover from "./pages/Recover";
 import Dashboard from "./pages/Dashboard";
 import Devices from "./pages/Devices";
+import RestorePoints from "./pages/RestorePoints";
 import Sync from "./pages/Sync";
 import Security from "./pages/Security";
 
@@ -26,6 +27,7 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/devices" element={<Devices />} />
             <Route path="/sync" element={<Sync />} />
+            <Route path="/restore-points" element={<RestorePoints />} />
             <Route path="/security" element={<Security />} />
           </Route>
         </Routes>

@@ -55,7 +55,7 @@ to try the images or the Compose stack.
    `cargo test`:
 
    ```bash
-   psql "$DATABASE_URL" -f migrations/0001_init.sql    # or: sqlx migrate run
+   for f in migrations/*.sql; do psql "$DATABASE_URL" -f "$f"; done    # or: sqlx migrate run
    ```
 
    (`export DATABASE_URL=...` first, with the same URL as in `.env`.)
@@ -88,11 +88,12 @@ Queries in `server/tests/` use the live database and are deliberately not cached
 
 #### Schema changes
 
-The whole schema is `server/migrations/0001_init.sql`. Change that file in
-place; don't add a second numbered migration. Then regenerate `server/.sqlx/`
-as above. SQLx records a checksum of each applied migration and the server
-refuses to start when it no longer matches, so recreate your local database
-after a schema change.
+Migrations are append-only: the app is live, so never edit an applied
+migration. Add the next numbered file in `server/migrations/` (for example
+`0003_….sql`), keep it additive and backward compatible, then regenerate
+`server/.sqlx/` as above. SQLx records a checksum of each applied migration and
+the server refuses to start when it no longer matches, so editing an old one
+breaks every existing database.
 
 ### Extension
 

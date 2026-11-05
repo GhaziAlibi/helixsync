@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM bookmark_restore_points\n               WHERE (user_id, id) = (\n                   SELECT user_id, id FROM bookmark_restore_points\n                   WHERE user_id = $1 AND NOT pinned AND id <> $2\n                   ORDER BY (kind = 'manual') ASC, created_at ASC, id ASC\n                   LIMIT 1\n               )\n               RETURNING size_bytes",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "size_bytes",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "71938da627009de385fbc7aac80ab196914b8e882788e0e07c2b299a88e64c7a"
+}

@@ -55,6 +55,7 @@ import {
   registerCapture as registerBookmarkCapture,
   setBookmarkCaptureEnabled,
   setLinkExistingBookmarks,
+  sweepStaleBookmarkMappingsOnce,
 } from "../bookmarks";
 import {
   backfillExisting as backfillHistory,
@@ -62,6 +63,17 @@ import {
   registerCapture as registerHistoryCapture,
   setHistoryCaptureEnabled,
 } from "../history";
+import {
+  createPreImportPoint,
+  drainRestorePointOutbox,
+  clearRestorePointTriggerState,
+  ensureRestorePointAlarm,
+  installRestorePointTriggers,
+  RESTORE_POINT_ALARM,
+  runScheduledRestorePoint,
+} from "../restore-points/triggers";
+import { resumeInterruptedRestore, clearLoadedRestorePoint } from "../restore-points/restore";
+import * as restorePointService from "../restore-points/service";
 import {
   flushPendingTitleDebounces,
   registerCapture as registerTabCapture,
@@ -216,6 +228,10 @@ async function runInitialImport(device: DeviceRecord): Promise<void> {
         setLinkExistingBookmarks(false);
       }
       console.log("HelixSync: account download before import returned", { elapsedMs: Date.now() - importStartedAt });
+      // The account's own bookmarks are in; this browser's are not uploaded
+      // yet. If the two differ, a point of the account's state is the way
+      // back from what the import adds.
+      await createPreImportPoint();
       // Sequential: both saturate the same thread, so running them together
       // only doubles peak memory.
       await backfillBookmarks();
@@ -353,17 +369,22 @@ async function runPeriodicSync(): Promise<void> {
     await runMaintenanceIfDue().catch((e) =>
       console.error("HelixSync: storage maintenance failed", e),
     );
+    await drainRestorePointOutbox();
   } catch (e) {
     console.error("HelixSync: periodic sync failed", e);
   }
 }
 
+installRestorePointTriggers();
+
 chrome.runtime.onInstalled.addListener(() => {
   ensureSyncAlarm();
+  ensureRestorePointAlarm();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureSyncAlarm();
+  ensureRestorePointAlarm();
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -371,6 +392,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   // doubles as the WebSocket reconnect backstop.
   if (alarm.name === SYNC_ALARM) {
     void runPeriodicSync();
+  } else if (alarm.name === RESTORE_POINT_ALARM) {
+    void runScheduledRestorePoint().catch((e) => console.error("HelixSync: scheduled restore point failed", e));
   }
 });
 
@@ -396,7 +419,15 @@ type PopupMessage =
   | { type: "GET_STATUS" }
   | { type: "REFRESH_CAPTURE_CONFIG" }
   | { type: "IMPORT_OLDER_HISTORY" }
-  | { type: "DEVICE_DISCONNECTED" };
+  | { type: "DEVICE_DISCONNECTED" }
+  | { type: "LIST_RESTORE_POINTS" }
+  | { type: "CREATE_RESTORE_POINT" }
+  | { type: "GET_RESTORE_POINT_TREE"; pointId: string }
+  | { type: "PREVIEW_RESTORE"; pointId: string; mode: "merge" | "exact"; scope: string }
+  | { type: "START_RESTORE"; pointId: string; mode: "merge" | "exact"; scope: string }
+  | { type: "GET_RESTORE_PROGRESS" }
+  | { type: "SET_RESTORE_POINT_PINNED"; pointId: string; pinned: boolean }
+  | { type: "DELETE_RESTORE_POINT"; pointId: string };
 
 async function handleMessage(message: PopupMessage | undefined): Promise<unknown> {
   switch (message?.type) {
@@ -436,9 +467,27 @@ async function handleMessage(message: PopupMessage | undefined): Promise<unknown
       void runOlderHistoryImport();
       return { ok: true };
     }
+    case "LIST_RESTORE_POINTS":
+      return restorePointService.listForPopup();
+    case "CREATE_RESTORE_POINT":
+      return restorePointService.createManual();
+    case "GET_RESTORE_POINT_TREE":
+      return restorePointService.folderTree(message.pointId);
+    case "PREVIEW_RESTORE":
+      return restorePointService.preview({ pointId: message.pointId, mode: message.mode, scope: message.scope });
+    case "START_RESTORE":
+      return restorePointService.start({ pointId: message.pointId, mode: message.mode, scope: message.scope });
+    case "GET_RESTORE_PROGRESS":
+      return restorePointService.progress();
+    case "SET_RESTORE_POINT_PINNED":
+      return restorePointService.pin(message.pointId, message.pinned);
+    case "DELETE_RESTORE_POINT":
+      return restorePointService.remove(message.pointId);
     case "DEVICE_DISCONNECTED": {
       await disconnectWebSocket();
       await clearSyncBlockedState();
+      await clearRestorePointTriggerState();
+      clearLoadedRestorePoint();
       // The popup already wiped IndexedDB from its own connection; wiping
       // here too keeps disconnect complete even if that raced or failed.
       await clearAllLocalData();
@@ -475,5 +524,13 @@ resetInFlightOperations().catch((e) =>
 
 ensureCryptoReady()
   .then(initializeCaptureForSettings)
+  .then(async () => {
+    const device = await getDevice();
+    if (!device?.initialImportCompletedAt) return;
+    // Once per browser: mappings of nodes a deleted folder took with it.
+    await sweepStaleBookmarkMappingsOnce().catch((e) => console.error("HelixSync: bookmark mapping sweep failed", e));
+    await resumeInterruptedRestore().catch((e) => console.error("HelixSync: could not resume the restore", e));
+    await drainRestorePointOutbox();
+  })
   .then(() => updateBadge())
   .catch((e) => console.error("HelixSync: startup failed", e));

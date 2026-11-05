@@ -59,6 +59,8 @@ Rust + Axum + Tokio + SQLx + PostgreSQL. Modules:
   revocation, listing and rename.
 - `sync/` — operation upload/download, cursors, conflict resolution,
   snapshots, tombstone/compaction policy, statistics and per-account settings.
+- `restore_points/` — storage, listing, pinning and eviction of encrypted
+  bookmark restore points (opaque blobs; the server never reads them).
 - `websocket/` — notification-only change-available broadcast.
 - `crypto/` — server-side primitives only (Argon2id hashing, HMAC/token
   signing); never handles E2E payload plaintext.
@@ -66,7 +68,8 @@ Rust + Axum + Tokio + SQLx + PostgreSQL. Modules:
 - `database/` — connection pool and the migrations runner.
 - `audit.rs` — security-event audit log.
 - `housekeeping.rs` — periodic cleanup of expired credentials and web sessions,
-  old audit rows, ephemeral tombstones and stale history buckets.
+  old audit rows, ephemeral tombstones, stale history buckets and expired
+  restore points.
 - `config.rs` — environment-driven configuration (validated at startup).
 
 Background tasks run inside the server process: operation/tombstone
@@ -78,7 +81,9 @@ request timeouts and response compression are layered in `lib.rs`.
 TypeScript + Manifest V3 + Vite. Modules mirror the protocol's domains:
 `background/` (service worker orchestration, alarms-based sync scheduling),
 `sync/` (queue, cursor, conflict application), `bookmarks/`, `history/`,
-`tabs/` (tabs, windows and tab groups), `storage/` (IndexedDB access layer),
+`tabs/` (tabs, windows and tab groups), `restore-points/` (building,
+encrypting, planning and applying bookmark restore points), `storage/`
+(IndexedDB access layer),
 `crypto/` (key derivation and XChaCha20-Poly1305 E2E encryption), `api/` (typed
 REST and WebSocket client), `popup/` (the extension's whole UI, including
 settings) and `util/`.
@@ -86,7 +91,7 @@ settings) and `util/`.
 ### Web (`web/`)
 
 React + TypeScript + Vite + Tailwind. Pages: login, dashboard, devices,
-sync settings, security. Talks to the same `/api/v1` REST surface as the
+sync settings, restore points, security. Talks to the same `/api/v1` REST surface as the
 extension, using cookie-based web sessions instead of device credentials. Key
 derivation happens in the browser (`web/src/crypto/`), so the password never
 reaches the server.
@@ -105,7 +110,8 @@ One PostgreSQL database; the schema is `server/migrations/`.
 | `sync_snapshots` | Compressed merged state used to bring a device up to date |
 | `sync_objects` | A permanent ledger of which account originated which object |
 | `tombstones` | Records of deleted objects |
-| `sync_stats`, `history_visit_hours` | Per-account counts and hourly visit-count buckets for the dashboard |
+| `sync_stats`, `history_visit_hours` | Per-account counts, restore point bytes, and hourly visit-count buckets for the dashboard |
+| `bookmark_restore_points` | Encrypted, opaque snapshots of an account's bookmark tree, with kind, size, count and pinned flag ([`protocol.md`](protocol.md) §16); their byte total lives in `sync_stats.restore_point_bytes` |
 | `audit_logs` | Security-relevant events |
 
 Deleting a `users` row cascades to everything except `audit_logs`, whose rows

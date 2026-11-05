@@ -8,6 +8,7 @@ pub mod devices;
 pub mod error;
 pub mod housekeeping;
 pub mod middleware;
+pub mod restore_points;
 pub mod state;
 pub mod sync;
 pub mod websocket;
@@ -54,6 +55,10 @@ pub fn app(state: AppState) -> Router {
         .nest("/auth", auth::routes::router())
         .nest("/devices", devices::routes::router())
         .nest("/sync", sync::routes::router())
+        .nest(
+            "/restore-points",
+            restore_points::routes::router(state.config.restore_points.max_bytes),
+        )
         .route("/ws", get(websocket::ws_handler))
         .route("/version", get(version))
         // Snapshots can be 20-60MB of JSON.
@@ -125,5 +130,6 @@ async fn version(State(state): State<AppState>) -> Json<serde_json::Value> {
         "protocolVersion": state.config.protocol_version,
         "minimumSupportedProtocolVersion": state.config.minimum_supported_protocol_version,
         "registrationEnabled": state.config.allow_registration,
+        "restorePoints": true,
     }))
 }

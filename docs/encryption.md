@@ -425,6 +425,39 @@ e.g. if bulk import segments are ever mixed with attacker-influenced
 content, or become observable adaptively many times against the same
 underlying secret.
 
+### 6.3 Restore points
+
+A bookmark restore point (`docs/protocol.md` §16) is one §6 envelope under the
+current SDEK. Its plaintext is the whole bookmark tree as JSON, compressed
+with `deflate-raw` first when the device supports it, and the envelope's AAD is
+
+```text
+["bookmarkRestorePoint", "<pointId>", "snapshot"]
+```
+
+`bookmarkRestorePoint` is not an object type, so a point can never be replayed
+as an operation payload (or an operation as a point): the AAD would not match.
+The `pointId` is a client-generated UUIDv7, which stops the server from
+presenting one point's blob as another. The envelope format is unchanged
+(`v: 2`).
+
+**What the server sees.** The point's id, account, device, kind, creation
+time, envelope size, bookmark count (it already knows this one, from
+`sync_stats`), pinned flag and codec. Titles, URLs, folder structure and
+positions are inside the ciphertext. As with §6.2, compressing before
+encrypting makes the envelope's length reflect how compressible the tree is,
+and size and timing over successive points reveal roughly how large the tree
+is and how fast it grows; this adds little to the volume leak that already
+exists and, as in §6.2, there is no adaptive oracle: the compressed unit is
+the user's own tree and nothing attacker-chosen is mixed into it. The hash
+the extension uses to skip an unchanged daily point stays on the device: a
+server-side hash would reveal "unchanged since".
+
+**Key rotation.** Points are encrypted under the key version current when
+they were made. If key rotation (§4) is ever implemented it has to re-encrypt
+stored points, or keep the old SDEKs, or old points become unreadable; that
+belongs to that design.
+
 ---
 
 ## 7. Server Enforcement

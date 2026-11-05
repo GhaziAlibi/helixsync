@@ -8,6 +8,19 @@ All notable changes to HelixSync are documented here. The format follows
 
 ### Added
 
+- Bookmark restore points: timestamped, encrypted snapshots of your bookmarks
+  that you can roll back to, in full or for one folder, either by merging
+  (bring back what is missing, undo edits, delete nothing) or exactly (also
+  remove bookmarks the point doesn't have). Points are made on demand, daily,
+  and before a restore, a first import, a full resync, or a large deletion;
+  unpinned ones are removed oldest first when space runs out, and after 90
+  days; only pinned ones are kept for good. They are managed from the extension
+  popup and the dashboard's new Restore points page; the server only ever
+  holds ciphertext. New server settings: `RESTORE_POINT_MAX_BYTES` (capped at 2 GiB − 1),
+  `RESTORE_POINT_MAX_ACCOUNT_BYTES`, `RESTORE_POINT_MAX_PER_ACCOUNT`,
+  `RESTORE_POINT_MAX_PINNED`, `RESTORE_POINT_RETENTION_DAYS` and
+  `RESTORE_POINT_SCHEDULED_MIN_INTERVAL_SECS`. The server adds migration
+  `0002_restore_points.sql`; it is additive and runs automatically.
 - Bookmark sync on Chromium-based browsers for Android, such as Bare. Android
   hides an empty Bookmarks bar and Other bookmarks from extensions, and
   desktop hides an empty Mobile bookmarks, so the extension keeps a folder
@@ -17,6 +30,12 @@ All notable changes to HelixSync are documented here. The format follows
 
 ### Fixed
 
+- Deleting a bookmark folder left the bookmarks inside it linked to nodes that
+  no longer existed, so restoring one of them from another device created
+  nothing. A deleted folder now releases everything inside it, and a restored
+  bookmark is created even when an older link to a deleted node is left. A
+  device that predates this fix still has the old problem until it is updated:
+  it won't re-create the children of a restored folder.
 - Connecting a browser that already has some of the account's bookmarks,
   including disconnecting and reconnecting the same browser, no longer
   duplicates them on every device: the extension downloads the account

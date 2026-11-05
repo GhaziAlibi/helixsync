@@ -46,8 +46,15 @@ The server you configure stores the following in its PostgreSQL database:
   them, unencrypted, so the server can order and store them: the type and random
   identifier of each object, the kind of change, timestamps and sizes, and the
   number of history visits per hour (counts only, never URLs or titles).
-- **Settings:** which data you sync, your tab restore policy and your history
-  retention.
+- **Restore points:** encrypted copies of your bookmark tree that your browsers
+  save so you can roll back (daily, before a restore, and in a few other
+  situations; you can also make them yourself). The server cannot read them. It
+  stores beside each one, unencrypted, when it was made, by which device, what
+  kind it is, its size, the number of bookmarks and whether you pinned it.
+  Unpinned ones are deleted after 90 days by default
+  (`RESTORE_POINT_RETENTION_DAYS`), and you can delete any of them yourself.
+- **Settings:** which data you sync, your tab restore policy, your history
+  retention and whether automatic restore points are on.
 - **Audit log:** security events such as sign-ins, device changes and password
   changes, linked to your account and device. Entries are kept for 90 days by
   default (`AUDIT_LOG_RETENTION_SECS`).

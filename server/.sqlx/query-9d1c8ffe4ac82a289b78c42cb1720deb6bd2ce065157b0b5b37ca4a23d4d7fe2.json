@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bookmark_restore_points SET pinned = $3 WHERE user_id = $1 AND id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9d1c8ffe4ac82a289b78c42cb1720deb6bd2ce065157b0b5b37ca4a23d4d7fe2"
+}

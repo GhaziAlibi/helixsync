@@ -6,6 +6,7 @@ import {
   updateSettings,
   invalidateSettingsCache,
   revokeThisDevice,
+  serverSupportsRestorePoints,
   createAuthRequest,
   pollAuthRequest,
   listAuthRequests,
@@ -39,6 +40,7 @@ import {
 } from "../crypto";
 import { retentionCutoffMs } from "../util/retention";
 import { assertSecureServerUrl, InsecureServerUrlError } from "./serverUrl";
+import { renderRestorePointsView } from "./restore-points";
 
 /** The https origin and its wss counterpart (for the WebSocket channel),
  * requested together so the user is prompted only once. */
@@ -53,7 +55,7 @@ const headerActions = document.getElementById("header-actions")!;
 
 // The popup is the extension's only UI; "settings" is reached from "status"
 // through the header gear.
-type ConnectedView = "status" | "settings";
+type ConnectedView = "status" | "settings" | "restorePoints";
 let connectedView: ConnectedView = "status";
 
 // Registration happens server-side before the slow key derivation finishes,
@@ -123,13 +125,17 @@ async function clearPasswordDraft(): Promise<void> {
 }
 
 const SYNC_TOGGLE_IDS = ["syncBookmarks", "syncHistory", "syncTabs", "syncTabGroups"] as const;
+// Absent on a server without restore points, so the row is hidden then.
+const RESTORE_POINTS_TOGGLE_ID = "restorePointsAutomatic";
 // Optional in the manifest: asked for only when tab group sync is turned on.
 const TAB_GROUPS_PERMISSION: chrome.permissions.Permissions = { permissions: ["tabGroups"] };
 type SyncToggleId = (typeof SYNC_TOGGLE_IDS)[number];
 const SETTINGS_SELECT_IDS = ["tabRestorePolicy", "historyRetention"] as const;
 
-type SettingsForm = Pick<UserSettingsDto, SyncToggleId | "tabRestorePolicy" | "historyRetention">;
-type SettingsDraft = Partial<Record<SyncToggleId, boolean> & Record<"tabRestorePolicy" | "historyRetention", string>>;
+type SettingsForm = Pick<UserSettingsDto, SyncToggleId | "tabRestorePolicy" | "historyRetention" | "restorePointsAutomatic">;
+type SettingsDraft = Partial<
+  Record<SyncToggleId | "restorePointsAutomatic", boolean> & Record<"tabRestorePolicy" | "historyRetention", string>
+>;
 
 async function loadDraft<T>(key: string): Promise<T | undefined> {
   const result = await chrome.storage.local.get(key);
@@ -200,7 +206,7 @@ function escapeAttr(value: string): string {
 
 // window.confirm() ignores the popup's fixed width and can clip its buttons
 // out of reach, so the dialog is rendered inside the popup instead.
-function showConfirmDialog(message: string): Promise<boolean> {
+function showConfirmDialog(message: string, confirmLabel = "Disconnect"): Promise<boolean> {
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
@@ -209,7 +215,7 @@ function showConfirmDialog(message: string): Promise<boolean> {
         <p>${escapeAttr(message)}</p>
         <div class="modal-actions">
           <button class="ghost" id="modal-cancel">Cancel</button>
-          <button class="danger" id="modal-confirm">Disconnect</button>
+          <button class="danger" id="modal-confirm">${escapeAttr(confirmLabel)}</button>
         </div>
       </div>
     `;
@@ -226,6 +232,8 @@ function showConfirmDialog(message: string): Promise<boolean> {
 
 const GEAR_ICON =
   '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82A1.65 1.65 0 0 0 3 9.09H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 4.6a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>';
+const HISTORY_ICON =
+  '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 7v5l3 2"/></svg>';
 const BACK_ICON =
   '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>';
 
@@ -396,6 +404,9 @@ async function render(): Promise<void> {
   }
   if (connectedView === "settings") {
     await renderSettings(device);
+  } else if (connectedView === "restorePoints") {
+    renderHeaderButton("back-to-status", "Back", BACK_ICON, "status");
+    await renderRestorePointsView(app, { rerender: render, confirm: showConfirmDialog });
   } else {
     await renderStatusView(device);
   }
@@ -865,21 +876,43 @@ async function finishConnect(
 }
 
 function renderHeaderButton(id: string, title: string, icon: string, targetView: ConnectedView): void {
-  headerActions.innerHTML = `<button class="icon-button" id="${id}" title="${title}">${icon}</button>`;
-  document.getElementById(id)?.addEventListener("click", async () => {
-    connectedView = targetView;
-    await render();
-  });
+  renderHeaderButtons([{ id, title, icon, targetView }]);
+}
+
+function renderHeaderButtons(buttons: Array<{ id: string; title: string; icon: string; targetView: ConnectedView }>): void {
+  headerActions.innerHTML = buttons
+    .map(({ id, title, icon }) => `<button class="icon-button" id="${id}" title="${title}">${icon}</button>`)
+    .join("");
+  for (const { id, targetView } of buttons) {
+    document.getElementById(id)?.addEventListener("click", async () => {
+      connectedView = targetView;
+      await render();
+    });
+  }
 }
 
 async function renderStatusView(device: DeviceRecord): Promise<void> {
   renderHeaderButton("open-settings", "Settings", GEAR_ICON, "settings");
 
-  const [response, settings, authRequests] = await Promise.all([
+  const [response, settings, authRequests, restorePointsSupported] = await Promise.all([
     chrome.runtime.sendMessage({ type: "GET_STATUS" }),
     fetchSettings().catch(() => undefined),
     listAuthRequests().catch((): PendingAuthRequest[] => []),
+    serverSupportsRestorePoints().catch(() => false),
   ]);
+
+  // Restore points need bookmark sync, a finished first import and a server
+  // that has them; without those the button isn't shown at all.
+  if (
+    device.initialImportCompletedAt &&
+    settings?.syncBookmarks !== false &&
+    restorePointsSupported
+  ) {
+    renderHeaderButtons([
+      { id: "open-restore-points", title: "Restore points", icon: HISTORY_ICON, targetView: "restorePoints" },
+      { id: "open-settings", title: "Settings", icon: GEAR_ICON, targetView: "settings" },
+    ]);
+  }
 
   app.innerHTML = `
     <div class="status-card">
@@ -1077,6 +1110,9 @@ function readSettingsForm(): SettingsForm {
     syncTabGroups: inputById("syncTabGroups").checked,
     tabRestorePolicy: selectById("tabRestorePolicy").value as SettingsForm["tabRestorePolicy"],
     historyRetention: selectById("historyRetention").value as SettingsForm["historyRetention"],
+    ...(document.getElementById("restore-points-row")?.hidden === false
+      ? { restorePointsAutomatic: inputById(RESTORE_POINTS_TOGGLE_ID).checked }
+      : {}),
   };
 }
 
@@ -1088,6 +1124,11 @@ function fillSettingsForm(settings: UserSettingsDto, draft: SettingsDraft): void
   }
   for (const id of SETTINGS_SELECT_IDS) {
     selectById(id).value = draft[id] ?? settings[id];
+  }
+  const row = document.getElementById("restore-points-row");
+  if (row && settings.restorePointsAutomatic !== undefined) {
+    row.hidden = false;
+    inputById(RESTORE_POINTS_TOGGLE_ID).checked = draft.restorePointsAutomatic ?? settings.restorePointsAutomatic;
   }
 }
 
@@ -1137,6 +1178,13 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
           <option value="unlimited">Unlimited</option>
         </select>
       </label>
+    </fieldset>
+    <fieldset>
+      <legend>Restore points</legend>
+      <div class="row" id="restore-points-row" hidden><span class="row-label">Automatic restore points</span>
+        <label class="switch"><input type="checkbox" id="restorePointsAutomatic" /><span class="track"></span></label>
+      </div>
+      <div class="item-meta">Daily and safety copies of your bookmarks. Manual ones are always available.</div>
     </fieldset>
     <fieldset>
       <legend>Account</legend>
@@ -1201,7 +1249,7 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
   const persistSettingsDraft = () => {
     saveDraftDebounced<SettingsDraft>(SETTINGS_DRAFT_KEY, readSettingsForm());
   };
-  for (const id of [...SYNC_TOGGLE_IDS, ...SETTINGS_SELECT_IDS]) {
+  for (const id of [...SYNC_TOGGLE_IDS, ...SETTINGS_SELECT_IDS, RESTORE_POINTS_TOGGLE_ID]) {
     document.getElementById(id)?.addEventListener("change", persistSettingsDraft);
   }
 

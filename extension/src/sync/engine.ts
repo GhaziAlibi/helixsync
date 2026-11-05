@@ -19,14 +19,18 @@ import {
   markUploadInFlightRecords,
   updateSyncState,
   removeFromQueue,
+  replaceQueuedOperations,
   requeueInFlightRecords,
   reserveSequenceBatch,
   tickLamportClock,
+  type PendingOperationRecord,
 } from "../storage/db";
+import { recordLocalFieldStatesBatch } from "./conflict";
 import { ApiError, downloadChanges, fetchSnapshot, uploadOperations } from "../api/client";
 import { isConnected as isWebSocketConnected } from "../api/websocket";
 import { isBulkContainer } from "./bulk-container";
 import type {
+  BookmarkPayload,
   LocalOperation,
   ObjectType,
   OperationOut,
@@ -203,6 +207,86 @@ export function classifyRejections(rejected: UploadRejection[]): {
   return { toRequeue, toRemove };
 }
 
+function isBookmarkRestore(op: LocalOperation): boolean {
+  return op.operationType === "restore" && (op.objectType === "bookmark" || op.objectType === "bookmarkFolder");
+}
+
+/** Re-sends rejected `restore` operations as `create` operations for the same
+ * objectId and payload. `restore` is not an origination operation, so the
+ * server rejects it for an object it has no record of (a restore point can
+ * hold a bookmark the account never uploaded, e.g. one captured by a
+ * `pre_import` point). The server never knew the object, so there is no
+ * tombstone to clear and a create is the right operation. The replacement
+ * gets a new operation id, device sequence and Lamport value, and its field
+ * state is recorded under the new key. */
+async function reissueRestoresAsCreate(records: PendingOperationRecord[]): Promise<void> {
+  const device = await getDevice();
+  if (!device) return;
+  const resolveSdek = createSdekResolver(device.accountKey);
+  const sdek = await getSdek(device.accountKey, device.accountKeyVersion);
+
+  const decoded: Array<{ record: PendingOperationRecord; payload: BookmarkPayload }> = [];
+  const unreadable: string[] = [];
+  for (const record of records) {
+    const { operation } = record;
+    try {
+      const envelope = operation.payload as Parameters<typeof decryptWithSdek>[0];
+      const payload = decryptWithSdek(
+        envelope,
+        await resolveSdek(envelope.keyVersion),
+        buildOperationAad(operation.objectType, operation.objectId, "restore"),
+      ) as BookmarkPayload;
+      decoded.push({ record, payload });
+    } catch (err) {
+      console.error("HelixSync: dropping a restore that cannot be re-issued", operation.operationId, err);
+      unreadable.push(operation.operationId);
+    }
+  }
+  if (decoded.length === 0) {
+    await removeFromQueue(unreadable);
+    return;
+  }
+
+  const { startDeviceSequence, startLamport } = await reserveSequenceBatch(decoded.length);
+  const replacements: LocalOperation[] = decoded.map(({ record, payload }, i) => ({
+    operationId: uuidv7(),
+    deviceSequence: startDeviceSequence + i + 1,
+    lamportTimestamp: startLamport + i + 1,
+    objectType: record.operation.objectType,
+    objectId: record.operation.objectId,
+    operationType: "create",
+    encryptionVersion: 1,
+    payload: encryptWithSdek(
+      payload,
+      sdek,
+      device.accountKeyVersion,
+      buildOperationAad(record.operation.objectType, record.operation.objectId, "create"),
+    ),
+  }));
+  await replaceQueuedOperations(
+    [...records.map((r) => r.operation.operationId)],
+    replacements,
+  );
+
+  await recordLocalFieldStatesBatch(
+    replacements.flatMap((operation, i) => {
+      const payload = decoded[i].payload;
+      const key = {
+        lamportTimestamp: operation.lamportTimestamp,
+        deviceId: device.deviceId,
+        operationId: operation.operationId,
+        operationType: "create" as const,
+      };
+      return [
+        { objectId: operation.objectId, field: "liveness", key, value: "live" },
+        { objectId: operation.objectId, field: "title", key, value: payload.title },
+        { objectId: operation.objectId, field: "url", key, value: payload.url },
+        { objectId: operation.objectId, field: "move", key, value: { parent: payload.parent, position: payload.position } },
+      ];
+    }),
+  );
+}
+
 /** Returns true when the batch budget ran out with a full final batch, i.e.
  * more backlog may remain. */
 export async function uploadPending(): Promise<boolean> {
@@ -239,6 +323,9 @@ export async function uploadPending(): Promise<boolean> {
     const retryableById = new Map(retryable.map((p) => [p.operation.operationId, p]));
 
     let progressed = stuck.length > 0;
+    // Replacements for rejected restores are queued behind this batch, and
+    // the same call should send them.
+    let reissued = false;
     try {
       const response = await uploadOperations(retryable.map((p) => p.operation));
       const resolved = [...response.accepted, ...response.duplicate];
@@ -259,13 +346,25 @@ export async function uploadPending(): Promise<boolean> {
         }
       }
 
-      if (toRequeue.length > 0) {
+      // A restore of an object the server never saw can't succeed by
+      // waiting: it is sent again as a create (reissueRestoresAsCreate).
+      const unknownRestores = toRequeue
+        .map((id) => retryableById.get(id))
+        .filter((r): r is PendingOperationRecord => r !== undefined && isBookmarkRestore(r.operation));
+      if (unknownRestores.length > 0) {
+        await reissueRestoresAsCreate(unknownRestores);
+        progressed = true;
+        reissued = true;
+      }
+      const reissuedIds = new Set(unknownRestores.map((r) => r.operation.operationId));
+      const waiting = toRequeue.filter((id) => !reissuedIds.has(id));
+      if (waiting.length > 0) {
         // An explicit per-operation verdict, so it counts as an attempt.
         await requeueInFlightRecords(
-          toRequeue.map((id) => retryableById.get(id)).filter((r) => r !== undefined),
+          waiting.map((id) => retryableById.get(id)).filter((r) => r !== undefined),
           true,
         );
-        for (const id of toRequeue) requeuedThisCycle.add(id);
+        for (const id of waiting) requeuedThisCycle.add(id);
         progressed = true;
       }
       if (toRemove.length > 0) {
@@ -280,7 +379,7 @@ export async function uploadPending(): Promise<boolean> {
     }
 
     if (!progressed) return false;
-    if (pending.length < MAX_UPLOAD_BATCH) return false;
+    if (pending.length < MAX_UPLOAD_BATCH && !reissued) return false;
     await yieldToEventLoop();
   }
   return lastBatchFull;
@@ -566,12 +665,33 @@ function syntheticSnapshotOp(
  * matches incremental sync; field state is cleared first so each field lands
  * unconditionally. The synthetic operationIds are random, so they are not
  * recorded in applied_operations (they could never match a server op). */
+let preSnapshotHooks: Array<() => Promise<void>> = [];
+
+/** Runs before a snapshot resync clears local field state, while the local
+ * tree is still what this device had. Failures are logged and never block the
+ * resync. */
+export function registerPreSnapshotHook(hook: () => Promise<void>): void {
+  preSnapshotHooks.push(hook);
+}
+
+export function clearPreSnapshotHooksForTesting(): void {
+  preSnapshotHooks = [];
+}
+
 export async function applySnapshot(snapshot: SnapshotResponse, device: DeviceRecord): Promise<void> {
   // Before anything is cleared or applied: a snapshot with an unreadable
   // envelope must leave local state exactly as it was, and the cursor behind
   // the snapshot, so the whole resync is retried after an update.
   for (const obj of snapshot.objects) {
     if (obj.encryptionVersion >= 1) assertEnvelopeVersionsSupported(obj);
+  }
+
+  for (const hook of preSnapshotHooks) {
+    try {
+      await hook();
+    } catch (err) {
+      console.warn("HelixSync: pre-snapshot hook failed", err);
+    }
   }
 
   await clearFieldState();
@@ -848,6 +968,26 @@ export async function downloadEverything(): Promise<void> {
   } finally {
     releaseSyncSlot();
     // A trigger that arrived meanwhile still gets its cycle.
+    if (rerunRequested) {
+      rerunRequested = false;
+      void runSyncCycle();
+    }
+  }
+}
+
+/** Runs `fn` while holding the sync slot, after waiting for a cycle already
+ * running: no upload, download or remote apply happens meanwhile. A trigger
+ * that arrived during it gets its cycle afterwards. `fn` may call
+ * `uploadPending` and `downloadAndApply` itself. */
+export async function runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+  while (syncInFlight) {
+    await new Promise<void>((resolve) => syncSlotWaiters.push(resolve));
+  }
+  syncInFlight = true;
+  try {
+    return await fn();
+  } finally {
+    releaseSyncSlot();
     if (rerunRequested) {
       rerunRequested = false;
       void runSyncCycle();
