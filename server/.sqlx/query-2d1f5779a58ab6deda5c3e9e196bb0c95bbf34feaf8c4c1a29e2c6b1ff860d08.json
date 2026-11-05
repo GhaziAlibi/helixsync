@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE sync_stats s SET restore_point_bytes = GREATEST(s.restore_point_bytes - u.bytes, 0), updated_at = now() FROM UNNEST($1::uuid[], $2::bigint[]) AS u(user_id, bytes) WHERE s.user_id = u.user_id",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2d1f5779a58ab6deda5c3e9e196bb0c95bbf34feaf8c4c1a29e2c6b1ff860d08"
+}

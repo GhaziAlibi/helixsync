@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS(\n                SELECT 1 FROM bookmark_restore_points\n                WHERE user_id = $1 AND kind = 'scheduled'\n                  AND created_at > now() - make_interval(secs => $2::double precision)\n            ) AS \"exists!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Float8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5d1f1e08cc8d2aaa04820b7c92844cd6a43f70748ddaa5a72aa042f4cf72f374"
+}

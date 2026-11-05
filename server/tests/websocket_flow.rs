@@ -45,6 +45,7 @@ fn test_config() -> Config {
         websocket_send_timeout_secs: 10,
         upload_semaphore_acquire_timeout_secs: 20,
         shutdown_deadline_secs: 30,
+        restore_points: Default::default(),
     }
 }
 

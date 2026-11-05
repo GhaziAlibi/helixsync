@@ -276,6 +276,89 @@ try {
   if (inA) await a.sw.evaluate((id) => chrome.bookmarks.remove(id), inA.id);
   check("sync: delete in A removes it from B", (await syncUntil([ca.popup, cb.popup], async () => (await findBookmark(b)).length === 0, 90_000)) === true);
 
+  // Restore points: A deletes a folder with children, B syncs it away, and A
+  // restores it from a point; B gets the folder and its children back.
+  const RESTORE_FOLDER = `Restore folder ${RUN}`;
+  const restoreKids = [`${BASE}/helixsync-e2e-kid-1-${RUN}`, `${BASE}/helixsync-e2e-kid-2-${RUN}`];
+  const folderIn = (dev) => dev.sw.evaluate((title) => chrome.bookmarks.search({ title }).then((r) => r.filter((n) => !n.url)), RESTORE_FOLDER);
+  const kidsIn = (dev) =>
+    dev.sw.evaluate(async (title) => {
+      const [folder] = (await chrome.bookmarks.search({ title })).filter((n) => !n.url);
+      return folder ? (await chrome.bookmarks.getChildren(folder.id)).map((n) => n.url) : [];
+    }, RESTORE_FOLDER);
+  /** objectId the device's mapping table holds for a Chromium node. */
+  const objectIdOf = (dev, chromiumId) =>
+    dev.sw.evaluate(
+      (id) =>
+        new Promise((resolve, reject) => {
+          const open = indexedDB.open("helixsync");
+          open.onerror = () => reject(open.error);
+          open.onsuccess = () => {
+            const get = open.result.transaction("object_mappings").objectStore("object_mappings").get(`bookmark:${id}`);
+            get.onsuccess = () => resolve(get.result?.objectId ?? null);
+            get.onerror = () => reject(get.error);
+          };
+        }),
+      chromiumId,
+    );
+
+  await a.sw.evaluate(
+    async ({ title, urls }) => {
+      globalThis.__removeInfo = undefined;
+      chrome.bookmarks.onRemoved.addListener((id, info) => {
+        globalThis.__removeInfo = { children: info.node?.children?.length ?? 0 };
+      });
+      const folder = await chrome.bookmarks.create({ parentId: "1", title });
+      for (const [i, url] of urls.entries()) await chrome.bookmarks.create({ parentId: folder.id, title: `kid ${i + 1}`, url });
+    },
+    { title: RESTORE_FOLDER, urls: restoreKids },
+  );
+  check(
+    "restore: a folder with children created in A reaches B",
+    (await syncUntil([ca.popup, cb.popup], async () => (await kidsIn(b)).length === 2, 90_000)) === true,
+  );
+
+  const made = await ca.popup.evaluate(() => chrome.runtime.sendMessage({ type: "CREATE_RESTORE_POINT" }));
+  check("restore: A creates a restore point", made?.ok === true && made.uploaded === true, JSON.stringify(made));
+  const pointList = await ca.popup.evaluate(() => chrome.runtime.sendMessage({ type: "LIST_RESTORE_POINTS" }));
+  const point = pointList?.points?.find((p) => p.id === made?.id);
+  check("restore: the point is listed with the bookmark count", !!point && point.bookmarkCount >= 2, JSON.stringify(point));
+
+  const [folderInA] = await folderIn(a);
+  const objectIdBefore = folderInA ? await objectIdOf(a, folderInA.id) : null;
+  if (folderInA) await a.sw.evaluate((id) => chrome.bookmarks.removeTree(id), folderInA.id);
+  const removeInfo = await a.sw.evaluate(() => globalThis.__removeInfo);
+  check("restore: onRemoved's node carries the removed folder's children", removeInfo?.children === 2, JSON.stringify(removeInfo));
+  check(
+    "restore: deleting the folder in A removes it from B",
+    (await syncUntil([ca.popup, cb.popup], async () => (await folderIn(b)).length === 0, 90_000)) === true,
+  );
+
+  const started = await ca.popup.evaluate(
+    (pointId) => chrome.runtime.sendMessage({ type: "START_RESTORE", pointId, mode: "merge", scope: "all" }),
+    made?.id,
+  );
+  check("restore: A starts a merge restore", started?.ok === true, JSON.stringify(started));
+  const finished = await waitFor(
+    async () => {
+      const reply = await ca.popup.evaluate(() => chrome.runtime.sendMessage({ type: "GET_RESTORE_PROGRESS" }));
+      return reply?.progress?.phase === "done" || reply?.progress?.phase === "error" ? reply.progress : null;
+    },
+    { timeout: 60_000, interval: 500 },
+  );
+  check("restore: it finishes", finished?.phase === "done", JSON.stringify(finished));
+  check("restore: A has the folder and children again", (await kidsIn(a)).sort().join() === [...restoreKids].sort().join());
+  check(
+    "restore: B gets the folder and its children back",
+    (await syncUntil([ca.popup, cb.popup], async () => (await kidsIn(b)).length === 2, 90_000)) === true,
+    (await kidsIn(b)).join(", "),
+  );
+  const [folderInB] = await folderIn(b);
+  const [restoredInA] = await folderIn(a);
+  const idA = restoredInA ? await objectIdOf(a, restoredInA.id) : null;
+  const idB = folderInB ? await objectIdOf(b, folderInB.id) : null;
+  check("restore: the folder has the same objectId on both devices, as before the delete", !!idA && idA === idB && idA === objectIdBefore, `${objectIdBefore} / ${idA} / ${idB}`);
+
   await ca.popup.reload();
   const statusA = (await ca.popup.textContent(".status-card"))?.replace(/\s+/g, " ").trim();
   check("extension A: popup reports Synced", statusA?.startsWith("Synced") ?? false, statusA);

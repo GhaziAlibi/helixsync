@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bookmark_restore_points SET last_restored_at = now() WHERE user_id = $1 AND id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "076faf041c45ddb6a96f4523ca5c14788bd5037e7fc80b8333d2b4587016fbed"
+}

@@ -467,3 +467,44 @@ describe("getServerVersion", () => {
     expect(version.registrationEnabled).toBeUndefined();
   });
 });
+
+describe("restore points", () => {
+  it("lists the account's points", async () => {
+    const { listRestorePoints } = await client();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ points: [{ id: "p1", pinned: false }] }));
+    expect(await listRestorePoints()).toEqual([{ id: "p1", pinned: false }]);
+    expect(call(0)).toMatchObject({ url: "/api/v1/restore-points", method: "GET", credentials: "include" });
+  });
+
+  it("pins with the CSRF token and the protocol version", async () => {
+    const { setCsrfToken, setRestorePointPinned } = await client();
+    setCsrfToken("tok");
+    fetchMock.mockResolvedValueOnce(jsonResponse({ id: "p1", pinned: true }));
+    expect(await setRestorePointPinned("p1", true)).toEqual({ id: "p1", pinned: true });
+    expect(call(0)).toMatchObject({
+      url: "/api/v1/restore-points/p1",
+      method: "PATCH",
+      body: { pinned: true },
+    });
+    expect(call(0).headers["X-CSRF-Token"]).toBe("tok");
+    expect(call(0).headers["X-Protocol-Version"]).toBe("1");
+  });
+
+  it("deletes with the CSRF token and the protocol version", async () => {
+    const { setCsrfToken, deleteRestorePoint } = await client();
+    setCsrfToken("tok");
+    fetchMock.mockResolvedValueOnce(noContent());
+    await expect(deleteRestorePoint("p/1")).resolves.toBeUndefined();
+    expect(call(0).url).toBe("/api/v1/restore-points/p%2F1");
+    expect(call(0).method).toBe("DELETE");
+    expect(call(0).headers["X-CSRF-Token"]).toBe("tok");
+    expect(call(0).headers["X-Protocol-Version"]).toBe("1");
+  });
+
+  it("surfaces the server's error code", async () => {
+    const { setRestorePointPinned, ApiError } = await client();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "restore_point_pin_limit", message: "no" }, 409));
+    await expect(setRestorePointPinned("p1", true)).rejects.toMatchObject({ status: 409, code: "restore_point_pin_limit" });
+    expect(ApiError).toBeDefined();
+  });
+});

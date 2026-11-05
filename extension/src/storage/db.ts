@@ -157,6 +157,36 @@ export interface FieldStateRecord {
   recordedAt?: number;
 }
 
+/** An encrypted restore point waiting for upload (restore-points/outbox.ts).
+ * Keyed by the point's client-chosen id, so a retry is the server's idempotent
+ * re-upload. */
+export interface RestorePointOutboxRecord {
+  id: string;
+  kind: string;
+  bookmarkCount: number;
+  encryptionVersion: number;
+  codec?: "deflate-raw";
+  envelope: unknown;
+  createdAt: string;
+  attempts: number;
+}
+
+/** The restore in progress (restore-points/restore.ts), kept so an
+ * interrupted worker resumes it. At most one, under the fixed key. */
+export interface RestoreJobRecord {
+  id: "current";
+  pointId: string;
+  mode: "merge" | "exact";
+  /** "all", or the objectId of the folder being restored. */
+  scope: string;
+  preRestorePointId: string;
+  startedAt: string;
+  /** Operations applied so far, for the progress view. */
+  applied: number;
+  total: number;
+  phase: "preparing" | "applying" | "finishing";
+}
+
 export interface HelixSyncDB extends DBSchema {
   device: {
     key: "self";
@@ -217,13 +247,21 @@ export interface HelixSyncDB extends DBSchema {
     key: "self";
     value: CryptoKey;
   };
+  restore_point_outbox: {
+    key: string; // point id
+    value: RestorePointOutboxRecord;
+  };
+  restore_jobs: {
+    key: "current";
+    value: RestoreJobRecord;
+  };
 }
 
 let dbPromise: Promise<IDBPDatabase<HelixSyncDB>> | null = null;
 
 export function getDb(): Promise<IDBPDatabase<HelixSyncDB>> {
   if (!dbPromise) {
-    dbPromise = openDB<HelixSyncDB>("helixsync", 8, {
+    dbPromise = openDB<HelixSyncDB>("helixsync", 9, {
       async upgrade(db, oldVersion, _newVersion, transaction) {
         if (oldVersion < 1) {
           db.createObjectStore("device", { keyPath: "id" });
@@ -295,6 +333,11 @@ export function getDb(): Promise<IDBPDatabase<HelixSyncDB>> {
           // alive. Clearing it instead forces a clean reconnect, after which
           // every device record is written encrypted from the start.
           transaction.objectStore("device").clear();
+        }
+
+        if (oldVersion < 9) {
+          db.createObjectStore("restore_point_outbox", { keyPath: "id" });
+          db.createObjectStore("restore_jobs", { keyPath: "id" });
         }
       },
       // An older connection still open in another context (e.g. a worker
@@ -437,6 +480,8 @@ export async function clearAllLocalData(): Promise<void> {
     "field_state",
     "remote_objects",
     "deferred_materializations",
+    "restore_point_outbox",
+    "restore_jobs",
   ] as const;
   const tx = db.transaction([...stores], "readwrite");
   await Promise.all(stores.map((name) => tx.objectStore(name).clear()));
@@ -594,6 +639,19 @@ async function rewritePendingRecords(
       update(record);
       return tx.store.put(record);
     }),
+  );
+  await tx.done;
+}
+
+/** Swaps queued operations for new ones in one transaction, so a crash can
+ * neither lose the change nor leave both versions queued. */
+export async function replaceQueuedOperations(removeIds: string[], added: LocalOperation[]): Promise<void> {
+  const db = await getDb();
+  const tx = db.transaction("pending_operations", "readwrite");
+  const createdAt = new Date().toISOString();
+  await putAllChunked(removeIds.map((id) => () => tx.store.delete(id)));
+  await putAllChunked(
+    added.map((operation) => () => tx.store.put({ operation, state: "LOCAL_QUEUED", createdAt, attempts: 0 })),
   );
   await tx.done;
 }
@@ -1133,4 +1191,31 @@ export async function gcFieldStates(): Promise<void> {
  * cleared and every snapshot field lands via the "no prior record" path. */
 export async function clearFieldState(): Promise<void> {
   await (await getDb()).clear("field_state");
+}
+
+// --- Restore points --------------------------------------------------------
+
+export async function putRestorePointOutbox(record: RestorePointOutboxRecord): Promise<void> {
+  await (await getDb()).put("restore_point_outbox", record);
+}
+
+export async function getRestorePointOutbox(): Promise<RestorePointOutboxRecord[]> {
+  const records = await (await getDb()).getAll("restore_point_outbox");
+  return records.sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+}
+
+export async function deleteRestorePointOutbox(id: string): Promise<void> {
+  await (await getDb()).delete("restore_point_outbox", id);
+}
+
+export async function getRestoreJob(): Promise<RestoreJobRecord | undefined> {
+  return (await getDb()).get("restore_jobs", "current");
+}
+
+export async function putRestoreJob(record: RestoreJobRecord): Promise<void> {
+  await (await getDb()).put("restore_jobs", record);
+}
+
+export async function deleteRestoreJob(): Promise<void> {
+  await (await getDb()).delete("restore_jobs", "current");
 }

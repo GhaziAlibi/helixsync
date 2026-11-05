@@ -64,6 +64,10 @@ pub async fn run_once(state: &AppState) {
     if let Err(e) = delete_old_history_visit_hours(state).await {
         tracing::error!(error = %e, "housekeeping: history_visit_hours cleanup failed");
     }
+
+    if let Err(e) = prune_restore_points(state).await {
+        tracing::error!(error = %e, "housekeeping: restore point cleanup failed");
+    }
 }
 
 /// Runs `delete_chunk` repeatedly until a chunk deletes fewer than
@@ -285,5 +289,65 @@ async fn delete_old_history_visit_hours(state: &AppState) -> AppResult<()> {
         rows = total_rows,
         "housekeeping: pruned history_visit_hours"
     );
+    Ok(())
+}
+
+// Deletes unpinned restore points older than `RESTORE_POINT_RETENTION_DAYS`
+// (docs/protocol.md §16), never an account's newest point. Each chunk also
+// credits exactly the deleted `size_bytes` back to
+// `sync_stats.restore_point_bytes` in the same transaction, so the counter
+// cannot drift.
+async fn prune_restore_points(state: &AppState) -> AppResult<()> {
+    let cutoff = Utc::now() - chrono::Duration::seconds(state.config.restore_points.retention_secs);
+    let total_rows = delete_in_chunks("bookmark_restore_points", || async move {
+        let mut tx = state.db.begin().await?;
+        let deleted = sqlx::query!(
+            r#"
+            DELETE FROM bookmark_restore_points p
+            WHERE (p.user_id, p.id) IN (
+                SELECT old.user_id, old.id FROM bookmark_restore_points old
+                WHERE NOT old.pinned
+                  AND old.created_at < $1
+                  AND EXISTS (
+                      SELECT 1 FROM bookmark_restore_points newer
+                      WHERE newer.user_id = old.user_id
+                        AND (newer.created_at, newer.id) > (old.created_at, old.id)
+                  )
+                ORDER BY old.created_at ASC
+                LIMIT $2
+            )
+            RETURNING p.user_id, p.size_bytes
+            "#,
+            cutoff,
+            DELETE_CHUNK_SIZE
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        let rows_affected = deleted.len() as u64;
+
+        if !deleted.is_empty() {
+            let mut per_user: std::collections::HashMap<uuid::Uuid, i64> =
+                std::collections::HashMap::new();
+            for row in &deleted {
+                *per_user.entry(row.user_id).or_default() += i64::from(row.size_bytes);
+            }
+            let (user_ids, bytes): (Vec<_>, Vec<_>) = per_user.into_iter().unzip();
+            sqlx::query!(
+                "UPDATE sync_stats s \
+                 SET restore_point_bytes = GREATEST(s.restore_point_bytes - u.bytes, 0), updated_at = now() \
+                 FROM UNNEST($1::uuid[], $2::bigint[]) AS u(user_id, bytes) \
+                 WHERE s.user_id = u.user_id",
+                &user_ids,
+                &bytes
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(rows_affected)
+    })
+    .await?;
+    tracing::debug!(rows = total_rows, "housekeeping: pruned restore points");
     Ok(())
 }

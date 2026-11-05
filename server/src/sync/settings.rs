@@ -25,6 +25,7 @@ pub struct UserSettings {
     pub require_encryption: bool,
     pub extension_storage_allowlist: serde_json::Value,
     pub extension_storage_denylist: serde_json::Value,
+    pub restore_points_automatic: bool,
 }
 
 async fn get_settings(
@@ -42,7 +43,8 @@ async fn get_settings(
         r#"
         SELECT sync_bookmarks, sync_history, sync_tabs, sync_tab_groups, sync_extensions,
                tab_restore_policy, history_retention, require_encryption,
-               extension_storage_allowlist, extension_storage_denylist
+               extension_storage_allowlist, extension_storage_denylist,
+               restore_points_automatic
         FROM user_settings WHERE user_id = $1
         "#,
         user.user_id
@@ -73,6 +75,7 @@ pub struct UpdateSettingsRequest {
     pub sync_extensions: Option<bool>,
     pub tab_restore_policy: Option<String>,
     pub history_retention: Option<String>,
+    pub restore_points_automatic: Option<bool>,
 }
 
 const VALID_RESTORE_POLICIES: &[&str] = &["disabled", "ask", "automatic"];
@@ -111,11 +114,13 @@ async fn update_settings(
             sync_extensions = COALESCE($6, sync_extensions),
             tab_restore_policy = COALESCE($7, tab_restore_policy),
             history_retention = COALESCE($8, history_retention),
+            restore_points_automatic = COALESCE($9, restore_points_automatic),
             updated_at = now()
         WHERE user_id = $1
         RETURNING sync_bookmarks, sync_history, sync_tabs, sync_tab_groups, sync_extensions,
                   tab_restore_policy, history_retention, require_encryption,
-                  extension_storage_allowlist, extension_storage_denylist
+                  extension_storage_allowlist, extension_storage_denylist,
+                  restore_points_automatic
         "#,
         user.user_id,
         req.sync_bookmarks,
@@ -125,6 +130,7 @@ async fn update_settings(
         req.sync_extensions,
         req.tab_restore_policy,
         req.history_retention,
+        req.restore_points_automatic,
     )
     .fetch_optional(&state.db)
     .await?

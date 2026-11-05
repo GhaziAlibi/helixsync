@@ -36,6 +36,7 @@ vi.mock("../bookmarks", () => ({
   registerCapture: vi.fn(),
   setBookmarkCaptureEnabled: vi.fn(),
   setLinkExistingBookmarks: vi.fn(),
+  sweepStaleBookmarkMappingsOnce: vi.fn(async () => {}),
 }));
 
 vi.mock("../history", () => ({
@@ -43,6 +44,23 @@ vi.mock("../history", () => ({
   registerCapture: vi.fn(),
   setHistoryCaptureEnabled: vi.fn(),
 }));
+
+vi.mock("../restore-points/triggers", () => ({
+  RESTORE_POINT_ALARM: "helixsync-restore-point",
+  clearRestorePointTriggerState: vi.fn(async () => {}),
+  createPreImportPoint: vi.fn(async () => {}),
+  drainRestorePointOutbox: vi.fn(async () => {}),
+  ensureRestorePointAlarm: vi.fn(),
+  installRestorePointTriggers: vi.fn(),
+  runScheduledRestorePoint: vi.fn(async () => {}),
+}));
+
+vi.mock("../restore-points/restore", () => ({
+  clearLoadedRestorePoint: vi.fn(),
+  resumeInterruptedRestore: vi.fn(async () => {}),
+}));
+
+vi.mock("../restore-points/service", () => ({}));
 
 vi.mock("../tabs", () => ({
   flushPendingTitleDebounces: vi.fn(),

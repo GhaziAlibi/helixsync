@@ -38,7 +38,7 @@ import {
   type ResolveResult,
 } from "../sync/conflict";
 import { createLocalOperationsBatch, registerApplier, registerBatchApplier, scheduleLocalSync } from "../sync/engine";
-import type { PendingLocalOperation } from "../sync/engine";
+import type { CreatedOperation, PendingLocalOperation } from "../sync/engine";
 import { isSyncableUrl } from "../util/url-scheme";
 import { fetchSettings } from "../api/client";
 import { createMicroBatchQueue, flushAllMicroBatchQueuesAndWait } from "../sync/micro-batch";
@@ -271,6 +271,19 @@ async function stageCreated(
   };
 }
 
+/** Chromium ids of everything under `node`, not `node` itself. Iterative, so
+ * a deeply nested tree can't overflow the stack. */
+function descendantIds(node: chrome.bookmarks.BookmarkTreeNode): string[] {
+  const ids: string[] = [];
+  const stack = [...(node.children ?? [])];
+  while (stack.length > 0) {
+    const next = stack.pop()!;
+    ids.push(next.id);
+    if (next.children) stack.push(...next.children);
+  }
+  return ids;
+}
+
 async function stageRemoved(
   id: string,
   removeInfo: BookmarkRemoveInfo,
@@ -283,6 +296,13 @@ async function stageRemoved(
   // The DB delete is batched after staging; the cache reflects it right away.
   mappingCache?.delete(id);
   deletedLocalIds?.push(id);
+  // Removing a folder emits one delete, for the folder. Its descendants stay
+  // live on the account, but their nodes are gone, so their mappings must go
+  // too: a later `restore` of one has to create it, not find a stale mapping.
+  for (const descendantId of descendantIds(removeInfo.node)) {
+    mappingCache?.delete(descendantId);
+    deletedLocalIds?.push(descendantId);
+  }
   return {
     objectType,
     objectId,
@@ -523,6 +543,7 @@ export async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promis
   const staged: StagedBookmarkOp[] = [];
   const newMappings: NewMappingCollector = [];
   const deletedLocalIds: string[] = [];
+  const removedEvents: Array<Extract<QueuedBookmarkEvent, { kind: "removed" }>> = [];
 
   for (const event of events) {
     try {
@@ -541,13 +562,19 @@ export async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promis
           op = await stageMoved(event.id, event.moveInfo, overlay, siblingCache, mappingCache, nodeCache, newMappings);
           break;
       }
-      if (op) staged.push(op);
+      if (op) {
+        staged.push(op);
+        if (event.kind === "removed") removedEvents.push(event);
+      }
     } catch (e) {
       // One bad event must not drop the rest of the burst.
       console.error(`HelixSync bookmarks capture (${event.kind})`, event.id, e);
     }
   }
   if (staged.length === 0) return;
+
+  // Read before the mappings of the removed nodes are deleted below.
+  const massDelete = await detectLocalMassDelete(removedEvents);
 
   // Mappings are committed before operations, so a crash between the two
   // can't leave operations referencing unknown mappings.
@@ -576,6 +603,9 @@ export async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promis
   });
   await recordLocalFieldStatesBatch(fieldStateEntries);
   scheduleLocalSync();
+  // The removed nodes are already captured in the event, so the point can be
+  // built without holding up the flush.
+  if (massDelete) void runMassDelete(massDelete);
 }
 
 const enqueueBookmarkEvent = createMicroBatchQueue<QueuedBookmarkEvent>(flushBookmarkEvents);
@@ -908,6 +938,17 @@ function deferUntilParentMaterializes(objectId: string, objectType: ObjectType, 
   });
 }
 
+/** Roots always exist; any other mapping is checked against the browser. */
+async function mappedNodeExists(objectId: string, chromiumId: string): Promise<boolean> {
+  if ((await roots()).chromiumIdByObjectId.has(objectId)) return true;
+  try {
+    const nodes = await chrome.bookmarks.get(chromiumId);
+    return Array.isArray(nodes) && nodes.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 async function materialize(
   objectId: string,
   objectType: ObjectType,
@@ -919,9 +960,17 @@ async function materialize(
       ? prefetched
       : await chromiumIdsFor(p.parent ? [objectId, p.parent] : [objectId]);
 
-  if (chromiumIds.has(objectId)) {
-    await deleteDeferredMaterialization(objectId);
-    return;
+  const mappedChromiumId = chromiumIds.get(objectId);
+  if (mappedChromiumId !== undefined) {
+    if (await mappedNodeExists(objectId, mappedChromiumId)) {
+      await deleteDeferredMaterialization(objectId);
+      return;
+    }
+    // A mapping whose node is gone (a folder deleted on this device left its
+    // descendants' mappings behind) must not block re-creating the node.
+    await forgetMapping(MAP_TYPE, mappedChromiumId);
+    chromiumIds.delete(objectId);
+    prefetched?.delete(objectId);
   }
 
   const parentChromiumId = p.parent ? chromiumIds.get(p.parent) : undefined;
@@ -1248,6 +1297,16 @@ async function applyDelete(objectId: string, prefetched?: Map<string, string>): 
 
   const chromiumId = prefetched?.get(objectId) ?? (await chromiumIdFor(objectId));
   if (!chromiumId) return;
+  // The folder's descendants lose their nodes with it and stay live on the
+  // account (only the folder gets a delete), so their mappings go too.
+  // Read before the removal.
+  let descendants: string[] = [];
+  try {
+    const [subtree] = await chrome.bookmarks.getSubTree(chromiumId);
+    if (subtree) descendants = descendantIds(subtree);
+  } catch {
+    // Already removed locally, or a leaf with nothing to forget.
+  }
   try {
     await guard.run(() => chrome.bookmarks.removeTree(chromiumId));
   } catch {
@@ -1255,6 +1314,13 @@ async function applyDelete(objectId: string, prefetched?: Map<string, string>): 
   }
   await forgetMapping(MAP_TYPE, chromiumId);
   prefetched?.delete(objectId);
+  if (descendants.length > 0) {
+    if (prefetched) {
+      const forgotten = await getMappingsByLocalIds(MAP_TYPE, descendants);
+      for (const mapping of forgotten.values()) prefetched.delete(mapping.objectId);
+    }
+    await deleteMappingsBatch(MAP_TYPE, descendants);
+  }
 }
 
 type RemoteOpKind = "create" | "update" | "move" | "delete" | "unknown";
@@ -1323,7 +1389,12 @@ async function applyRemote(op: OperationOut, payload: unknown): Promise<void> {
 
   switch (kind) {
     case "create":
-      if (res[0]!.applied) await materialize(op.objectId, op.objectType, payload as BookmarkPayload);
+      if (res[0]!.applied) {
+        await materialize(op.objectId, op.objectType, payload as BookmarkPayload);
+        // A restored node is created at the end of its folder; put it where
+        // the point had it.
+        if (op.operationType === "restore") await placeRestored(op.objectId, op.objectType, payload as BookmarkPayload);
+      }
       return;
     case "update": {
       const p = payload as Partial<BookmarkPayload>;
@@ -1340,6 +1411,10 @@ async function applyRemote(op: OperationOut, payload: unknown): Promise<void> {
       if (res[0]!.applied) await applyDelete(op.objectId);
       return;
   }
+}
+
+async function placeRestored(objectId: string, objectType: ObjectType, p: BookmarkPayload): Promise<void> {
+  if (p.parent) await applyMove(objectId, objectType, { parent: p.parent, position: p.position });
 }
 
 const REMOTE_BATCH_YIELD_CHUNK = 10;
@@ -1389,7 +1464,17 @@ async function applyRemoteBatch(items: Array<{ op: OperationOut; payload: unknow
   }
   const prefetched = await chromiumIdsFor([...involved]);
 
+  // Before anything is applied, so the point still holds what is about to go.
+  if (massDeleteHandler) {
+    const count = await countRemoteDeletes(items, prefetched);
+    if (count >= MASS_DELETE_THRESHOLD) await runMassDelete({ origin: "remote", count });
+  }
+
   let pendingMoves: RemoteMove[] = [];
+  // Restored nodes are created at the end of their folder. They are placed
+  // together once the batch is done, so one folder's cache serves them all
+  // instead of being rebuilt after every create.
+  const restorePlacements: RemoteMove[] = [];
   const flushMoves = async () => {
     if (pendingMoves.length === 0) return;
     const moves = pendingMoves;
@@ -1426,7 +1511,19 @@ async function applyRemoteBatch(items: Array<{ op: OperationOut; payload: unknow
         case "create": {
           await flushMoves();
           await flushTitleUrl();
-          if (res[0]!.applied) await materialize(op.objectId, op.objectType, payload as BookmarkPayload, prefetched);
+          if (res[0]!.applied) {
+            await materialize(op.objectId, op.objectType, payload as BookmarkPayload, prefetched);
+            // As in applyRemote: restored nodes go where the point had them.
+            const restored = payload as BookmarkPayload;
+            if (op.operationType === "restore" && restored.parent) {
+              restorePlacements.push({
+                objectId: op.objectId,
+                objectType: op.objectType,
+                parent: restored.parent,
+                position: restored.position,
+              });
+            }
+          }
           break;
         }
         case "update": {
@@ -1470,6 +1567,256 @@ async function applyRemoteBatch(items: Array<{ op: OperationOut; payload: unknow
   }
   await flushTitleUrl();
   await flushMoves();
+  await applyMovesBatch(restorePlacements);
+}
+
+// --- Restore points: reading and applying the tree -------------------------
+
+/** Removals (a folder counted with everything in it) from one capture flush,
+ * or in one remote batch, that make a `mass_delete` restore point. */
+export const MASS_DELETE_THRESHOLD = 50;
+
+/** One bookmark or folder as the restore-point code needs it. */
+export interface LiveBookmarkNode {
+  chromiumId: string;
+  objectId: string;
+  kind: "b" | "f";
+  title: string;
+  url?: string;
+  /** A root's objectId for top-level nodes. */
+  parentObjectId: string;
+  /** From the node's recorded `move` field, if it has one. */
+  position?: string;
+  /** Managed by browser policy, so never restored or removed. */
+  unmodifiable: boolean;
+}
+
+export interface LiveBookmarkTree {
+  /** Parents before children; siblings in browser order. */
+  nodes: LiveBookmarkNode[];
+  /** Nodes left out for having no mapping (capture not flushed, backfill
+   * unfinished), counted with everything under them. */
+  unmapped: number;
+}
+
+export type MassDeleteEvent =
+  | { origin: "local"; count: number; removed: LiveBookmarkNode[] }
+  | { origin: "remote"; count: number };
+
+let massDeleteHandler: ((event: MassDeleteEvent) => Promise<void> | void) | undefined;
+
+/** Called when a flush or remote batch removes `MASS_DELETE_THRESHOLD` or more
+ * bookmarks. A remote event is delivered before the batch is applied. */
+export function setMassDeleteHandler(handler: ((event: MassDeleteEvent) => Promise<void> | void) | undefined): void {
+  massDeleteHandler = handler;
+}
+
+async function runMassDelete(event: MassDeleteEvent): Promise<void> {
+  if (!massDeleteHandler) return;
+  try {
+    await massDeleteHandler(event);
+  } catch (e) {
+    console.error("HelixSync: mass-delete restore point failed", e);
+  }
+}
+
+function countSubtree(node: chrome.bookmarks.BookmarkTreeNode): number {
+  return 1 + descendantIds(node).length;
+}
+
+async function detectLocalMassDelete(
+  removedEvents: Array<Extract<QueuedBookmarkEvent, { kind: "removed" }>>,
+): Promise<Extract<MassDeleteEvent, { origin: "local" }> | undefined> {
+  if (!massDeleteHandler || removedEvents.length === 0) return undefined;
+  let count = 0;
+  for (const event of removedEvents) count += countSubtree(event.removeInfo.node);
+  if (count < MASS_DELETE_THRESHOLD) return undefined;
+
+  // Mappings are still in the database here; the caller deletes them next.
+  const localIds = removedEvents.flatMap((e) => [e.id, ...descendantIds(e.removeInfo.node)]);
+  const mappings = await getMappingsByLocalIds(MAP_TYPE, localIds);
+  const moveStates = await getFieldStatesForObjects(
+    [...mappings.values()].map((m) => m.objectId),
+    "move",
+  );
+  const rootIds = (await roots()).objectIdByChromiumId;
+  const parentMappings = await getMappingsByLocalIds(
+    MAP_TYPE,
+    removedEvents.map((e) => e.removeInfo.parentId).filter((id) => !rootIds.has(id)),
+  );
+
+  const removed: LiveBookmarkNode[] = [];
+  const visit = (node: chrome.bookmarks.BookmarkTreeNode, parentObjectId: string | undefined) => {
+    const objectId = mappings.get(node.id)?.objectId;
+    if (!objectId || !parentObjectId) return;
+    removed.push({
+      chromiumId: node.id,
+      objectId,
+      kind: node.url ? "b" : "f",
+      title: node.title,
+      ...(node.url ? { url: node.url } : {}),
+      parentObjectId,
+      position: (moveStates.get(objectId)?.value as { position?: string } | undefined)?.position,
+      unmodifiable: false,
+    });
+    for (const child of node.children ?? []) visit(child, objectId);
+  };
+  for (const event of removedEvents) {
+    const parentChromiumId = event.removeInfo.parentId;
+    visit(event.removeInfo.node, rootIds.get(parentChromiumId) ?? parentMappings.get(parentChromiumId)?.objectId);
+  }
+  return { origin: "local", count, removed };
+}
+
+async function countRemoteDeletes(
+  items: Array<{ op: OperationOut; payload: unknown }>,
+  prefetched: ReadonlyMap<string, string>,
+): Promise<number> {
+  let count = 0;
+  for (const { op } of items) {
+    if (op.operationType !== "delete") continue;
+    if (op.objectType !== "bookmarkFolder") {
+      count++;
+    } else {
+      const chromiumId = prefetched.get(op.objectId);
+      if (!chromiumId) continue;
+      try {
+        const [subtree] = await chrome.bookmarks.getSubTree(chromiumId);
+        count += subtree ? countSubtree(subtree) : 1;
+      } catch {
+        // Already gone.
+      }
+    }
+    if (count >= MASS_DELETE_THRESHOLD) break;
+  }
+  return count;
+}
+
+const LIVE_READ_YIELD_CHUNK = 2000;
+
+/** The browser's bookmark tree with each node's objectId and recorded
+ * position, for building a restore point or planning a restore. Capture
+ * queues are drained first so a just-made change is included. */
+export async function readLiveBookmarks(): Promise<LiveBookmarkTree> {
+  await flushAllMicroBatchQueuesAndWait();
+  const { objectIdByChromiumId: rootObjectIds } = await roots();
+  const [tree] = await chrome.bookmarks.getTree();
+
+  // Preorder walk. A node's parent always precedes it in `walk`.
+  const walk: Array<{ node: chrome.bookmarks.BookmarkTreeNode; parentChromiumId: string }> = [];
+  const stack: Array<{ node: chrome.bookmarks.BookmarkTreeNode; parentChromiumId: string }> = [];
+  for (let i = (tree?.children?.length ?? 0) - 1; i >= 0; i--) {
+    stack.push({ node: tree.children![i], parentChromiumId: tree.id });
+  }
+  let visited = 0;
+  while (stack.length > 0) {
+    const entry = stack.pop()!;
+    walk.push(entry);
+    const children = entry.node.children ?? [];
+    for (let i = children.length - 1; i >= 0; i--) {
+      stack.push({ node: children[i], parentChromiumId: entry.node.id });
+    }
+    if (++visited % LIVE_READ_YIELD_CHUNK === 0) await yieldToEventLoop();
+  }
+
+  const nonRootIds = walk.map((w) => w.node.id).filter((id) => !rootObjectIds.has(id));
+  const mappings = new Map<string, ObjectMappingRecord>();
+  for (const batch of chunk(nonRootIds, 5000)) {
+    for (const [id, record] of await getMappingsByLocalIds(MAP_TYPE, batch)) mappings.set(id, record);
+    await yieldToEventLoop();
+  }
+  const moveStates = new Map<string, FieldStateRecord>();
+  const objectIds = [...mappings.values()].map((m) => m.objectId);
+  for (const batch of chunk(objectIds, 5000)) {
+    for (const [id, state] of await getFieldStatesForObjects(batch, "move")) moveStates.set(id, state);
+    await yieldToEventLoop();
+  }
+
+  const nodes: LiveBookmarkNode[] = [];
+  const objectIdOf = new Map<string, string>(); // chromium id -> objectId, for kept nodes
+  let unmapped = 0;
+  for (const { node, parentChromiumId } of walk) {
+    const rootObjectId = rootObjectIds.get(node.id);
+    if (rootObjectId) {
+      objectIdOf.set(node.id, rootObjectId);
+      continue;
+    }
+    const parentObjectId = objectIdOf.get(parentChromiumId);
+    // Under a root of the tree itself ("0" holds the roots), or under a
+    // skipped node.
+    if (!parentObjectId) {
+      unmapped++;
+      continue;
+    }
+    const objectId = mappings.get(node.id)?.objectId;
+    if (!objectId) {
+      unmapped++;
+      continue;
+    }
+    objectIdOf.set(node.id, objectId);
+    nodes.push({
+      chromiumId: node.id,
+      objectId,
+      kind: node.url ? "b" : "f",
+      title: node.title,
+      ...(node.url ? { url: node.url } : {}),
+      parentObjectId,
+      position: (moveStates.get(objectId)?.value as { position?: string } | undefined)?.position,
+      unmodifiable: (node as { unmodifiable?: string }).unmodifiable === "managed",
+    });
+  }
+  return { nodes, unmapped };
+}
+
+/** Removes mappings whose Chromium node no longer exists. A folder deleted on
+ * a device that predates the descendant-mapping fix left such mappings, and
+ * they stop `restore` from re-creating the node. */
+export async function sweepStaleBookmarkMappings(): Promise<number> {
+  await flushAllMicroBatchQueuesAndWait();
+  // Mappings first, tree second: a node created in between is in the tree
+  // but not in `mapped`, whereas the other order could drop a fresh mapping.
+  const mapped = await getMappedChromiumIdsByType(MAP_TYPE);
+  const [tree] = await chrome.bookmarks.getTree();
+  const present = new Set<string>();
+  const stack = tree ? [tree] : [];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    present.add(node.id);
+    if (node.children) stack.push(...node.children);
+  }
+  const stale = [...mapped].filter((id) => !present.has(id));
+  for (const batch of chunk(stale, 5000)) {
+    await deleteMappingsBatch(MAP_TYPE, batch);
+    await yieldToEventLoop();
+  }
+  return stale.length;
+}
+
+const STALE_SWEEP_DONE_KEY = "bookmarkMappingSweepDone";
+
+/** Runs the sweep once per browser profile. */
+export async function sweepStaleBookmarkMappingsOnce(): Promise<void> {
+  const stored = await chrome.storage.local.get(STALE_SWEEP_DONE_KEY);
+  if (stored[STALE_SWEEP_DONE_KEY] === true) return;
+  await sweepStaleBookmarkMappings();
+  await chrome.storage.local.set({ [STALE_SWEEP_DONE_KEY]: true });
+}
+
+/** Applies operations this device just created (a restore's), through the
+ * code that applies other devices' operations: field state is recorded, a
+ * deferred parent waits, URLs are scheme-checked, moves are batched. The
+ * browser changes happen under the suppression guard, so nothing is
+ * captured a second time. */
+export async function applyRestoreOperations(
+  created: CreatedOperation[],
+  payloads: unknown[],
+): Promise<void> {
+  const createdAt = new Date().toISOString();
+  const items = created.map(({ operation, deviceId }, i) => ({
+    op: { ...operation, deviceId, serverCursor: 0, createdAt } as OperationOut,
+    payload: payloads[i],
+  }));
+  await applyRemoteBatch(items);
 }
 
 registerApplier("bookmark", applyRemote);

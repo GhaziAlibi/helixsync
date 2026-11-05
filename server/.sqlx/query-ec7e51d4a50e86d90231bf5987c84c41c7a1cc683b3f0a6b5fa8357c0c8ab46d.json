@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM bookmark_restore_points WHERE user_id = $1 AND id = $2 RETURNING size_bytes",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "size_bytes",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ec7e51d4a50e86d90231bf5987c84c41c7a1cc683b3f0a6b5fa8357c0c8ab46d"
+}

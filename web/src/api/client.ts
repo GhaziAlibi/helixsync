@@ -282,6 +282,8 @@ export interface UserSettings {
   tabRestorePolicy: "disabled" | "ask" | "automatic";
   historyRetention: "7d" | "30d" | "90d" | "1y" | "unlimited";
   requireEncryption: boolean;
+  /** Missing on a server from before restore points; read as on. */
+  restorePointsAutomatic?: boolean;
 }
 
 export async function getSettings(): Promise<UserSettings> {
@@ -299,6 +301,9 @@ export interface ServerVersion {
   apiVersion: string;
   protocolVersion: number;
   minimumSupportedProtocolVersion: number;
+  /** True once the server has bookmark restore points. Missing on an older
+   * server; read as false. */
+  restorePoints?: boolean;
   /** False when the operator has set `ALLOW_REGISTRATION=false`. Optional
    * because servers from before the switch existed don't send it; treat a
    * missing value as "registration open". */
@@ -315,6 +320,11 @@ export interface SyncStats {
   tabs: number;
   storageBytes: number;
   storageLimitBytes: number;
+  /** Restore points have their own budget, separate from `storageBytes`.
+   * Missing on an older server. */
+  restorePointCount?: number;
+  restorePointBytes?: number;
+  restorePointLimitBytes?: number;
 }
 
 export async function getSyncStats(): Promise<SyncStats> {
@@ -415,4 +425,45 @@ export async function listSessions(): Promise<WebSession[]> {
 
 export async function revokeSession(id: string): Promise<void> {
   await request(`/api/v1/auth/sessions/${id}/revoke`, { method: "POST" });
+}
+
+// --- Restore points (docs/protocol.md §16) ---
+// The dashboard lists, pins and deletes them. It can't restore one: that
+// needs the account key to decrypt, and only the extension holds it.
+
+export type RestorePointKind = "manual" | "scheduled" | "pre_restore" | "pre_import" | "pre_resync" | "mass_delete";
+
+export interface RestorePoint {
+  id: string;
+  kind: RestorePointKind;
+  bookmarkCount: number;
+  sizeBytes: number;
+  pinned: boolean;
+  createdAt: string;
+  lastRestoredAt: string | null;
+  deviceId: string | null;
+  deviceName: string | null;
+}
+
+/** Writes to this API name the protocol version they speak, like the
+ * extension's (docs/protocol.md §13). */
+const PROTOCOL_VERSION_HEADERS = { "X-Protocol-Version": "1" };
+
+export async function listRestorePoints(): Promise<RestorePoint[]> {
+  return (await request<{ points: RestorePoint[] }>("/api/v1/restore-points")).points;
+}
+
+export async function setRestorePointPinned(id: string, pinned: boolean): Promise<RestorePoint> {
+  return request(`/api/v1/restore-points/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: PROTOCOL_VERSION_HEADERS,
+    body: JSON.stringify({ pinned }),
+  });
+}
+
+export async function deleteRestorePoint(id: string): Promise<void> {
+  await request(`/api/v1/restore-points/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: PROTOCOL_VERSION_HEADERS,
+  });
 }

@@ -955,13 +955,16 @@ extensionVersion: "<semver>"
   "apiVersion": "v1",
   "protocolVersion": 1,
   "minimumSupportedProtocolVersion": 1,
-  "registrationEnabled": true
+  "registrationEnabled": true,
+  "restorePoints": true
 }
 ```
 
 `registrationEnabled` is `false` when the operator has disabled registration
 (§7.2). It was added without changing the protocol version: clients must
-treat a missing value as `true`.
+treat a missing value as `true`. `restorePoints` is `true` on a server that
+has the bookmark restore points of §16; clients must treat a missing value as
+`false` and hide the feature.
 
 Rules:
 
@@ -1037,3 +1040,157 @@ LOCAL_QUEUED -> UPLOAD_IN_FLIGHT -> ACCEPTED_BY_SERVER -> SERVER_DURABLE
   retried with the same ID; applied operations are deduplicated by
   `operationId`/`objectId` state; cursor advances only after durable local
   application — no transition depends on an in-memory-only flag.
+
+---
+
+## 16. Bookmark Restore Points
+
+A restore point is a timestamped, full-tree snapshot of a user's bookmarks.
+The extension builds it, compresses it and encrypts it; the server stores it as
+an opaque blob and prunes it. Rolling back is done by the extension, as
+ordinary operations (§16.4), so other devices converge the way they do for any
+change. The dashboard lists, pins and deletes points but cannot restore one:
+it has no account key (`docs/encryption.md` §8).
+
+### 16.1 Point format
+
+Plaintext (before compression and encryption):
+
+```json
+{
+  "v": 1,
+  "createdAt": "2026-11-04T10:00:00Z",
+  "deviceId": "…",
+  "kind": "manual",
+  "nodes": [
+    { "o": "<objectId>", "k": "f", "t": "Work", "p": "<parent objectId>", "x": "a0" },
+    { "o": "<objectId>", "k": "b", "t": "Docs", "u": "https://…", "p": "<parent objectId>", "x": "a1" }
+  ]
+}
+```
+
+`k` is `b` (bookmark) or `f` (folder); `x` is the node's fractional position
+(§8.2). Built-in roots are never listed, but `p` may be a root's fixed
+objectId. Nodes are parents first, siblings in order. Nodes managed by browser
+policy are left out, with everything under them. A point is never partial: if
+a bookmark has no objectId yet (capture not flushed, initial import not
+finished) the point is not made (`bookmarks_not_ready`), with one exception:
+a `pre_import` point holds mapped bookmarks only, by design.
+
+A client validates a point before using it: `v` is known, ids are UUIDs and
+unique, every `p` is a root or an earlier node (so there are no cycles), `u`
+is on bookmarks only. An unknown `v` or envelope version means "update the
+extension"; a point that fails authentication is never applied.
+
+Encoding: JSON, UTF-8, `deflate-raw` when the runtime has `CompressionStream`
+(otherwise the point is stored uncompressed and `codec` is absent), then a
+standard §6 envelope (`v: 2`) under the current SDEK. The AAD is
+`["bookmarkRestorePoint", "<pointId>", "snapshot"]` (`docs/encryption.md`
+§6.3). The `pointId` is a client-chosen UUIDv7, so the server cannot hand one
+point's blob out as another.
+
+### 16.2 HTTP API
+
+All under `/api/v1/restore-points`. Writes need `X-Protocol-Version` (§13).
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| `POST` | `/` | device | Upload `{id, kind, bookmarkCount, encryptionVersion, codec?, envelope}`; returns the point's metadata |
+| `GET` | `/` | device or session | `{points: [...]}`, newest first, with `deviceName` (`null` if the device was deleted) |
+| `GET` | `/{id}` | device | Metadata plus `envelope`. A web session cannot download |
+| `PATCH` | `/{id}` | device, or session + CSRF | `{pinned}` |
+| `DELETE` | `/{id}` | device, or session + CSRF | Delete one point (`204`) |
+| `POST` | `/{id}/applied` | device | `{mode: "merge"\|"exact"}` after a restore; sets `lastRestoredAt` (`204`). Other fields are ignored |
+
+Metadata: `id`, `kind`, `bookmarkCount`, `encryptionVersion`, `codec`,
+`sizeBytes`, `pinned`, `createdAt`, `lastRestoredAt`, `deviceId`, `deviceName`.
+
+`kind` is one of `manual`, `scheduled`, `pre_restore`, `pre_import`,
+`pre_resync`, `mass_delete`. Rules:
+
+- The same `id` uploaded again returns the existing point (a retry).
+- The `envelope` is stored as the exact JSON text sent and never parsed. It
+  must be an object no larger than `RESTORE_POINT_MAX_BYTES` (capped at 2 GiB − 1)
+  (`400 validation_error`); the route's own body limit refuses a larger body
+  with `413` before it is parsed. `encryptionVersion` 0 is refused when
+  encryption is required. `bookmarkCount` is at most 1,000,000.
+- `scheduled` is refused with `409 restore_point_recent` if the account has a
+  `scheduled` point newer than `RESTORE_POINT_SCHEDULED_MIN_INTERVAL_SECS`, so
+  several devices make one daily point between them. Other kinds are never
+  deduplicated.
+- Every kind but `manual` is refused with `409 restore_points_disabled` while
+  the account's `restorePointsAutomatic` setting is off.
+- An upload that would exceed `RESTORE_POINT_MAX_PER_ACCOUNT` or
+  `RESTORE_POINT_MAX_ACCOUNT_BYTES` evicts the oldest unpinned points first,
+  automatic kinds before manual ones. If only pinned points remain the upload
+  fails with `409 restore_point_limit` and nothing changes.
+- Pinning past `RESTORE_POINT_MAX_PINNED` fails with
+  `409 restore_point_pin_limit`.
+- Another account's point is `404`, never `403`.
+
+Restore points have their own byte budget: they never count against
+`MAX_ACCOUNT_STORAGE_BYTES`, so a full budget cannot block sync.
+`GET /sync/stats` reports `restorePointCount`, `restorePointBytes` and
+`restorePointLimitBytes`; `GET`/`PATCH /sync/settings` carry
+`restorePointsAutomatic` (default `true`).
+
+Retention: housekeeping deletes unpinned points older than
+`RESTORE_POINT_RETENTION_DAYS`, never an account's newest point. Pinned points
+stay until deleted. Deleting an account deletes its points; deleting or
+revoking a device keeps them.
+
+### 16.3 Making points
+
+| Kind | When |
+|------|------|
+| `manual` | The user asks (extension popup) |
+| `scheduled` | Daily alarm; skipped while the tree equals the last point this device made (the hash never leaves the device) |
+| `pre_restore` | Before every restore. Must upload, or the restore does not start |
+| `pre_import` | First import, after the account's bookmarks arrived and before this browser's own are uploaded, if both have some. Undoes the import |
+| `pre_resync` | Before a snapshot resync clears local state |
+| `mass_delete` | A local capture flush, or a remote batch (built before it is applied), that removes 50 or more bookmarks, at most once per 10 minutes per device |
+
+Points other than `pre_restore` go through a local outbox, so building one
+never blocks sync or capture; an upload the server refuses for good
+(`restore_point_recent`, `restore_points_disabled`, `restore_point_limit`,
+`400`, `413`) is dropped, anything else is retried.
+
+### 16.4 How a restore maps to operations
+
+The extension plans a restore as the difference between the point and the
+browser's bookmarks now, in `merge` mode (re-add and revert, never delete) or
+`exact` mode (also remove bookmarks that are not in the point), for the whole
+tree or one folder's subtree. Per node of the point:
+
+| State | Operation |
+|-------|-----------|
+| not in the browser | `restore` with `{title, url, parent, position}` |
+| title or URL differs | `update` (changed fields only) |
+| parent or position differs | `move` |
+| in scope, not in the point (exact) | `delete`, topmost only: a deleted folder takes its contents with it |
+
+Order: restores parents-first, then updates, moves, deletes, so a node the
+point keeps is moved out of a folder that is about to be deleted. These are
+ordinary operations with new Lamport values: they win over what a device has
+seen, not over later edits elsewhere (§8.1). The extension applies them to its
+own browser through the code that applies remote operations.
+
+Two engine rules make a restore work:
+
+- **Descendants of a deleted folder.** Removing a folder emits one `delete`
+  (for the folder); its descendants stay live on the account. Both capture and
+  remote apply therefore forget the local mappings of every descendant, and a
+  remote `create`/`restore` never trusts a mapping whose browser node is gone:
+  it creates the node. A one-time sweep removes such mappings that older
+  versions left behind.
+- **Unknown objects.** `restore` is not an origination operation (§6), so the
+  server rejects it with `object_not_found` for an object it has no record of.
+  The extension then sends the same object and payload again as a `create`
+  with a new operation id, sequence and Lamport value. The server never knew
+  the object, so there is no tombstone to clear.
+
+A restore holds the sync slot while it runs, starts by syncing, and resumes
+from a stored job if the worker is interrupted (a restore that fails with an
+error is reported and its job discarded, not resumed); planning is idempotent, so a
+resumed run emits only what is still missing.
+

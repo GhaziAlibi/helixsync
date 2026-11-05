@@ -5,6 +5,7 @@ const navItems = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/devices", label: "Devices" },
   { to: "/sync", label: "Synchronization" },
+  { to: "/restore-points", label: "Restore points" },
   { to: "/security", label: "Security" },
 ];
 

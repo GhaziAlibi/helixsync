@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT require_encryption, restore_points_automatic FROM user_settings WHERE user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "require_encryption",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "restore_points_automatic",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "5f5dfcf79814ca909d47d3a90112361063f2a4aad90d390a61d54898b4e98ed3"
+}

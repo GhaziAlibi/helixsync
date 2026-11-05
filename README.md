@@ -36,6 +36,7 @@ for passwords.
 | History        | Synced into the browser's own history; see [Limitations](#limitations) for what Chrome's API can't set |
 | Tabs / windows | Optional, restored automatically or after asking, as you choose          |
 | Tab groups     | Synced, including title, color and collapsed state                       |
+| Restore points | Encrypted snapshots of your bookmarks you can roll back to, in full or one folder |
 | Passwords      | Out of scope                                                             |
 
 ## How it fits together
@@ -352,6 +353,17 @@ password form. When another browser or the dashboard asks to log in with this
 device, the toolbar icon shows **!** and the popup lists the request with its
 phrase, to approve or deny.
 
+**Restore points.** The clock icon in the popup lists the saved copies of your
+bookmarks. Your browsers make one daily, and before a restore, a first import,
+a full resync, or a large deletion; **Create restore point** makes one on
+demand. **Restore…** rolls back everything or one folder: *Merge* brings back
+what is missing and undoes edits without deleting anything, *Exact* also
+removes bookmarks the point doesn't have. A preview shows what would change,
+and a copy of your current bookmarks is saved first, so a restore can itself be
+undone. Only pinned points are kept for good: unpinned ones are removed
+oldest first when space runs out, and after 90 days. See
+[`docs/protocol.md`](docs/protocol.md) §16.
+
 **Web dashboard.**
 
 | Page | What you can do |
@@ -359,6 +371,7 @@ phrase, to approve or deny.
 | Dashboard | Connection and sync health, last sync, device count, how many bookmarks, history items and tabs are synced, storage used against your limit, and recent devices |
 | Devices | List, rename and revoke connected browsers |
 | Synchronization | The same sync settings as the popup, kept in one place |
+| Restore points | See, pin and delete your bookmark restore points, switch automatic ones off, and see the space they use. Restoring is done in the extension |
 | Security | Check encryption status, review and revoke web sessions, change your password, get a new recovery code, delete your account |
 
 **Changing your password** re-wraps your account key under the new password.

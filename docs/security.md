@@ -172,6 +172,7 @@ login, registration, token refresh, device registration,
 account deletion, password change, password recovery,
 recovery-code regeneration,
 login-with-device requests and polling, sync upload, sync download,
+restore point upload, download, listing and changes,
 WebSocket connection attempts
 ```
 
@@ -205,6 +206,15 @@ per-minute cap tuned for login-sized traffic.
   `{ m, t, p }` within the bounds the clients accept, and wrapped keys are
   length-capped. Emails over 320 bytes are refused before they are used as a
   rate-limit key or looked up.
+- Restore points (`docs/protocol.md` §16): a point's envelope is capped at
+  `RESTORE_POINT_MAX_BYTES` (32 MiB by default) and its upload route has its own
+  body limit and a concurrency limit of 4. Per account the server also caps the
+  number of points, their total bytes and the number pinned
+  (`RESTORE_POINT_MAX_PER_ACCOUNT`, `RESTORE_POINT_MAX_ACCOUNT_BYTES`,
+  `RESTORE_POINT_MAX_PINNED`); these are separate from
+  `MAX_ACCOUNT_STORAGE_BYTES`, so a full restore point budget never blocks
+  sync. A web session can list, pin and delete points but cannot download one.
+  Another account's point is `404`.
 - All SQL is parameterized via `sqlx` compile-time-checked queries — no
   string-built SQL.
 
@@ -218,7 +228,9 @@ per-minute cap tuned for login-sized traffic.
   `password_recovery_failed`, `recovery_code_regenerated`,
   `recovery_code_regenerate_failed`), login with device
   (`auth_request_created`, `auth_request_approved`, `auth_request_denied`,
-  `login_with_device_succeeded`), settings changes. Rows reference the account and device with `ON DELETE SET NULL`,
+  `login_with_device_succeeded`), restore points
+  (`restore_point_pinned`, `restore_point_unpinned`, `restore_point_deleted`,
+  `restore_point_applied`), settings changes. Rows reference the account and device with `ON DELETE SET NULL`,
   so the trail survives an account's deletion with the identifiers removed.
 - No secrets (passwords, tokens, key material, decrypted payloads) are ever
   written to logs. Structured logging (`tracing`) uses explicit field

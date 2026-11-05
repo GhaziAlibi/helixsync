@@ -219,6 +219,12 @@ its working directory). The Compose files pass through the ones marked
 | `ALLOW_REGISTRATION` | `true` | Accept new accounts. **C** |
 | `MAX_ACCOUNT_STORAGE_BYTES` | `5368709120` | Stored payload bytes per account. **C** |
 | `MAX_DEVICES_PER_ACCOUNT` | `25` | Connected browsers per account. **C** |
+| `RESTORE_POINT_MAX_BYTES` | `33554432` | Max size of one bookmark restore point (32 MiB). **C** |
+| `RESTORE_POINT_MAX_ACCOUNT_BYTES` | `1073741824` | Restore point bytes per account (1 GiB), separate from `MAX_ACCOUNT_STORAGE_BYTES`. **C** |
+| `RESTORE_POINT_MAX_PER_ACCOUNT` | `50` | Restore points per account, pinned included. **C** |
+| `RESTORE_POINT_MAX_PINNED` | `10` | Pinned restore points per account. **C** |
+| `RESTORE_POINT_RETENTION_DAYS` | `90` | Unpinned restore points older than this are pruned; the newest is kept. **C** |
+| `RESTORE_POINT_SCHEDULED_MIN_INTERVAL_SECS` | `72000` | Minimum gap between scheduled restore points of one account (20 h). **C** |
 | `ACCESS_TOKEN_TTL_SECS` | `900` | Device access token lifetime. **C** |
 | `REFRESH_TOKEN_TTL_SECS` | `2592000` | Device refresh token lifetime (30 days). **C** |
 | `WEB_SESSION_TTL_SECS` | `1209600` | Dashboard session lifetime (14 days). **C** |
@@ -333,6 +339,12 @@ your own proxy, or the dashboard loses that protection.
 
 ## Backup and restore
 
+Restore points (`bookmark_restore_points`) are rows in the same database, so a
+`pg_dump` backup includes them, and they can be up to
+`RESTORE_POINT_MAX_ACCOUNT_BYTES` per account. If a reverse proxy sits in front
+of the server, let it accept bodies up to `RESTORE_POINT_MAX_BYTES` (the bundled
+nginx allows 150 MB).
+
 Minimum supported backup mechanism is `pg_dump`/`pg_restore` against the
 `postgres` service's volume:
 
@@ -364,8 +376,9 @@ not from backups taken before; they age out with your backup retention.
 
 ## Database migrations
 
-The schema is `server/migrations/0001_init.sql`, applied automatically at
-server startup via `sqlx::migrate!`. To apply it by hand instead:
+The schema is the numbered files in `server/migrations/` (`0001_init.sql`,
+`0002_restore_points.sql`, …), applied automatically at server startup via
+`sqlx::migrate!`. Migrations are append-only. To apply them by hand instead:
 
 ```bash
 cd server

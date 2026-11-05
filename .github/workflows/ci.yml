@@ -108,7 +108,7 @@ jobs:
       - name: Apply the database schema
         run: |
           command -v psql >/dev/null || sudo apt-get install -y --no-install-recommends postgresql-client
-          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f migrations/0001_init.sql
+          for f in migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"; done
 
       - run: cargo fmt --check
 
