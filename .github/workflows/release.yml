@@ -3,8 +3,6 @@ name: Release
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
   workflow_dispatch: {}
 
 permissions: {}
@@ -23,10 +21,10 @@ env:
 # into a `run:` script; they are passed through `env:` and read as "$VAR".
 jobs:
   # Nothing below that tags, pushes an image or publishes an extension runs
-  # until this passes. Pull requests skip it: ci.yml already runs for them, and
-  # a PR build pushes and publishes nothing.
+  # until this passes. Releases run only on main: a manual run from any other
+  # branch skips every job.
   ci:
-    if: github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
     uses: ./.github/workflows/ci.yml
@@ -41,7 +39,7 @@ jobs:
   # a bump commit only ever follow a green build.
   version:
     needs: ci
-    if: ${{ !cancelled() && (needs.ci.result == 'success' || needs.ci.result == 'skipped') }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.ci.result == 'success' }}
     runs-on: ubuntu-latest
     concurrency:
       group: release-version
