@@ -90,7 +90,7 @@ async function launch(label, exe) {
     executablePath: exe,
     headless: false,
     viewport: { width: 1000, height: 800 },
-    args: ["--headless=new", `--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, "--no-first-run", "--no-default-browser-check"],
+    args: ["--headless=new", "--lang=en-US", `--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, "--no-first-run", "--no-default-browser-check"],
   });
   const sw = ctx.serviceWorkers()[0] ?? (await ctx.waitForEvent("serviceworker", { timeout: 15_000 }));
   watchWorker(label, sw);

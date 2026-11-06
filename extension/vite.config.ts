@@ -2,7 +2,7 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync 
 import { join, resolve } from "path";
 import { defineConfig, type Plugin } from "vite";
 
-/// Copies static extension assets (manifest.json, icons) into dist/ after
+/// Copies static extension assets (manifest.json, icons, _locales) into dist/ after
 /// the JS/HTML build, since Vite only processes files reachable from a
 /// declared rollup input.
 function copyStaticAssets(): Plugin {
@@ -16,6 +16,12 @@ function copyStaticAssets(): Plugin {
         if (existsSync(src)) {
           copyFileSync(src, resolve(__dirname, "dist", file));
         }
+      }
+      // Interface strings: the manifest's __MSG_*__ names and the popup's own
+      // loader (src/i18n.ts) both read these.
+      const localesDir = resolve(__dirname, "_locales");
+      if (existsSync(localesDir)) {
+        cpSync(localesDir, resolve(__dirname, "dist", "_locales"), { recursive: true });
       }
       const iconsDir = resolve(__dirname, "icons");
       if (existsSync(iconsDir)) {

@@ -95,10 +95,12 @@ function ensureSyncAlarm(): void {
 
 let lastStatus: SyncStatus = "idle";
 let lastErrorDetail: string | undefined;
+let lastErrorCode: string | undefined;
 
-onStatusChange((status, detail) => {
+onStatusChange((status, detail, code) => {
   lastStatus = status;
   lastErrorDetail = detail;
+  lastErrorCode = code;
 });
 
 // A push goes through the throttled local-sync path so a burst of pushes
@@ -453,6 +455,7 @@ async function handleMessage(message: PopupMessage | undefined): Promise<unknown
       return {
         status: lastStatus,
         errorDetail: lastErrorDetail,
+        errorCode: lastErrorCode,
         pendingCount,
         lastSyncAt: state.lastSyncAt,
       };

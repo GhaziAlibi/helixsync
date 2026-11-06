@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { Trans, useTranslation } from "react-i18next";
 import { ApiError, recoverAccount } from "../api/client";
 import RecoveryCodeNotice from "../components/RecoveryCodeNotice";
+import LanguageSelect from "../components/LanguageSelect";
+import { errorText } from "../i18n/errors";
 import {
   loadPasskeyRecord,
   parseRescueFile,
@@ -16,6 +19,7 @@ import {
  * stays the same; the code is replaced by a new one, shown once. */
 export default function Recover() {
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
@@ -46,8 +50,8 @@ export default function Recover() {
     if (!record) {
       setError(
         email.includes("@")
-          ? "No passkey is saved in this browser for that email. Choose your rescue file instead."
-          : "Enter your email first, or choose your rescue file.",
+          ? t("recover.noPasskeyForEmail")
+          : t("recover.enterEmailOrFile"),
       );
       return;
     }
@@ -58,7 +62,7 @@ export default function Recover() {
       savePasskeyRecord(record);
       if (!email) setEmail(record.email);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "The passkey wasn't used.");
+      setError(errorText(err, "errors.passkeyUnused"));
     } finally {
       setPasskeyBusy(false);
     }
@@ -72,7 +76,7 @@ export default function Recover() {
       setRescue(record);
       setEmail(record.email);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Couldn't read that file.");
+      setError(errorText(err, "errors.rescueUnreadable"));
     }
   }
 
@@ -80,17 +84,17 @@ export default function Recover() {
     e.preventDefault();
     setError(null);
     if (password !== confirmPassword) {
-      setError("The passwords don't match.");
+      setError(t("login.passwordsMismatch"));
       return;
     }
     setSubmitting(true);
     try {
       setNewCode(await recoverAccount(email, code, password));
     } catch (err) {
-      if (err instanceof ApiError) {
-        setError(err.status === 401 ? "That email and recovery code don't match an account." : err.message);
+      if (err instanceof ApiError && err.status === 401) {
+        setError(t("recover.noMatch"));
       } else {
-        setError(err instanceof Error ? err.message : "Something went wrong");
+        setError(errorText(err));
       }
     } finally {
       setSubmitting(false);
@@ -98,30 +102,29 @@ export default function Recover() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50">
+    <div className="min-h-screen flex flex-col items-center justify-center gap-4 bg-slate-50">
       <div className="w-full max-w-sm bg-white rounded-lg shadow-sm p-8">
         <h1 className="text-xl font-semibold mb-1">HelixSync</h1>
         {newCode ? (
           <>
-            <p className="text-sm text-slate-500 mb-6">Your password was reset</p>
+            <p className="text-sm text-slate-500 mb-6">{t("recover.done")}</p>
             <p className="text-sm text-slate-700 mb-4">
-              Your old recovery code no longer works. Every browser session was signed out; connected extensions keep
-              syncing.
+              {t("recover.doneBody")}
             </p>
             <RecoveryCodeNotice
               code={newCode}
               email={email}
-              continueLabel="Sign in"
+              continueLabel={t("recover.continue")}
               confirmOnServer={false}
               onContinue={() => navigate("/login", { replace: true })}
             />
           </>
         ) : (
           <>
-            <p className="text-sm text-slate-500 mb-6">Reset your password with your recovery code</p>
+            <p className="text-sm text-slate-500 mb-6">{t("recover.subtitle")}</p>
             <form onSubmit={onSubmit} className="flex flex-col gap-4">
               <label className="flex flex-col gap-1 text-sm">
-                Email
+                {t("login.email")}
                 <input
                   type="email"
                   required
@@ -131,7 +134,7 @@ export default function Recover() {
                 />
               </label>
               <label className="flex flex-col gap-1 text-sm">
-                Recovery code
+                {t("recover.code")}
                 <input
                   type="text"
                   required
@@ -144,7 +147,7 @@ export default function Recover() {
                 />
               </label>
               <label className="flex flex-col gap-1 text-sm">
-                New password
+                {t("recover.newPassword")}
                 <input
                   type="password"
                   required
@@ -156,7 +159,7 @@ export default function Recover() {
                 />
               </label>
               <label className="flex flex-col gap-1 text-sm">
-                Confirm new password
+                {t("recover.confirmNewPassword")}
                 <input
                   type="password"
                   required
@@ -172,12 +175,12 @@ export default function Recover() {
                 disabled={submitting}
                 className="rounded bg-slate-900 text-white py-2 text-sm font-medium disabled:opacity-50"
               >
-                {submitting ? "Resetting…" : "Reset password"}
+                {submitting ? t("recover.submitting") : t("recover.submit")}
               </button>
             </form>
             {passkeyOk && (
               <div className="mt-4 flex flex-col gap-2 border-t border-slate-200 pt-4">
-                <p className="text-sm text-slate-500">Saved your recovery code with a passkey?</p>
+                <p className="text-sm text-slate-500">{t("recover.passkeyQuestion")}</p>
                 <div className="flex gap-2">
                   <button
                     type="button"
@@ -185,14 +188,14 @@ export default function Recover() {
                     onClick={usePasskey}
                     className="flex-1 rounded border border-slate-300 py-2 text-sm disabled:opacity-50"
                   >
-                    {passkeyBusy ? "Waiting…" : "Use my passkey"}
+                    {passkeyBusy ? t("recover.waiting") : t("recover.usePasskey")}
                   </button>
                   <button
                     type="button"
                     onClick={() => fileInput.current?.click()}
                     className="flex-1 rounded border border-slate-300 py-2 text-sm"
                   >
-                    {rescue ? "Rescue file loaded" : "Choose rescue file"}
+                    {rescue ? t("recover.rescueLoaded") : t("recover.chooseRescue")}
                   </button>
                   <input
                     ref={fileInput}
@@ -205,22 +208,18 @@ export default function Recover() {
               </div>
             )}
             <p className="mt-4 text-sm text-slate-500">
-              Forgot the code too, with two of your browsers still connected?{" "}
-              <Link to="/reset" className="underline">
-                Reset with two of my browsers
-              </Link>
-              .
+              <Trans i18nKey="recover.forgotBoth" components={{ anchor: <Link to="/reset" className="underline" /> }} />
             </p>
             <p className="mt-4 text-sm text-slate-500">
-              Lost your recovery code too? Whoever runs this server can delete the account so you can register again;
-              browsers that are still connected upload their bookmarks and history again when you reconnect them.
+              {t("recover.lostBoth")}
             </p>
             <Link to="/login" className="mt-4 inline-block text-sm text-slate-500 underline">
-              Back to sign in
+              {t("recover.back")}
             </Link>
           </>
         )}
       </div>
+      <LanguageSelect />
     </div>
   );
 }

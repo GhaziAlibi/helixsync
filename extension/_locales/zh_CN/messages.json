@@ -1,0 +1,596 @@
+{
+  "extName": {
+    "message": "HelixSync"
+  },
+  "extDescription": {
+    "message": "面向 Helium 和其他 Chromium 内核浏览器的自托管、隐私优先的浏览器同步工具。"
+  },
+  "common_loading": {
+    "message": "加载中…"
+  },
+  "common_cancel": {
+    "message": "取消"
+  },
+  "common_disconnect": {
+    "message": "断开连接"
+  },
+  "common_delete": {
+    "message": "删除"
+  },
+  "time_never": {
+    "message": "从未"
+  },
+  "time_justNow": {
+    "message": "刚刚"
+  },
+  "language_legend": {
+    "message": "语言"
+  },
+  "language_label": {
+    "message": "界面语言"
+  },
+  "language_auto": {
+    "message": "浏览器默认"
+  },
+  "header_back": {
+    "message": "返回"
+  },
+  "header_settings": {
+    "message": "设置"
+  },
+  "header_restorePoints": {
+    "message": "还原点"
+  },
+  "status_syncing": {
+    "message": "正在同步…"
+  },
+  "status_error": {
+    "message": "同步错误"
+  },
+  "status_needsReauth": {
+    "message": "需要重新授权"
+  },
+  "status_synced": {
+    "message": "已同步"
+  },
+  "statusErr_rate_limited": {
+    "message": "请求过多。同步稍后会重试。"
+  },
+  "statusErr_unauthorized": {
+    "message": "服务器拒绝了此设备的登录。"
+  },
+  "statusErr_busy": {
+    "message": "服务器繁忙。同步稍后会重试。"
+  },
+  "statusErr_internal_error": {
+    "message": "服务器出错。同步稍后会重试。"
+  },
+  "statusErr_network": {
+    "message": "无法连接到服务器。"
+  },
+  "setup_deviceFallback": {
+    "message": "设备"
+  },
+  "setup_title": {
+    "message": "连接此浏览器"
+  },
+  "setup_subtitle": {
+    "message": "使用你的 HelixSync 账户登录以开始同步。"
+  },
+  "setup_serverUrl": {
+    "message": "服务器 URL"
+  },
+  "setup_email": {
+    "message": "电子邮件"
+  },
+  "setup_password": {
+    "message": "密码"
+  },
+  "setup_deviceName": {
+    "message": "设备名称"
+  },
+  "setup_connect": {
+    "message": "连接"
+  },
+  "setup_deviceLoginInstead": {
+    "message": "改用设备登录"
+  },
+  "setup_noAccount": {
+    "message": "没有账户？{link}"
+  },
+  "setup_registerLink": {
+    "message": "在网页上注册"
+  },
+  "setup_forgotLink": {
+    "message": "忘记密码？"
+  },
+  "setup_serverUrlFirst": {
+    "message": "请先输入有效的服务器 URL。"
+  },
+  "setup_serverUrlInvalid": {
+    "message": "请输入有效的服务器 URL。"
+  },
+  "setup_insecureUrl": {
+    "message": "服务器 URL 必须使用 https://（http:// 仅允许用于 localhost、127.0.0.1 或 [::1]）。"
+  },
+  "setup_permissionDenied": {
+    "message": "未授予联系服务器的权限。"
+  },
+  "setup_emailAndName": {
+    "message": "请先输入你的电子邮件和设备名称。"
+  },
+  "setup_permissionLastDevice": {
+    "message": "上次未授予权限——请点击“改用设备登录”重试。"
+  },
+  "setup_permissionLastConnect": {
+    "message": "上次未授予权限——请点击“连接”重试。"
+  },
+  "setup_creatingRequest": {
+    "message": "正在创建登录请求…"
+  },
+  "setup_connecting": {
+    "message": "正在连接…"
+  },
+  "setup_deriving": {
+    "message": "正在派生加密密钥…"
+  },
+  "setup_failed": {
+    "message": "失败：{message}"
+  },
+  "devicewait_title": {
+    "message": "在另一个浏览器上批准"
+  },
+  "devicewait_body": {
+    "message": "在已连接到此账户的浏览器上打开 HelixSync，并在那里批准该请求。只有当该浏览器显示的短语与下面一致时才批准："
+  },
+  "devicewait_waiting": {
+    "message": "等待批准…"
+  },
+  "devicewait_keyMismatch": {
+    "message": "密钥校验不匹配，因此已丢弃该批准。"
+  },
+  "devicewait_denied": {
+    "message": "登录请求已被拒绝。"
+  },
+  "devicewait_expired": {
+    "message": "登录请求已过期。请重新发起。"
+  },
+  "devicewait_deviceLimit": {
+    "message": "此账户已达到设备数量上限。请在网页仪表盘上撤销一台设备，此浏览器就会连接。"
+  },
+  "devicewait_stillWaiting": {
+    "message": "仍在等待：{message}"
+  },
+  "keycheck_title": {
+    "message": "核对密钥"
+  },
+  "keycheck_body": {
+    "message": "批准的浏览器会在其登录请求上显示一个密钥校验短语。只有一致时才继续："
+  },
+  "keycheck_matches": {
+    "message": "一致"
+  },
+  "keycheck_mismatch": {
+    "message": "不一致"
+  },
+  "statusview_lastSync": {
+    "message": "上次同步：{time} · 待处理：{pending}"
+  },
+  "statusview_syncNow": {
+    "message": "立即同步"
+  },
+  "statusview_olderHistory": {
+    "message": "同步更早的历史记录"
+  },
+  "statusview_olderHistoryTitle": {
+    "message": "导入此浏览器中早于之前保留期限的历史记录"
+  },
+  "statusview_importStarted": {
+    "message": "正在后台导入更早的历史记录。"
+  },
+  "statusview_importFailed": {
+    "message": "启动失败：{message}"
+  },
+  "statusview_importRequestFailed": {
+    "message": "导入请求失败"
+  },
+  "statusview_restoreRequestFailed": {
+    "message": "还原请求失败"
+  },
+  "statusview_signedInAs": {
+    "message": "已登录为 {email}"
+  },
+  "pending_header": {
+    "message": "来自其他设备的标签页（{count}）"
+  },
+  "pending_restoreAll": {
+    "message": "全部还原（{count}）"
+  },
+  "pending_failed": {
+    "message": "还原标签页失败：{message}"
+  },
+  "pending_restore": {
+    "message": "还原"
+  },
+  "pending_restoring": {
+    "message": "正在还原…"
+  },
+  "pending_showMore": {
+    "message": "再显示 {count} 个"
+  },
+  "auth_requests_other": {
+    "message": "登录请求"
+  },
+  "auth_passwordReset": {
+    "message": "密码重置"
+  },
+  "auth_webSignIn": {
+    "message": "网页仪表盘登录"
+  },
+  "auth_newBrowser": {
+    "message": "新浏览器：{name}"
+  },
+  "auth_unnamed": {
+    "message": "未命名"
+  },
+  "auth_unknownIp": {
+    "message": "未知 IP"
+  },
+  "auth_resetWarningCompletes": {
+    "message": "警告：这会让某人为你的账户设置新密码。只有当是你本人要求重置密码时才批准。目前已有 {approvals}/2 次批准；现在批准将完成重置，并把你的加密密钥交给该页面。"
+  },
+  "auth_resetWarningSecond": {
+    "message": "警告：这会让某人为你的账户设置新密码。只有当是你本人要求重置密码时才批准。目前已有 {approvals}/2 次批准；还需要第二个浏览器也批准。"
+  },
+  "auth_webConsequence": {
+    "message": "批准后，该浏览器将登录你的仪表盘。"
+  },
+  "auth_deviceConsequence": {
+    "message": "批准后，该浏览器将获得你的加密密钥和所有同步数据。"
+  },
+  "auth_approveOnlyIf": {
+    "message": "只有当另一块屏幕显示以下内容时才批准："
+  },
+  "auth_keyCheckReset": {
+    "message": "批准后，重置页面会要求你确认此密钥校验短语："
+  },
+  "auth_keyCheckDevice": {
+    "message": "批准后，新浏览器会要求你确认此密钥校验短语："
+  },
+  "auth_approve": {
+    "message": "批准"
+  },
+  "auth_deny": {
+    "message": "拒绝"
+  },
+  "auth_alreadyAnswered": {
+    "message": "此请求已被处理或已过期。"
+  },
+  "auth_resetChanged": {
+    "message": "此次重置已发生变化（此浏览器已批准，或另一个浏览器先批准了）。请重新打开弹窗。"
+  },
+  "auth_failed": {
+    "message": "失败：{message}"
+  },
+  "settings_sync": {
+    "message": "同步"
+  },
+  "settings_bookmarks": {
+    "message": "书签"
+  },
+  "settings_history": {
+    "message": "历史记录"
+  },
+  "settings_tabs": {
+    "message": "标签页"
+  },
+  "settings_tabGroups": {
+    "message": "标签页组"
+  },
+  "settings_tabRestore": {
+    "message": "标签页还原"
+  },
+  "settings_restoreRemoteTabs": {
+    "message": "还原远程标签页"
+  },
+  "settings_policyDisabled": {
+    "message": "已禁用"
+  },
+  "settings_policyAsk": {
+    "message": "还原前询问"
+  },
+  "settings_policyAutomatic": {
+    "message": "自动还原"
+  },
+  "settings_historyLegend": {
+    "message": "历史记录"
+  },
+  "settings_retention": {
+    "message": "保留时长"
+  },
+  "settings_d7": {
+    "message": "7 天"
+  },
+  "settings_d30": {
+    "message": "30 天"
+  },
+  "settings_d90": {
+    "message": "90 天"
+  },
+  "settings_y1": {
+    "message": "1 年"
+  },
+  "settings_unlimited": {
+    "message": "不限"
+  },
+  "settings_restorePointsLegend": {
+    "message": "还原点"
+  },
+  "settings_autoRestorePoints": {
+    "message": "自动还原点"
+  },
+  "settings_restorePointsHelp": {
+    "message": "你的书签的每日备份和安全备份。手动备份始终可用。"
+  },
+  "settings_account": {
+    "message": "账户"
+  },
+  "settings_password": {
+    "message": "密码"
+  },
+  "settings_changeOnWeb": {
+    "message": "在网页上修改"
+  },
+  "settings_save": {
+    "message": "保存"
+  },
+  "settings_disconnectConfirm": {
+    "message": "断开此设备？它将从你账户的设备列表中移除，你可以随时重新登录来再次连接。"
+  },
+  "settings_disconnecting": {
+    "message": "正在断开连接…"
+  },
+  "settings_tabGroupsNeedPermission": {
+    "message": "标签页组需要此浏览器的权限：请点击“保存”以允许。"
+  },
+  "settings_loadFailed": {
+    "message": "加载设置失败：{message}"
+  },
+  "settings_saving": {
+    "message": "正在保存…"
+  },
+  "settings_tabGroupsDenied": {
+    "message": "同步标签页组需要标签页组权限。请允许该权限，或关闭标签页组。"
+  },
+  "settings_saveFailed": {
+    "message": "保存失败：{message}"
+  },
+  "app_loadFailed": {
+    "message": "加载失败：{message}"
+  },
+  "rp_title": {
+    "message": "还原点"
+  },
+  "rp_subtitle": {
+    "message": "你的书签的已保存副本。出现问题时可以回退到其中一个。"
+  },
+  "rp_loading": {
+    "message": "加载中…"
+  },
+  "rp_unavailable": {
+    "message": "还原点不可用：此服务器不支持，或书签同步已关闭或仍在导入。"
+  },
+  "rp_create": {
+    "message": "创建还原点"
+  },
+  "rp_saving": {
+    "message": "正在保存…"
+  },
+  "rp_autoOff": {
+    "message": "自动还原点已关闭（设置）。"
+  },
+  "rp_uploading": {
+    "message": "正在上传… {kind}"
+  },
+  "rp_empty": {
+    "message": "还没有还原点。"
+  },
+  "rp_saved": {
+    "message": "已保存"
+  },
+  "rp_pinned": {
+    "message": "已固定"
+  },
+  "rp_removedDevice": {
+    "message": "已移除的设备"
+  },
+  "rp_lastRestored": {
+    "message": "上次还原：{date}"
+  },
+  "rp_restoreEllipsis": {
+    "message": "还原…"
+  },
+  "rp_pin": {
+    "message": "固定"
+  },
+  "rp_unpin": {
+    "message": "取消固定"
+  },
+  "rp_delete": {
+    "message": "删除"
+  },
+  "rp_deleteConfirm": {
+    "message": "删除 {date} 的还原点？此操作无法撤销。"
+  },
+  "rp_bookmarks_other": {
+    "message": "{count} 个书签"
+  },
+  "rp_kind_manual": {
+    "message": "手动"
+  },
+  "rp_kind_scheduled": {
+    "message": "每日"
+  },
+  "rp_kind_pre_restore": {
+    "message": "还原前"
+  },
+  "rp_kind_pre_import": {
+    "message": "首次导入前"
+  },
+  "rp_kind_pre_resync": {
+    "message": "重新同步前"
+  },
+  "rp_kind_mass_delete": {
+    "message": "批量删除前"
+  },
+  "rp_opening": {
+    "message": "正在打开还原点…"
+  },
+  "rp_restoreTitle": {
+    "message": "还原"
+  },
+  "rp_from": {
+    "message": "来自 {date}"
+  },
+  "rp_back": {
+    "message": "返回"
+  },
+  "rp_whatToRestore": {
+    "message": "还原内容"
+  },
+  "rp_allBookmarks": {
+    "message": "所有书签"
+  },
+  "rp_oneFolder": {
+    "message": "一个文件夹…"
+  },
+  "rp_how": {
+    "message": "方式"
+  },
+  "rp_modeMerge": {
+    "message": "合并：找回缺失的内容，撤销编辑。不删除任何内容。"
+  },
+  "rp_modeExact": {
+    "message": "精确：同时删除不在此还原点中的书签。"
+  },
+  "rp_preview": {
+    "message": "预览"
+  },
+  "rp_restoreAction": {
+    "message": "还原"
+  },
+  "rp_pickFolderBelow": {
+    "message": "请在下方选择一个文件夹。"
+  },
+  "rp_pickFolderFirst": {
+    "message": "请先选择一个文件夹。"
+  },
+  "rp_folder": {
+    "message": "文件夹：{name}"
+  },
+  "rp_untitled": {
+    "message": "（无标题）"
+  },
+  "rp_working": {
+    "message": "正在计算…"
+  },
+  "rp_nothingToDo": {
+    "message": "无需操作：你的书签已与此还原点一致。"
+  },
+  "rp_previewRestored_other": {
+    "message": "找回 {count} 个书签或文件夹"
+  },
+  "rp_previewUpdated_other": {
+    "message": "更改 {count} 个书签或文件夹"
+  },
+  "rp_previewMoved_other": {
+    "message": "移动 {count} 个书签或文件夹"
+  },
+  "rp_previewDeleted_other": {
+    "message": "删除 {count} 个书签或文件夹"
+  },
+  "rp_sampleMore": {
+    "message": "{titles}，以及另外 {more} 个"
+  },
+  "rp_skipped_other": {
+    "message": "已跳过 {count} 个书签（不支持的地址）。"
+  },
+  "rp_confirmExactAll": {
+    "message": "精确还原你的所有书签？在 {date} 之后添加的书签将从所有设备中删除。操作前会先保存你当前书签的副本。"
+  },
+  "rp_confirmExactFolder": {
+    "message": "精确还原文件夹“{name}”？在 {date} 之后添加的书签将从所有设备中删除。操作前会先保存你当前书签的副本。"
+  },
+  "rp_confirmMergeAll": {
+    "message": "从 {date} 还原你的所有书签？操作前会先保存你当前书签的副本。"
+  },
+  "rp_confirmMergeFolder": {
+    "message": "从 {date} 还原文件夹“{name}”？操作前会先保存你当前书签的副本。"
+  },
+  "rp_noFolders": {
+    "message": "此还原点没有文件夹。"
+  },
+  "rp_restoring": {
+    "message": "正在还原"
+  },
+  "rp_prepare": {
+    "message": "正在保存你的书签副本并做好准备…"
+  },
+  "rp_applying": {
+    "message": "正在还原… {applied}/{total}"
+  },
+  "rp_finishing": {
+    "message": "正在完成…"
+  },
+  "rp_done": {
+    "message": "完成。"
+  },
+  "rp_doneCounts": {
+    "message": "已找回 {restored} 个，已更改 {updated} 个，已移动 {moved} 个，已删除 {deleted} 个。"
+  },
+  "rp_stopped": {
+    "message": "还原已停止。"
+  },
+  "rp_doneButton": {
+    "message": "完成"
+  },
+  "rp_err_bookmarksNotReady": {
+    "message": "书签仍在为同步做准备。请稍后再试。"
+  },
+  "rp_err_limit": {
+    "message": "没有空间创建新的还原点：其余的都已固定。请先取消固定或删除一个。"
+  },
+  "rp_err_pinLimit": {
+    "message": "固定的还原点过多。请先取消固定一个。"
+  },
+  "rp_err_inProgress": {
+    "message": "已有一个还原正在进行。"
+  },
+  "rp_err_unreadable": {
+    "message": "无法读取此还原点，因此未应用。"
+  },
+  "rp_err_updateNeeded": {
+    "message": "请更新 HelixSync 扩展以使用此还原点。"
+  },
+  "rp_err_offline": {
+    "message": "无法连接到服务器。"
+  },
+  "rp_err_reauth": {
+    "message": "请重新登录以使用还原点。"
+  },
+  "rp_err_syncFailed": {
+    "message": "还原前无法同步。请检查你的网络连接后重试。"
+  },
+  "rp_err_preRestoreFailed": {
+    "message": "无法先保存你的书签副本，因此没有还原任何内容。"
+  },
+  "rp_err_unavailable": {
+    "message": "此服务器不支持还原点。"
+  },
+  "rp_err_noAnswer": {
+    "message": "扩展没有响应。"
+  },
+  "rp_err_generic": {
+    "message": "出了点问题。"
+  }
+}

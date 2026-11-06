@@ -1,0 +1,617 @@
+{
+  "extName": {
+    "message": "HelixSync"
+  },
+  "extDescription": {
+    "message": "Synchronisation de navigateur auto-hébergée et respectueuse de la vie privée pour Helium et les autres navigateurs Chromium."
+  },
+  "common_loading": {
+    "message": "Chargement…"
+  },
+  "common_cancel": {
+    "message": "Annuler"
+  },
+  "common_disconnect": {
+    "message": "Déconnecter"
+  },
+  "common_delete": {
+    "message": "Supprimer"
+  },
+  "time_never": {
+    "message": "jamais"
+  },
+  "time_justNow": {
+    "message": "à l'instant"
+  },
+  "language_legend": {
+    "message": "Langue"
+  },
+  "language_label": {
+    "message": "Langue de l'interface"
+  },
+  "language_auto": {
+    "message": "Par défaut du navigateur"
+  },
+  "header_back": {
+    "message": "Retour"
+  },
+  "header_settings": {
+    "message": "Paramètres"
+  },
+  "header_restorePoints": {
+    "message": "Points de restauration"
+  },
+  "status_syncing": {
+    "message": "Synchronisation…"
+  },
+  "status_error": {
+    "message": "Erreur de synchronisation"
+  },
+  "status_needsReauth": {
+    "message": "Nouvelle autorisation requise"
+  },
+  "status_synced": {
+    "message": "Synchronisé"
+  },
+  "statusErr_rate_limited": {
+    "message": "Trop de requêtes. La synchronisation réessaiera sous peu."
+  },
+  "statusErr_unauthorized": {
+    "message": "Le serveur a refusé la connexion de cet appareil."
+  },
+  "statusErr_busy": {
+    "message": "Le serveur est occupé. La synchronisation réessaiera sous peu."
+  },
+  "statusErr_internal_error": {
+    "message": "Le serveur a rencontré une erreur. La synchronisation réessaiera sous peu."
+  },
+  "statusErr_network": {
+    "message": "Impossible de joindre le serveur."
+  },
+  "setup_deviceFallback": {
+    "message": "Appareil"
+  },
+  "setup_title": {
+    "message": "Connecter ce navigateur"
+  },
+  "setup_subtitle": {
+    "message": "Connectez-vous avec votre compte HelixSync pour commencer à synchroniser."
+  },
+  "setup_serverUrl": {
+    "message": "URL du serveur"
+  },
+  "setup_email": {
+    "message": "E-mail"
+  },
+  "setup_password": {
+    "message": "Mot de passe"
+  },
+  "setup_deviceName": {
+    "message": "Nom de l'appareil"
+  },
+  "setup_connect": {
+    "message": "Se connecter"
+  },
+  "setup_deviceLoginInstead": {
+    "message": "Se connecter plutôt avec un appareil"
+  },
+  "setup_noAccount": {
+    "message": "Pas de compte ? {link}"
+  },
+  "setup_registerLink": {
+    "message": "Inscrivez-vous sur le web"
+  },
+  "setup_forgotLink": {
+    "message": "Mot de passe oublié ?"
+  },
+  "setup_serverUrlFirst": {
+    "message": "Saisissez d'abord une URL de serveur valide."
+  },
+  "setup_serverUrlInvalid": {
+    "message": "Saisissez une URL de serveur valide."
+  },
+  "setup_insecureUrl": {
+    "message": "L'URL du serveur doit utiliser https:// (http:// n'est autorisé que pour localhost, 127.0.0.1 ou [::1])."
+  },
+  "setup_permissionDenied": {
+    "message": "L'autorisation de contacter le serveur n'a pas été accordée."
+  },
+  "setup_emailAndName": {
+    "message": "Saisissez d'abord votre adresse e-mail et un nom d'appareil."
+  },
+  "setup_permissionLastDevice": {
+    "message": "L'autorisation n'avait pas été accordée la dernière fois — cliquez sur « Se connecter plutôt avec un appareil » pour réessayer."
+  },
+  "setup_permissionLastConnect": {
+    "message": "L'autorisation n'avait pas été accordée la dernière fois — cliquez sur « Se connecter » pour réessayer."
+  },
+  "setup_creatingRequest": {
+    "message": "Création de la demande de connexion…"
+  },
+  "setup_connecting": {
+    "message": "Connexion…"
+  },
+  "setup_deriving": {
+    "message": "Dérivation de la clé de chiffrement…"
+  },
+  "setup_failed": {
+    "message": "Échec : {message}"
+  },
+  "devicewait_title": {
+    "message": "Approuvez depuis un autre navigateur"
+  },
+  "devicewait_body": {
+    "message": "Ouvrez HelixSync dans un navigateur déjà connecté à ce compte et approuvez la demande depuis celui-ci. Ne l'approuvez que si ce navigateur affiche cette phrase :"
+  },
+  "devicewait_waiting": {
+    "message": "En attente d'approbation…"
+  },
+  "devicewait_keyMismatch": {
+    "message": "La vérification de la clé ne correspondait pas : l'approbation a donc été abandonnée."
+  },
+  "devicewait_denied": {
+    "message": "La demande de connexion a été refusée."
+  },
+  "devicewait_expired": {
+    "message": "La demande de connexion a expiré. Lancez-en une nouvelle."
+  },
+  "devicewait_deviceLimit": {
+    "message": "Ce compte a atteint le nombre maximal d'appareils. Révoquez-en un depuis le tableau de bord web et ce navigateur se connectera."
+  },
+  "devicewait_stillWaiting": {
+    "message": "Toujours en attente : {message}"
+  },
+  "keycheck_title": {
+    "message": "Vérifiez la clé"
+  },
+  "keycheck_body": {
+    "message": "Le navigateur qui approuve affiche une phrase de vérification de la clé sur sa demande de connexion. Ne continuez que si elle correspond :"
+  },
+  "keycheck_matches": {
+    "message": "Elle correspond"
+  },
+  "keycheck_mismatch": {
+    "message": "Elle ne correspond pas"
+  },
+  "statusview_lastSync": {
+    "message": "Dernière synchronisation : {time} · En attente : {pending}"
+  },
+  "statusview_syncNow": {
+    "message": "Synchroniser maintenant"
+  },
+  "statusview_olderHistory": {
+    "message": "Synchroniser l'historique plus ancien"
+  },
+  "statusview_olderHistoryTitle": {
+    "message": "Importer l'historique de ce navigateur plus ancien que l'ancienne période de conservation"
+  },
+  "statusview_importStarted": {
+    "message": "Import de l'historique plus ancien en arrière-plan."
+  },
+  "statusview_importFailed": {
+    "message": "Échec du démarrage : {message}"
+  },
+  "statusview_importRequestFailed": {
+    "message": "La demande d'import a échoué"
+  },
+  "statusview_restoreRequestFailed": {
+    "message": "La demande de restauration a échoué"
+  },
+  "statusview_signedInAs": {
+    "message": "Connecté en tant que {email}"
+  },
+  "pending_header": {
+    "message": "Onglets d'autres appareils ({count})"
+  },
+  "pending_restoreAll": {
+    "message": "Tout restaurer ({count})"
+  },
+  "pending_failed": {
+    "message": "Échec de la restauration de l'onglet : {message}"
+  },
+  "pending_restore": {
+    "message": "Restaurer"
+  },
+  "pending_restoring": {
+    "message": "Restauration…"
+  },
+  "pending_showMore": {
+    "message": "Afficher {count} de plus"
+  },
+  "auth_requests_one": {
+    "message": "Demande de connexion"
+  },
+  "auth_requests_other": {
+    "message": "Demandes de connexion"
+  },
+  "auth_passwordReset": {
+    "message": "RÉINITIALISATION DU MOT DE PASSE"
+  },
+  "auth_webSignIn": {
+    "message": "Connexion au tableau de bord web"
+  },
+  "auth_newBrowser": {
+    "message": "Nouveau navigateur : {name}"
+  },
+  "auth_unnamed": {
+    "message": "sans nom"
+  },
+  "auth_unknownIp": {
+    "message": "IP inconnue"
+  },
+  "auth_resetWarningCompletes": {
+    "message": "ATTENTION : cela permet à quelqu'un de définir un nouveau mot de passe pour votre compte. N'approuvez que si C'EST VOUS qui avez demandé la réinitialisation. {approvals} approbation(s) sur 2 jusqu'ici ; approuver maintenant la termine et transmet votre clé de chiffrement à cette page."
+  },
+  "auth_resetWarningSecond": {
+    "message": "ATTENTION : cela permet à quelqu'un de définir un nouveau mot de passe pour votre compte. N'approuvez que si C'EST VOUS qui avez demandé la réinitialisation. {approvals} approbation(s) sur 2 jusqu'ici ; un second navigateur doit aussi approuver."
+  },
+  "auth_webConsequence": {
+    "message": "Approuver connecte ce navigateur à votre tableau de bord."
+  },
+  "auth_deviceConsequence": {
+    "message": "Approuver donne à ce navigateur votre clé de chiffrement et toutes vos données synchronisées."
+  },
+  "auth_approveOnlyIf": {
+    "message": "N'approuvez que si l'autre écran affiche :"
+  },
+  "auth_keyCheckReset": {
+    "message": "Après votre approbation, la page de réinitialisation vous demandera de confirmer cette phrase de vérification de la clé :"
+  },
+  "auth_keyCheckDevice": {
+    "message": "Après votre approbation, le nouveau navigateur vous demandera de confirmer cette phrase de vérification de la clé :"
+  },
+  "auth_approve": {
+    "message": "Approuver"
+  },
+  "auth_deny": {
+    "message": "Refuser"
+  },
+  "auth_alreadyAnswered": {
+    "message": "Cette demande a déjà reçu une réponse ou a expiré."
+  },
+  "auth_resetChanged": {
+    "message": "Cette réinitialisation a changé (ce navigateur a déjà approuvé, ou un autre l'a fait avant). Rouvrez la fenêtre."
+  },
+  "auth_failed": {
+    "message": "Échec : {message}"
+  },
+  "settings_sync": {
+    "message": "Synchronisation"
+  },
+  "settings_bookmarks": {
+    "message": "Favoris"
+  },
+  "settings_history": {
+    "message": "Historique"
+  },
+  "settings_tabs": {
+    "message": "Onglets"
+  },
+  "settings_tabGroups": {
+    "message": "Groupes d'onglets"
+  },
+  "settings_tabRestore": {
+    "message": "Restauration des onglets"
+  },
+  "settings_restoreRemoteTabs": {
+    "message": "Restaurer les onglets distants"
+  },
+  "settings_policyDisabled": {
+    "message": "Désactivée"
+  },
+  "settings_policyAsk": {
+    "message": "Demander avant de restaurer"
+  },
+  "settings_policyAutomatic": {
+    "message": "Restaurer automatiquement"
+  },
+  "settings_historyLegend": {
+    "message": "Historique"
+  },
+  "settings_retention": {
+    "message": "Conservation"
+  },
+  "settings_d7": {
+    "message": "7 jours"
+  },
+  "settings_d30": {
+    "message": "30 jours"
+  },
+  "settings_d90": {
+    "message": "90 jours"
+  },
+  "settings_y1": {
+    "message": "1 an"
+  },
+  "settings_unlimited": {
+    "message": "Illimitée"
+  },
+  "settings_restorePointsLegend": {
+    "message": "Points de restauration"
+  },
+  "settings_autoRestorePoints": {
+    "message": "Points de restauration automatiques"
+  },
+  "settings_restorePointsHelp": {
+    "message": "Copies quotidiennes et de sécurité de vos favoris. Les copies manuelles sont toujours disponibles."
+  },
+  "settings_account": {
+    "message": "Compte"
+  },
+  "settings_password": {
+    "message": "Mot de passe"
+  },
+  "settings_changeOnWeb": {
+    "message": "Modifier sur le web"
+  },
+  "settings_save": {
+    "message": "Enregistrer"
+  },
+  "settings_disconnectConfirm": {
+    "message": "Déconnecter cet appareil ? Il sera retiré de la liste des appareils de votre compte, et vous pourrez le reconnecter à tout moment en vous reconnectant."
+  },
+  "settings_disconnecting": {
+    "message": "Déconnexion…"
+  },
+  "settings_tabGroupsNeedPermission": {
+    "message": "Les groupes d'onglets nécessitent une autorisation dans ce navigateur : appuyez sur Enregistrer pour l'accorder."
+  },
+  "settings_loadFailed": {
+    "message": "Échec du chargement des paramètres : {message}"
+  },
+  "settings_saving": {
+    "message": "Enregistrement…"
+  },
+  "settings_tabGroupsDenied": {
+    "message": "La synchronisation des groupes d'onglets nécessite l'autorisation des groupes d'onglets. Accordez-la, ou désactivez les groupes d'onglets."
+  },
+  "settings_saveFailed": {
+    "message": "Échec de l'enregistrement : {message}"
+  },
+  "app_loadFailed": {
+    "message": "Échec du chargement : {message}"
+  },
+  "rp_title": {
+    "message": "Points de restauration"
+  },
+  "rp_subtitle": {
+    "message": "Copies enregistrées de vos favoris. Revenez à l'une d'elles si quelque chose tourne mal."
+  },
+  "rp_loading": {
+    "message": "Chargement…"
+  },
+  "rp_unavailable": {
+    "message": "Les points de restauration ne sont pas disponibles : ce serveur ne les prend pas en charge, ou la synchronisation des favoris est désactivée ou encore en cours d'import."
+  },
+  "rp_create": {
+    "message": "Créer un point de restauration"
+  },
+  "rp_saving": {
+    "message": "Enregistrement…"
+  },
+  "rp_autoOff": {
+    "message": "Les points de restauration automatiques sont désactivés (Paramètres)."
+  },
+  "rp_uploading": {
+    "message": "Envoi… {kind}"
+  },
+  "rp_empty": {
+    "message": "Aucun point de restauration pour l'instant."
+  },
+  "rp_saved": {
+    "message": "Enregistrés"
+  },
+  "rp_pinned": {
+    "message": "Épinglé"
+  },
+  "rp_removedDevice": {
+    "message": "un appareil supprimé"
+  },
+  "rp_lastRestored": {
+    "message": "Dernière restauration : {date}"
+  },
+  "rp_restoreEllipsis": {
+    "message": "Restaurer…"
+  },
+  "rp_pin": {
+    "message": "Épingler"
+  },
+  "rp_unpin": {
+    "message": "Désépingler"
+  },
+  "rp_delete": {
+    "message": "Supprimer"
+  },
+  "rp_deleteConfirm": {
+    "message": "Supprimer le point de restauration du {date} ? Cette action est irréversible."
+  },
+  "rp_bookmarks_one": {
+    "message": "{count} favori"
+  },
+  "rp_bookmarks_other": {
+    "message": "{count} favoris"
+  },
+  "rp_kind_manual": {
+    "message": "Manuel"
+  },
+  "rp_kind_scheduled": {
+    "message": "Quotidien"
+  },
+  "rp_kind_pre_restore": {
+    "message": "Avant une restauration"
+  },
+  "rp_kind_pre_import": {
+    "message": "Avant le premier import"
+  },
+  "rp_kind_pre_resync": {
+    "message": "Avant une resynchronisation"
+  },
+  "rp_kind_mass_delete": {
+    "message": "Avant une suppression massive"
+  },
+  "rp_opening": {
+    "message": "Ouverture du point de restauration…"
+  },
+  "rp_restoreTitle": {
+    "message": "Restaurer"
+  },
+  "rp_from": {
+    "message": "Du {date}"
+  },
+  "rp_back": {
+    "message": "Retour"
+  },
+  "rp_whatToRestore": {
+    "message": "Que restaurer"
+  },
+  "rp_allBookmarks": {
+    "message": "Tous les favoris"
+  },
+  "rp_oneFolder": {
+    "message": "Un dossier…"
+  },
+  "rp_how": {
+    "message": "Comment"
+  },
+  "rp_modeMerge": {
+    "message": "Fusionner : récupère ce qui manque et annule les modifications. Ne supprime rien."
+  },
+  "rp_modeExact": {
+    "message": "Exact : supprime aussi les favoris qui ne figurent pas dans ce point."
+  },
+  "rp_preview": {
+    "message": "Aperçu"
+  },
+  "rp_restoreAction": {
+    "message": "Restaurer"
+  },
+  "rp_pickFolderBelow": {
+    "message": "Choisissez un dossier ci-dessous."
+  },
+  "rp_pickFolderFirst": {
+    "message": "Choisissez d'abord un dossier."
+  },
+  "rp_folder": {
+    "message": "Dossier : {name}"
+  },
+  "rp_untitled": {
+    "message": "(sans titre)"
+  },
+  "rp_working": {
+    "message": "Calcul en cours…"
+  },
+  "rp_nothingToDo": {
+    "message": "Rien à faire : vos favoris correspondent déjà à ce point de restauration."
+  },
+  "rp_previewRestored_one": {
+    "message": "Récupérer {count} favori ou dossier"
+  },
+  "rp_previewRestored_other": {
+    "message": "Récupérer {count} favoris ou dossiers"
+  },
+  "rp_previewUpdated_one": {
+    "message": "Modifier {count} favori ou dossier"
+  },
+  "rp_previewUpdated_other": {
+    "message": "Modifier {count} favoris ou dossiers"
+  },
+  "rp_previewMoved_one": {
+    "message": "Déplacer {count} favori ou dossier"
+  },
+  "rp_previewMoved_other": {
+    "message": "Déplacer {count} favoris ou dossiers"
+  },
+  "rp_previewDeleted_one": {
+    "message": "Supprimer {count} favori ou dossier"
+  },
+  "rp_previewDeleted_other": {
+    "message": "Supprimer {count} favoris ou dossiers"
+  },
+  "rp_sampleMore": {
+    "message": "{titles}, et {more} de plus"
+  },
+  "rp_skipped_one": {
+    "message": "{count} favori ignoré (adresse non prise en charge)."
+  },
+  "rp_skipped_other": {
+    "message": "{count} favoris ignorés (adresse non prise en charge)."
+  },
+  "rp_confirmExactAll": {
+    "message": "Restaurer exactement tous vos favoris ? Les favoris ajoutés après le {date} seront supprimés de tous les appareils. Une copie de vos favoris actuels est d'abord enregistrée."
+  },
+  "rp_confirmExactFolder": {
+    "message": "Restaurer exactement le dossier « {name} » ? Les favoris ajoutés après le {date} seront supprimés de tous les appareils. Une copie de vos favoris actuels est d'abord enregistrée."
+  },
+  "rp_confirmMergeAll": {
+    "message": "Restaurer tous vos favoris du {date} ? Une copie de vos favoris actuels est d'abord enregistrée."
+  },
+  "rp_confirmMergeFolder": {
+    "message": "Restaurer le dossier « {name} » du {date} ? Une copie de vos favoris actuels est d'abord enregistrée."
+  },
+  "rp_noFolders": {
+    "message": "Ce point de restauration ne contient aucun dossier."
+  },
+  "rp_restoring": {
+    "message": "Restauration"
+  },
+  "rp_prepare": {
+    "message": "Enregistrement d'une copie de vos favoris et préparation…"
+  },
+  "rp_applying": {
+    "message": "Restauration… {applied} sur {total}"
+  },
+  "rp_finishing": {
+    "message": "Finalisation…"
+  },
+  "rp_done": {
+    "message": "Terminé."
+  },
+  "rp_doneCounts": {
+    "message": "{restored} récupéré(s), {updated} modifié(s), {moved} déplacé(s), {deleted} supprimé(s)."
+  },
+  "rp_stopped": {
+    "message": "La restauration s'est arrêtée."
+  },
+  "rp_doneButton": {
+    "message": "Terminé"
+  },
+  "rp_err_bookmarksNotReady": {
+    "message": "Les favoris sont encore en cours de préparation pour la synchronisation. Réessayez dans un instant."
+  },
+  "rp_err_limit": {
+    "message": "Pas de place pour un nouveau point de restauration : les autres sont épinglés. Désépinglez-en ou supprimez-en un d'abord."
+  },
+  "rp_err_pinLimit": {
+    "message": "Trop de points de restauration épinglés. Désépinglez-en un d'abord."
+  },
+  "rp_err_inProgress": {
+    "message": "Une restauration est déjà en cours."
+  },
+  "rp_err_unreadable": {
+    "message": "Ce point de restauration est illisible et n'a donc pas été appliqué."
+  },
+  "rp_err_updateNeeded": {
+    "message": "Mettez à jour l'extension HelixSync pour utiliser ce point de restauration."
+  },
+  "rp_err_offline": {
+    "message": "Impossible de joindre le serveur."
+  },
+  "rp_err_reauth": {
+    "message": "Reconnectez-vous pour utiliser les points de restauration."
+  },
+  "rp_err_syncFailed": {
+    "message": "Impossible de synchroniser avant la restauration. Vérifiez votre connexion et réessayez."
+  },
+  "rp_err_preRestoreFailed": {
+    "message": "Impossible d'enregistrer d'abord une copie de vos favoris : rien n'a donc été restauré."
+  },
+  "rp_err_unavailable": {
+    "message": "Ce serveur ne prend pas en charge les points de restauration."
+  },
+  "rp_err_noAnswer": {
+    "message": "L'extension n'a pas répondu."
+  },
+  "rp_err_generic": {
+    "message": "Un problème est survenu."
+  }
+}

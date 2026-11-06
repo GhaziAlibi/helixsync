@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "HelixSync",
+  "name": "__MSG_extName__",
+  "default_locale": "en",
   "version": "1.0.10",
-  "description": "Self-hosted, privacy-first browser synchronization for Helium and other Chromium browsers.",
+  "description": "__MSG_extDescription__",
   "minimum_chrome_version": "116",
   "incognito": "not_allowed",
   "icons": {

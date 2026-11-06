@@ -1,0 +1,617 @@
+{
+  "extName": {
+    "message": "HelixSync"
+  },
+  "extDescription": {
+    "message": "Saját üzemeltetésű, adatvédelem-központú böngészőszinkronizálás a Helium és más Chromium-alapú böngészők számára."
+  },
+  "common_loading": {
+    "message": "Betöltés…"
+  },
+  "common_cancel": {
+    "message": "Mégse"
+  },
+  "common_disconnect": {
+    "message": "Leválasztás"
+  },
+  "common_delete": {
+    "message": "Törlés"
+  },
+  "time_never": {
+    "message": "soha"
+  },
+  "time_justNow": {
+    "message": "épp most"
+  },
+  "language_legend": {
+    "message": "Nyelv"
+  },
+  "language_label": {
+    "message": "A felület nyelve"
+  },
+  "language_auto": {
+    "message": "A böngésző alapértelmezése"
+  },
+  "header_back": {
+    "message": "Vissza"
+  },
+  "header_settings": {
+    "message": "Beállítások"
+  },
+  "header_restorePoints": {
+    "message": "Visszaállítási pontok"
+  },
+  "status_syncing": {
+    "message": "Szinkronizálás…"
+  },
+  "status_error": {
+    "message": "Szinkronizálási hiba"
+  },
+  "status_needsReauth": {
+    "message": "Újra kell engedélyezni"
+  },
+  "status_synced": {
+    "message": "Szinkronizálva"
+  },
+  "statusErr_rate_limited": {
+    "message": "Túl sok kérés. A szinkronizálás hamarosan újrapróbálkozik."
+  },
+  "statusErr_unauthorized": {
+    "message": "A szerver elutasította ennek az eszköznek a bejelentkezését."
+  },
+  "statusErr_busy": {
+    "message": "A szerver foglalt. A szinkronizálás hamarosan újrapróbálkozik."
+  },
+  "statusErr_internal_error": {
+    "message": "A szerveren hiba történt. A szinkronizálás hamarosan újrapróbálkozik."
+  },
+  "statusErr_network": {
+    "message": "A szerver nem érhető el."
+  },
+  "setup_deviceFallback": {
+    "message": "Eszköz"
+  },
+  "setup_title": {
+    "message": "A böngésző csatlakoztatása"
+  },
+  "setup_subtitle": {
+    "message": "Jelentkezz be a HelixSync-fiókoddal a szinkronizálás megkezdéséhez."
+  },
+  "setup_serverUrl": {
+    "message": "Szerver URL-címe"
+  },
+  "setup_email": {
+    "message": "E-mail"
+  },
+  "setup_password": {
+    "message": "Jelszó"
+  },
+  "setup_deviceName": {
+    "message": "Eszköz neve"
+  },
+  "setup_connect": {
+    "message": "Csatlakozás"
+  },
+  "setup_deviceLoginInstead": {
+    "message": "Inkább bejelentkezés eszközzel"
+  },
+  "setup_noAccount": {
+    "message": "Nincs fiókod? {link}"
+  },
+  "setup_registerLink": {
+    "message": "Regisztrálj a weben"
+  },
+  "setup_forgotLink": {
+    "message": "Elfelejtetted a jelszavad?"
+  },
+  "setup_serverUrlFirst": {
+    "message": "Előbb adj meg egy érvényes szerver-URL-t."
+  },
+  "setup_serverUrlInvalid": {
+    "message": "Adj meg egy érvényes szerver-URL-t."
+  },
+  "setup_insecureUrl": {
+    "message": "A szerver URL-jének https://-t kell használnia (a http:// csak a localhost, 127.0.0.1 vagy [::1] esetén engedélyezett)."
+  },
+  "setup_permissionDenied": {
+    "message": "A szerverrel való kapcsolatfelvételhez nem adtak engedélyt."
+  },
+  "setup_emailAndName": {
+    "message": "Előbb add meg az e-mail-címedet és egy eszköznevet."
+  },
+  "setup_permissionLastDevice": {
+    "message": "Legutóbb nem adtál engedélyt — kattints az „Inkább bejelentkezés eszközzel” gombra az újrapróbáláshoz."
+  },
+  "setup_permissionLastConnect": {
+    "message": "Legutóbb nem adtál engedélyt — kattints a Csatlakozás gombra az újrapróbáláshoz."
+  },
+  "setup_creatingRequest": {
+    "message": "Bejelentkezési kérés létrehozása…"
+  },
+  "setup_connecting": {
+    "message": "Csatlakozás…"
+  },
+  "setup_deriving": {
+    "message": "Titkosítási kulcs származtatása…"
+  },
+  "setup_failed": {
+    "message": "Sikertelen: {message}"
+  },
+  "devicewait_title": {
+    "message": "Hagyd jóvá egy másik böngészőben"
+  },
+  "devicewait_body": {
+    "message": "Nyisd meg a HelixSyncet egy olyan böngészőben, amely már csatlakoztatva van ehhez a fiókhoz, és hagyd jóvá ott a kérést. Csak akkor hagyd jóvá, ha az a böngésző ezt a kifejezést mutatja:"
+  },
+  "devicewait_waiting": {
+    "message": "Várakozás a jóváhagyásra…"
+  },
+  "devicewait_keyMismatch": {
+    "message": "A kulcsellenőrzés nem egyezett, ezért a jóváhagyást elvetettük."
+  },
+  "devicewait_denied": {
+    "message": "A bejelentkezési kérést elutasították."
+  },
+  "devicewait_expired": {
+    "message": "A bejelentkezési kérés lejárt. Indíts újat."
+  },
+  "devicewait_deviceLimit": {
+    "message": "Ez a fiók elérte az eszközök maximális számát. Vonj vissza egyet az irányítópulton, és ez a böngésző csatlakozni fog."
+  },
+  "devicewait_stillWaiting": {
+    "message": "Még várakozás: {message}"
+  },
+  "keycheck_title": {
+    "message": "Kulcs ellenőrzése"
+  },
+  "keycheck_body": {
+    "message": "A jóváhagyó böngésző a bejelentkezési kérésén egy kulcsellenőrző kifejezést mutat. Csak akkor folytasd, ha egyezik:"
+  },
+  "keycheck_matches": {
+    "message": "Egyezik"
+  },
+  "keycheck_mismatch": {
+    "message": "Nem egyezik"
+  },
+  "statusview_lastSync": {
+    "message": "Utolsó szinkronizálás: {time} · Függőben: {pending}"
+  },
+  "statusview_syncNow": {
+    "message": "Szinkronizálás most"
+  },
+  "statusview_olderHistory": {
+    "message": "Régebbi előzmények szinkronizálása"
+  },
+  "statusview_olderHistoryTitle": {
+    "message": "A böngésző előző megőrzési időszaknál régebbi előzményeinek importálása"
+  },
+  "statusview_importStarted": {
+    "message": "A régebbi előzmények importálása a háttérben folyik."
+  },
+  "statusview_importFailed": {
+    "message": "Az indítás sikertelen: {message}"
+  },
+  "statusview_importRequestFailed": {
+    "message": "Az importálási kérés sikertelen volt"
+  },
+  "statusview_restoreRequestFailed": {
+    "message": "A visszaállítási kérés sikertelen volt"
+  },
+  "statusview_signedInAs": {
+    "message": "Bejelentkezve mint {email}"
+  },
+  "pending_header": {
+    "message": "Más eszközök lapjai ({count})"
+  },
+  "pending_restoreAll": {
+    "message": "Összes visszaállítása ({count})"
+  },
+  "pending_failed": {
+    "message": "A lap visszaállítása sikertelen: {message}"
+  },
+  "pending_restore": {
+    "message": "Visszaállítás"
+  },
+  "pending_restoring": {
+    "message": "Visszaállítás…"
+  },
+  "pending_showMore": {
+    "message": "Még {count} megjelenítése"
+  },
+  "auth_requests_one": {
+    "message": "Bejelentkezési kérés"
+  },
+  "auth_requests_other": {
+    "message": "Bejelentkezési kérések"
+  },
+  "auth_passwordReset": {
+    "message": "JELSZÓ-VISSZAÁLLÍTÁS"
+  },
+  "auth_webSignIn": {
+    "message": "Bejelentkezés a webes irányítópultra"
+  },
+  "auth_newBrowser": {
+    "message": "Új böngésző: {name}"
+  },
+  "auth_unnamed": {
+    "message": "névtelen"
+  },
+  "auth_unknownIp": {
+    "message": "Ismeretlen IP"
+  },
+  "auth_resetWarningCompletes": {
+    "message": "FIGYELEM: ezzel valaki új jelszót állíthat be a fiókodhoz. Csak akkor hagyd jóvá, ha TE kérted a jelszavad visszaállítását. Eddig {approvals} a 2 jóváhagyásból; ha most jóváhagyod, befejeződik, és a titkosítási kulcsod átkerül arra az oldalra."
+  },
+  "auth_resetWarningSecond": {
+    "message": "FIGYELEM: ezzel valaki új jelszót állíthat be a fiókodhoz. Csak akkor hagyd jóvá, ha TE kérted a jelszavad visszaállítását. Eddig {approvals} a 2 jóváhagyásból; egy második böngészőnek is jóvá kell hagynia."
+  },
+  "auth_webConsequence": {
+    "message": "A jóváhagyással az a böngésző bejelentkezik az irányítópultodra."
+  },
+  "auth_deviceConsequence": {
+    "message": "A jóváhagyással az a böngésző megkapja a titkosítási kulcsodat és az összes szinkronizált adatodat."
+  },
+  "auth_approveOnlyIf": {
+    "message": "Csak akkor hagyd jóvá, ha a másik képernyő ezt mutatja:"
+  },
+  "auth_keyCheckReset": {
+    "message": "A jóváhagyás után a visszaállítási oldal arra kér, hogy erősítsd meg ezt a kulcsellenőrző kifejezést:"
+  },
+  "auth_keyCheckDevice": {
+    "message": "A jóváhagyás után az új böngésző arra kér, hogy erősítsd meg ezt a kulcsellenőrző kifejezést:"
+  },
+  "auth_approve": {
+    "message": "Jóváhagyás"
+  },
+  "auth_deny": {
+    "message": "Elutasítás"
+  },
+  "auth_alreadyAnswered": {
+    "message": "Erre a kérésre már válaszoltak, vagy lejárt."
+  },
+  "auth_resetChanged": {
+    "message": "Ez a visszaállítás megváltozott (ez a böngésző már jóváhagyta, vagy egy másik megelőzte). Nyisd meg újra a felugró ablakot."
+  },
+  "auth_failed": {
+    "message": "Sikertelen: {message}"
+  },
+  "settings_sync": {
+    "message": "Szinkronizálás"
+  },
+  "settings_bookmarks": {
+    "message": "Könyvjelzők"
+  },
+  "settings_history": {
+    "message": "Előzmények"
+  },
+  "settings_tabs": {
+    "message": "Lapok"
+  },
+  "settings_tabGroups": {
+    "message": "Lapcsoportok"
+  },
+  "settings_tabRestore": {
+    "message": "Lapok visszaállítása"
+  },
+  "settings_restoreRemoteTabs": {
+    "message": "Távoli lapok visszaállítása"
+  },
+  "settings_policyDisabled": {
+    "message": "Kikapcsolva"
+  },
+  "settings_policyAsk": {
+    "message": "Kérdezzen visszaállítás előtt"
+  },
+  "settings_policyAutomatic": {
+    "message": "Automatikus visszaállítás"
+  },
+  "settings_historyLegend": {
+    "message": "Előzmények"
+  },
+  "settings_retention": {
+    "message": "Megőrzés"
+  },
+  "settings_d7": {
+    "message": "7 nap"
+  },
+  "settings_d30": {
+    "message": "30 nap"
+  },
+  "settings_d90": {
+    "message": "90 nap"
+  },
+  "settings_y1": {
+    "message": "1 év"
+  },
+  "settings_unlimited": {
+    "message": "Korlátlan"
+  },
+  "settings_restorePointsLegend": {
+    "message": "Visszaállítási pontok"
+  },
+  "settings_autoRestorePoints": {
+    "message": "Automatikus visszaállítási pontok"
+  },
+  "settings_restorePointsHelp": {
+    "message": "Napi és biztonsági másolatok a könyvjelzőidről. A kézi másolatok mindig elérhetők."
+  },
+  "settings_account": {
+    "message": "Fiók"
+  },
+  "settings_password": {
+    "message": "Jelszó"
+  },
+  "settings_changeOnWeb": {
+    "message": "Módosítás a weben"
+  },
+  "settings_save": {
+    "message": "Mentés"
+  },
+  "settings_disconnectConfirm": {
+    "message": "Leválasztod ezt az eszközt? Eltávolítjuk a fiókod eszközlistájáról, és bármikor újra csatlakoztathatod egy újabb bejelentkezéssel."
+  },
+  "settings_disconnecting": {
+    "message": "Leválasztás…"
+  },
+  "settings_tabGroupsNeedPermission": {
+    "message": "A lapcsoportokhoz engedély kell ebben a böngészőben: az engedélyezéshez nyomd meg a Mentés gombot."
+  },
+  "settings_loadFailed": {
+    "message": "A beállítások betöltése sikertelen: {message}"
+  },
+  "settings_saving": {
+    "message": "Mentés…"
+  },
+  "settings_tabGroupsDenied": {
+    "message": "A lapcsoportok szinkronizálásához a lapcsoport-engedély szükséges. Engedélyezd, vagy kapcsold ki a lapcsoportokat."
+  },
+  "settings_saveFailed": {
+    "message": "A mentés sikertelen: {message}"
+  },
+  "app_loadFailed": {
+    "message": "A betöltés sikertelen: {message}"
+  },
+  "rp_title": {
+    "message": "Visszaállítási pontok"
+  },
+  "rp_subtitle": {
+    "message": "A könyvjelzőid mentett másolatai. Térj vissza egyhez, ha valami félremegy."
+  },
+  "rp_loading": {
+    "message": "Betöltés…"
+  },
+  "rp_unavailable": {
+    "message": "A visszaállítási pontok nem érhetők el: ez a szerver nem támogatja őket, vagy a könyvjelzők szinkronizálása ki van kapcsolva, esetleg még importál."
+  },
+  "rp_create": {
+    "message": "Visszaállítási pont létrehozása"
+  },
+  "rp_saving": {
+    "message": "Mentés…"
+  },
+  "rp_autoOff": {
+    "message": "Az automatikus visszaállítási pontok ki vannak kapcsolva (Beállítások)."
+  },
+  "rp_uploading": {
+    "message": "Feltöltés… {kind}"
+  },
+  "rp_empty": {
+    "message": "Még nincsenek visszaállítási pontok."
+  },
+  "rp_saved": {
+    "message": "Mentett"
+  },
+  "rp_pinned": {
+    "message": "Rögzítve"
+  },
+  "rp_removedDevice": {
+    "message": "egy eltávolított eszköz"
+  },
+  "rp_lastRestored": {
+    "message": "Utoljára visszaállítva: {date}"
+  },
+  "rp_restoreEllipsis": {
+    "message": "Visszaállítás…"
+  },
+  "rp_pin": {
+    "message": "Rögzítés"
+  },
+  "rp_unpin": {
+    "message": "Rögzítés feloldása"
+  },
+  "rp_delete": {
+    "message": "Törlés"
+  },
+  "rp_deleteConfirm": {
+    "message": "Törlöd a(z) {date} időpontú visszaállítási pontot? Ez nem vonható vissza."
+  },
+  "rp_bookmarks_one": {
+    "message": "{count} könyvjelző"
+  },
+  "rp_bookmarks_other": {
+    "message": "{count} könyvjelző"
+  },
+  "rp_kind_manual": {
+    "message": "Kézi"
+  },
+  "rp_kind_scheduled": {
+    "message": "Napi"
+  },
+  "rp_kind_pre_restore": {
+    "message": "Visszaállítás előtt"
+  },
+  "rp_kind_pre_import": {
+    "message": "Az első importálás előtt"
+  },
+  "rp_kind_pre_resync": {
+    "message": "Újraszinkronizálás előtt"
+  },
+  "rp_kind_mass_delete": {
+    "message": "Tömeges törlés előtt"
+  },
+  "rp_opening": {
+    "message": "A visszaállítási pont megnyitása…"
+  },
+  "rp_restoreTitle": {
+    "message": "Visszaállítás"
+  },
+  "rp_from": {
+    "message": "Időpont: {date}"
+  },
+  "rp_back": {
+    "message": "Vissza"
+  },
+  "rp_whatToRestore": {
+    "message": "Mit állítsunk vissza"
+  },
+  "rp_allBookmarks": {
+    "message": "Az összes könyvjelző"
+  },
+  "rp_oneFolder": {
+    "message": "Egy mappa…"
+  },
+  "rp_how": {
+    "message": "Hogyan"
+  },
+  "rp_modeMerge": {
+    "message": "Egyesítés: visszahozza a hiányzókat, visszavonja a szerkesztéseket. Semmit nem töröl."
+  },
+  "rp_modeExact": {
+    "message": "Pontos: eltávolítja azokat a könyvjelzőket is, amelyek nincsenek ebben a pontban."
+  },
+  "rp_preview": {
+    "message": "Előnézet"
+  },
+  "rp_restoreAction": {
+    "message": "Visszaállítás"
+  },
+  "rp_pickFolderBelow": {
+    "message": "Válassz egy mappát lent."
+  },
+  "rp_pickFolderFirst": {
+    "message": "Előbb válassz egy mappát."
+  },
+  "rp_folder": {
+    "message": "Mappa: {name}"
+  },
+  "rp_untitled": {
+    "message": "(névtelen)"
+  },
+  "rp_working": {
+    "message": "Számolás…"
+  },
+  "rp_nothingToDo": {
+    "message": "Nincs teendő: a könyvjelzőid már megegyeznek ezzel a visszaállítási ponttal."
+  },
+  "rp_previewRestored_one": {
+    "message": "{count} könyvjelző vagy mappa visszahozása"
+  },
+  "rp_previewRestored_other": {
+    "message": "{count} könyvjelző vagy mappa visszahozása"
+  },
+  "rp_previewUpdated_one": {
+    "message": "{count} könyvjelző vagy mappa módosítása"
+  },
+  "rp_previewUpdated_other": {
+    "message": "{count} könyvjelző vagy mappa módosítása"
+  },
+  "rp_previewMoved_one": {
+    "message": "{count} könyvjelző vagy mappa áthelyezése"
+  },
+  "rp_previewMoved_other": {
+    "message": "{count} könyvjelző vagy mappa áthelyezése"
+  },
+  "rp_previewDeleted_one": {
+    "message": "{count} könyvjelző vagy mappa eltávolítása"
+  },
+  "rp_previewDeleted_other": {
+    "message": "{count} könyvjelző vagy mappa eltávolítása"
+  },
+  "rp_sampleMore": {
+    "message": "{titles} és még {more}"
+  },
+  "rp_skipped_one": {
+    "message": "{count} könyvjelző kihagyva (nem támogatott cím)."
+  },
+  "rp_skipped_other": {
+    "message": "{count} könyvjelző kihagyva (nem támogatott cím)."
+  },
+  "rp_confirmExactAll": {
+    "message": "Pontosan visszaállítod az összes könyvjelzőt? A(z) {date} után hozzáadott könyvjelzők minden eszközről eltűnnek. Előtte mentünk egy másolatot a jelenlegi könyvjelzőidről."
+  },
+  "rp_confirmExactFolder": {
+    "message": "Pontosan visszaállítod a(z) „{name}” mappát? A(z) {date} után hozzáadott könyvjelzők minden eszközről eltűnnek. Előtte mentünk egy másolatot a jelenlegi könyvjelzőidről."
+  },
+  "rp_confirmMergeAll": {
+    "message": "Visszaállítod az összes könyvjelzőt a(z) {date} időpontból? Előtte mentünk egy másolatot a jelenlegi könyvjelzőidről."
+  },
+  "rp_confirmMergeFolder": {
+    "message": "Visszaállítod a(z) „{name}” mappát a(z) {date} időpontból? Előtte mentünk egy másolatot a jelenlegi könyvjelzőidről."
+  },
+  "rp_noFolders": {
+    "message": "Ebben a visszaállítási pontban nincsenek mappák."
+  },
+  "rp_restoring": {
+    "message": "Visszaállítás"
+  },
+  "rp_prepare": {
+    "message": "A könyvjelzők másolatának mentése és az előkészítés…"
+  },
+  "rp_applying": {
+    "message": "Visszaállítás… {applied} / {total}"
+  },
+  "rp_finishing": {
+    "message": "Befejezés…"
+  },
+  "rp_done": {
+    "message": "Kész."
+  },
+  "rp_doneCounts": {
+    "message": "Visszahozva: {restored}, módosítva: {updated}, áthelyezve: {moved}, eltávolítva: {deleted}."
+  },
+  "rp_stopped": {
+    "message": "A visszaállítás leállt."
+  },
+  "rp_doneButton": {
+    "message": "Kész"
+  },
+  "rp_err_bookmarksNotReady": {
+    "message": "A könyvjelzők előkészítése a szinkronizáláshoz még folyik. Próbáld újra egy pillanat múlva."
+  },
+  "rp_err_limit": {
+    "message": "Nincs hely új visszaállítási pontnak: a többi rögzítve van. Előbb oldj fel vagy törölj egyet."
+  },
+  "rp_err_pinLimit": {
+    "message": "Túl sok rögzített visszaállítási pont. Előbb oldj fel egyet."
+  },
+  "rp_err_inProgress": {
+    "message": "Már fut egy visszaállítás."
+  },
+  "rp_err_unreadable": {
+    "message": "Ez a visszaállítási pont nem olvasható, ezért nem lett alkalmazva."
+  },
+  "rp_err_updateNeeded": {
+    "message": "Frissítsd a HelixSync bővítményt a visszaállítási pont használatához."
+  },
+  "rp_err_offline": {
+    "message": "A szerver nem érhető el."
+  },
+  "rp_err_reauth": {
+    "message": "A visszaállítási pontok használatához jelentkezz be újra."
+  },
+  "rp_err_syncFailed": {
+    "message": "A visszaállítás előtt nem sikerült szinkronizálni. Ellenőrizd a kapcsolatot, és próbáld újra."
+  },
+  "rp_err_preRestoreFailed": {
+    "message": "Előtte nem sikerült másolatot menteni a könyvjelzőidről, ezért semmi nem lett visszaállítva."
+  },
+  "rp_err_unavailable": {
+    "message": "Ez a szerver nem támogatja a visszaállítási pontokat."
+  },
+  "rp_err_noAnswer": {
+    "message": "A bővítmény nem válaszolt."
+  },
+  "rp_err_generic": {
+    "message": "Valami hiba történt."
+  }
+}
