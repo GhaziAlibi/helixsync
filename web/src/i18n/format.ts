@@ -19,7 +19,9 @@ export function formatNumber(value: number, options?: Intl.NumberFormatOptions):
 /** "5 minutes ago" in the active language; `never` when there is no date. */
 export function timeAgo(iso: string | null, now: number = Date.now()): string {
   if (!iso) return i18n.t("common.never");
-  const seconds = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
+  const elapsed = Math.floor((now - new Date(iso).getTime()) / 1000);
+  if (!Number.isFinite(elapsed)) return i18n.t("common.never");
+  const seconds = Math.max(0, elapsed);
   const rtf = new Intl.RelativeTimeFormat(lang(), { numeric: "auto" });
   if (seconds < 60) return rtf.format(-seconds, "second");
   const minutes = Math.floor(seconds / 60);

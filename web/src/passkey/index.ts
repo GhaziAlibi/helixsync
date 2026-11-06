@@ -4,7 +4,7 @@
 // ../crypto; this file is the browser glue and the local record.
 import { randomBytes } from "@noble/hashes/utils.js";
 import { fromB64, sealRecoveryCode, toB64, unsealRecoveryCode } from "../crypto";
-import { LocalizedError } from "../i18n/errors";
+import { LocalizedError } from "../i18n/localized-error";
 
 export interface PasskeyRecord {
   v: 1;

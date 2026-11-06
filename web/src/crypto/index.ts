@@ -7,7 +7,7 @@
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { argon2idAsync } from "@noble/hashes/argon2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
-import { LocalizedError } from "../i18n/errors";
+import { LocalizedError } from "../i18n/localized-error";
 
 const sharedTextEncoder = new TextEncoder();
 

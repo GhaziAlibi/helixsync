@@ -68,9 +68,6 @@
   "statusErr_network": {
     "message": "Impossible de joindre le serveur."
   },
-  "setup_deviceFallback": {
-    "message": "Appareil"
-  },
   "setup_title": {
     "message": "Connecter ce navigateur"
   },

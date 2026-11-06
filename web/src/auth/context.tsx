@@ -13,6 +13,8 @@ interface AuthState {
   deleteAccount: (password: string) => Promise<void>;
   /** The user typed the current recovery code back and the server accepted it. */
   markRecoveryCodeConfirmed: () => void;
+  /** A new recovery code replaced the confirmed one; it is unconfirmed until typed back. */
+  markRecoveryCodeUnconfirmed: () => void;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -52,7 +54,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (email: string, password: string) => {
     const result = await api.login(email, password);
     setUser(result.user);
-    await refreshUser(setUser);
+    void refreshUser(setUser);
   }, []);
 
   const register = useCallback(async (email: string, password: string) => {
@@ -65,7 +67,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const result = await api.pollAuthRequest(id, secret);
     if (result.status === "approved") {
       setUser(result.user);
-      await refreshUser(setUser);
+      void refreshUser(setUser);
     }
     return result;
   }, []);
@@ -84,9 +86,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser((u) => (u ? { ...u, recoveryCodeConfirmed: true } : u));
   }, []);
 
+  const markRecoveryCodeUnconfirmed = useCallback(() => {
+    setUser((u) => (u ? { ...u, recoveryCodeConfirmed: false } : u));
+  }, []);
+
   const value = useMemo(
-    () => ({ user, loading, login, register, pollDeviceLogin, logout, deleteAccount, markRecoveryCodeConfirmed }),
-    [user, loading, login, register, pollDeviceLogin, logout, deleteAccount, markRecoveryCodeConfirmed],
+    () => ({
+      user,
+      loading,
+      login,
+      register,
+      pollDeviceLogin,
+      logout,
+      deleteAccount,
+      markRecoveryCodeConfirmed,
+      markRecoveryCodeUnconfirmed,
+    }),
+    [user, loading, login, register, pollDeviceLogin, logout, deleteAccount, markRecoveryCodeConfirmed, markRecoveryCodeUnconfirmed],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

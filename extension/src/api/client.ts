@@ -79,7 +79,21 @@ function fetchWithTimeout(
   ms: number = SYNC_FETCH_TIMEOUT_MS,
 ): Promise<Response> {
   const { signal, cleanup } = combinedSignal(ms, init.signal ?? null);
-  return fetch(input, { ...init, signal }).finally(cleanup);
+  return fetch(input, { ...init, signal })
+    .catch((err: unknown) => {
+      // fetch() rejects with a TypeError when the request never got an answer.
+      throw err instanceof TypeError ? new NetworkError(err.message) : err;
+    })
+    .finally(cleanup);
+}
+
+/** The request never reached the server (offline, DNS, refused). Still a
+ * TypeError, so existing `instanceof TypeError` checks keep working. */
+export class NetworkError extends TypeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "NetworkError";
+  }
 }
 
 // The server rotates refresh tokens on every use (docs/security.md §1.2), so

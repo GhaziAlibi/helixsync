@@ -472,28 +472,27 @@ struct MeResponse {
 /// account's own authenticated session — it's exactly what login/register
 /// already return, and it's meaningless without the password to unwrap it.
 async fn me(user: AuthenticatedUser, State(state): State<AppState>) -> AppResult<Json<MeResponse>> {
-    let row = sqlx::query!(
-        "SELECT wrapped_account_key, kdf_salt, kdf_params, account_key_version FROM users WHERE id = $1",
-        user.user_id
-    )
-    .fetch_one(&state.db)
-    .await?;
-    let recovery_code_confirmed = sqlx::query_scalar::<_, bool>(
-        "SELECT recovery_code_confirmed_at IS NOT NULL FROM users WHERE id = $1",
-    )
-    .bind(user.user_id)
-    .fetch_one(&state.db)
-    .await?;
+    let (wrapped_account_key, kdf_salt, kdf_params, account_key_version, recovery_code_confirmed) =
+        sqlx::query_as::<_, (String, String, serde_json::Value, i32, bool)>(
+            r#"
+            SELECT wrapped_account_key, kdf_salt, kdf_params, account_key_version,
+                   recovery_code_confirmed_at IS NOT NULL
+            FROM users WHERE id = $1
+            "#,
+        )
+        .bind(user.user_id)
+        .fetch_one(&state.db)
+        .await?;
 
     Ok(Json(MeResponse {
         user: UserPublic {
             id: user.user_id,
             email: user.email,
         },
-        wrapped_ak: row.wrapped_account_key,
-        kdf_salt: row.kdf_salt,
-        kdf_params: row.kdf_params,
-        account_key_version: row.account_key_version,
+        wrapped_ak: wrapped_account_key,
+        kdf_salt,
+        kdf_params,
+        account_key_version,
         recovery_code_confirmed,
     }))
 }
@@ -663,23 +662,21 @@ async fn regenerate_recovery_code(
         return Err(AppError::Unauthorized);
     }
 
-    sqlx::query!(
+    // A new code is unconfirmed until the user types it back, in the same
+    // statement that replaces it.
+    sqlx::query(
         r#"
         UPDATE users
-        SET recovery_auth_hash = $1, recovery_wrapped_account_key = $2, updated_at = now()
+        SET recovery_auth_hash = $1, recovery_wrapped_account_key = $2,
+            recovery_code_confirmed_at = NULL, updated_at = now()
         WHERE id = $3
         "#,
-        hash_token(&req.recovery_auth_key),
-        req.recovery_wrapped_ak,
-        user.user_id
     )
+    .bind(hash_token(&req.recovery_auth_key))
+    .bind(&req.recovery_wrapped_ak)
+    .bind(user.user_id)
     .execute(&state.db)
     .await?;
-    // A new code is unconfirmed until the user types it back.
-    sqlx::query("UPDATE users SET recovery_code_confirmed_at = NULL WHERE id = $1")
-        .bind(user.user_id)
-        .execute(&state.db)
-        .await?;
 
     crate::audit::log(
         &state,
@@ -875,32 +872,28 @@ async fn recover_complete(
 
     // Matching on the old recovery hash makes the code single-use even when
     // two completions race: only the first one finds the row.
-    let updated = sqlx::query!(
+    let updated = sqlx::query(
         r#"
         UPDATE users
         SET password_hash = $1, kdf_salt = $2, kdf_params = $3, wrapped_account_key = $4,
-            recovery_auth_hash = $5, recovery_wrapped_account_key = $6, updated_at = now()
+            recovery_auth_hash = $5, recovery_wrapped_account_key = $6,
+            recovery_code_confirmed_at = NULL, updated_at = now()
         WHERE id = $7 AND recovery_auth_hash = $8
         "#,
-        new_hash,
-        req.new_kdf_salt,
-        req.new_kdf_params,
-        req.new_wrapped_ak,
-        hash_token(&req.new_recovery_auth_key),
-        req.new_recovery_wrapped_ak,
-        account.id,
-        account.recovery_auth_hash
     )
+    .bind(new_hash)
+    .bind(&req.new_kdf_salt)
+    .bind(&req.new_kdf_params)
+    .bind(&req.new_wrapped_ak)
+    .bind(hash_token(&req.new_recovery_auth_key))
+    .bind(&req.new_recovery_wrapped_ak)
+    .bind(account.id)
+    .bind(&account.recovery_auth_hash)
     .execute(&mut *tx)
     .await?;
     if updated.rows_affected() == 0 {
         return Err(AppError::Unauthorized);
     }
-    // The new code is unconfirmed until the user types it back.
-    sqlx::query("UPDATE users SET recovery_code_confirmed_at = NULL WHERE id = $1")
-        .bind(account.id)
-        .execute(&mut *tx)
-        .await?;
 
     let revoked_sessions = sqlx::query_scalar!(
         r#"

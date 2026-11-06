@@ -1,5 +1,6 @@
 import {
   ApiError,
+  NetworkError,
   registerDevice,
   prelogin,
   fetchSettings,
@@ -202,7 +203,13 @@ function selectById(id: string): HTMLSelectElement {
   return document.getElementById(id) as HTMLSelectElement;
 }
 
+/** The text for a failure: the translated message for a known server code or a
+ * network failure (the same `statusErr_*` strings the sync status uses),
+ * otherwise the error's own message. */
 function errorMessage(err: unknown): string {
+  const code =
+    err instanceof ApiError ? (err.status === 429 ? "rate_limited" : err.code) : err instanceof NetworkError ? "network" : undefined;
+  if (code && hasMessage(`statusErr_${code}`)) return t(`statusErr_${code}`);
   return err instanceof Error ? err.message : String(err);
 }
 
@@ -305,7 +312,7 @@ function statusLabel(status: string): string {
 
 function defaultDeviceName(): string {
   const ua = navigator.userAgent;
-  const platform = /Windows/.test(ua) ? "Windows" : /Mac/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : t("setup_deviceFallback");
+  const platform = /Windows/.test(ua) ? "Windows" : /Mac/.test(ua) ? "Mac" : /Linux/.test(ua) ? "Linux" : "Device";
   return `${platform} - Helium`;
 }
 

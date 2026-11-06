@@ -68,9 +68,6 @@
   "statusErr_network": {
     "message": "无法连接到服务器。"
   },
-  "setup_deviceFallback": {
-    "message": "设备"
-  },
   "setup_title": {
     "message": "连接此浏览器"
   },

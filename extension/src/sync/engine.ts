@@ -26,7 +26,7 @@ import {
   type PendingOperationRecord,
 } from "../storage/db";
 import { recordLocalFieldStatesBatch } from "./conflict";
-import { ApiError, downloadChanges, fetchSnapshot, uploadOperations } from "../api/client";
+import { ApiError, NetworkError, downloadChanges, fetchSnapshot, uploadOperations } from "../api/client";
 import { isConnected as isWebSocketConnected } from "../api/websocket";
 import { isBulkContainer } from "./bulk-container";
 import type {
@@ -108,7 +108,8 @@ function emitStatus(status: SyncStatus, detail?: string, code?: string) {
  * language); anything else reaches it only as the English message. */
 export function syncErrorCode(err: unknown): string | undefined {
   if (err instanceof ApiError) return err.status === 429 ? "rate_limited" : err.code;
-  if (err instanceof TypeError) return "network";
+  // Other TypeErrors are bugs and keep their own message.
+  if (err instanceof NetworkError) return "network";
   return undefined;
 }
 

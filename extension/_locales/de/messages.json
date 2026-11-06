@@ -68,9 +68,6 @@
   "statusErr_network": {
     "message": "Der Server ist nicht erreichbar."
   },
-  "setup_deviceFallback": {
-    "message": "Gerät"
-  },
   "setup_title": {
     "message": "Diesen Browser verbinden"
   },

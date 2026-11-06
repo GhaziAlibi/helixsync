@@ -1,18 +1,7 @@
 import i18n from "./index";
+import { LocalizedError } from "./localized-error";
 
-/** An error the UI shows to a person: a catalog key plus its parameters, so it
- * is translated where it is displayed. `message` is the English text, kept for
- * logs and tests. */
-export class LocalizedError extends Error {
-  constructor(
-    public readonly key: string,
-    public readonly params: Record<string, unknown> = {},
-    english?: string,
-  ) {
-    super(english ?? i18n.t(key, { ...params, lng: "en" }));
-    this.name = "LocalizedError";
-  }
-}
+export { LocalizedError };
 
 /** Server error codes that have a translated message. Others (such as
  * `validation_error`, whose message names the exact problem) show the

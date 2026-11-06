@@ -68,9 +68,6 @@
   "statusErr_network": {
     "message": "Could not reach the server."
   },
-  "setup_deviceFallback": {
-    "message": "Device"
-  },
   "setup_title": {
     "message": "Connect this browser"
   },

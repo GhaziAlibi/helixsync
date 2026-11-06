@@ -61,8 +61,8 @@ function ChangePasswordForm() {
   );
 }
 
-function RecoveryCodeForm() {
-  const { user } = useAuth();
+function RecoveryCodeForm({ onShowing }: { onShowing: (showing: boolean) => void }) {
+  const { user, markRecoveryCodeUnconfirmed } = useAuth();
   const { t } = useTranslation();
   const [password, setPassword] = useState("");
   const [code, setCode] = useState<string | null>(null);
@@ -75,6 +75,8 @@ function RecoveryCodeForm() {
     setWorking(true);
     try {
       setCode(await api.regenerateRecoveryCode(password));
+      markRecoveryCodeUnconfirmed();
+      onShowing(true);
       setPassword("");
     } catch (err) {
       setError(
@@ -90,7 +92,15 @@ function RecoveryCodeForm() {
   if (code) {
     return (
       <div className="max-w-sm">
-        <RecoveryCodeNotice code={code} email={user?.email ?? ""} continueLabel={t("security.done")} onContinue={() => setCode(null)} />
+        <RecoveryCodeNotice
+          code={code}
+          email={user?.email ?? ""}
+          continueLabel={t("security.done")}
+          onContinue={() => {
+            setCode(null);
+            onShowing(false);
+          }}
+        />
       </div>
     );
   }
@@ -237,6 +247,7 @@ function SessionsList() {
 export default function Security() {
   const { t } = useTranslation();
   const [settings, setSettings] = useState<api.UserSettings | null>(null);
+  const [newCodeShown, setNewCodeShown] = useState(false);
 
   useEffect(() => {
     api.getSettings().then(setSettings).catch(() => {});
@@ -275,8 +286,8 @@ export default function Security() {
         <p className="text-sm text-slate-600 bg-slate-50 border border-slate-200 rounded px-3 py-2 mb-4">
           {t("security.recoveryInfo")}
         </p>
-        <ConfirmRecoveryCodeForm />
-        <RecoveryCodeForm />
+        {!newCodeShown && <ConfirmRecoveryCodeForm />}
+        <RecoveryCodeForm onShowing={setNewCodeShown} />
       </div>
 
       <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5 mt-6">

@@ -529,6 +529,8 @@ function dedupeByKey(mappings: ObjectMappingRecord[]): ObjectMappingRecord[] {
 
 export async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promise<void> {
   if (!(await isBookmarkSyncEnabled())) return;
+  // Capture is registered when the worker loads, before the device is known.
+  if (!(await getDevice())) return;
   const overlay = new Map<string, unknown>();
   const siblingCache = new Map<string, chrome.bookmarks.BookmarkTreeNode[]>();
   const mappingCache = new Map<string, string>();

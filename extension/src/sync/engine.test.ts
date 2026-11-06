@@ -91,6 +91,7 @@ class FakeApiError extends Error {
 
 vi.mock("../api/client", () => ({
   ApiError: FakeApiError,
+  NetworkError: class NetworkError extends TypeError {},
   uploadOperations: (ops: LocalOperation[]) => uploadOperationsMock(ops),
   downloadChanges: vi.fn(),
   fetchSnapshot: vi.fn(),

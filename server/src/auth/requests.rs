@@ -695,7 +695,7 @@ async fn approve_reset(
         state,
         Some(device.user_id),
         Some(device.device_id),
-        "auth_request_approved",
+        "password_reset_second_approval",
     )
     .await;
     Ok(Json(json!({ "ok": true, "approvals": 2 })))

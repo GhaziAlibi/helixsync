@@ -68,9 +68,6 @@
   "statusErr_network": {
     "message": "A szerver nem érhető el."
   },
-  "setup_deviceFallback": {
-    "message": "Eszköz"
-  },
   "setup_title": {
     "message": "A böngésző csatlakoztatása"
   },

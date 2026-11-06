@@ -1,30 +1,30 @@
 import { afterEach, describe, expect, it } from "vitest";
-import i18n from "./index";
+import { setLanguage } from "./index";
 import { timeAgo } from "./format";
 import { recoveryKitText } from "../util/recovery-kit";
 
 afterEach(async () => {
-  await i18n.changeLanguage("en");
+  await setLanguage("en");
 });
 
 describe("timeAgo", () => {
   const now = Date.parse("2026-11-05T12:00:00Z");
   it("formats in the active language", async () => {
-    await i18n.changeLanguage("en");
+    await setLanguage("en");
     expect(timeAgo("2026-11-05T11:55:00Z", now)).toBe("5 minutes ago");
-    await i18n.changeLanguage("de");
+    await setLanguage("de");
     expect(timeAgo("2026-11-05T11:55:00Z", now)).toBe("vor 5 Minuten");
   });
   it("says never without a date", async () => {
     expect(timeAgo(null, now)).toBe("never");
-    await i18n.changeLanguage("es");
+    await setLanguage("es");
     expect(timeAgo(null, now)).toBe("nunca");
   });
 });
 
 describe("recovery kit language", () => {
   it("is worded in the interface language", async () => {
-    await i18n.changeLanguage("de");
+    await setLanguage("de");
     const text = recoveryKitText({
       email: "a@example.com",
       serverUrl: "https://sync.example.com",

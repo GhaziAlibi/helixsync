@@ -379,6 +379,13 @@ async function runPeriodicSync(): Promise<void> {
 
 installRestorePointTriggers();
 
+// An event that wakes a stopped worker is delivered only to listeners added
+// while the script first runs, so capture is registered here and not after
+// the async startup below, or a bookmark or visit that woke the worker would
+// be missed. Both are idempotent; with no device their flushes do nothing.
+registerBookmarkCapture();
+registerHistoryCapture();
+
 chrome.runtime.onInstalled.addListener(() => {
   ensureSyncAlarm();
   ensureRestorePointAlarm();

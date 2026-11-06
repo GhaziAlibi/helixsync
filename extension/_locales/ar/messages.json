@@ -68,9 +68,6 @@
   "statusErr_network": {
     "message": "تعذّر الوصول إلى الخادم."
   },
-  "setup_deviceFallback": {
-    "message": "جهاز"
-  },
   "setup_title": {
     "message": "ربط هذا المتصفح"
   },

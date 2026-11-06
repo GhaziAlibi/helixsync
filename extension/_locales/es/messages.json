@@ -68,9 +68,6 @@
   "statusErr_network": {
     "message": "No se pudo conectar con el servidor."
   },
-  "setup_deviceFallback": {
-    "message": "Dispositivo"
-  },
   "setup_title": {
     "message": "Conectar este navegador"
   },

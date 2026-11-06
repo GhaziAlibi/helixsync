@@ -138,9 +138,12 @@ export function applyDocumentLanguage(): void {
  * leaves English in place rather than a blank popup. */
 export async function initI18n(): Promise<void> {
   const language = await resolveLanguage();
-  const english = await loadCatalog("en").catch((): Catalog => ({}));
-  const messages = language === "en" ? english : await loadCatalog(language).catch((): Catalog => ({}));
-  translator = createTranslator(language, messages, english);
+  const english = loadCatalog("en").catch((): Catalog => ({}));
+  const [en, messages] = await Promise.all([
+    english,
+    language === "en" ? english : loadCatalog(language).catch((): Catalog => ({})),
+  ]);
+  translator = createTranslator(language, messages, en);
   applyDocumentLanguage();
 }
 
@@ -167,6 +170,7 @@ export function formatNumber(value: number, options?: Intl.NumberFormatOptions):
 export function timeAgo(iso: string | undefined, now: number = Date.now()): string {
   if (!iso) return t("time_never");
   const seconds = Math.floor((now - new Date(iso).getTime()) / 1000);
+  if (!Number.isFinite(seconds)) return t("time_never");
   if (seconds < 5) return t("time_justNow");
   const rtf = new Intl.RelativeTimeFormat(translator.language, { numeric: "auto" });
   if (seconds < 60) return rtf.format(-seconds, "second");
