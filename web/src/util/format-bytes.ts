@@ -1,5 +1,7 @@
+import { formatNumber } from "../i18n/format";
+
 export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024) return `${formatNumber(bytes)} B`;
   const units = ["KB", "MB", "GB", "TB"];
   let value = bytes / 1024;
   let unitIndex = 0;
@@ -7,5 +9,6 @@ export function formatBytes(bytes: number): string {
     value /= 1024;
     unitIndex++;
   }
-  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+  const digits = value >= 10 ? 0 : 1;
+  return `${formatNumber(value, { minimumFractionDigits: digits, maximumFractionDigits: digits })} ${units[unitIndex]}`;
 }

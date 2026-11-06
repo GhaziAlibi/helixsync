@@ -26,7 +26,7 @@ import {
   type PendingOperationRecord,
 } from "../storage/db";
 import { recordLocalFieldStatesBatch } from "./conflict";
-import { ApiError, downloadChanges, fetchSnapshot, uploadOperations } from "../api/client";
+import { ApiError, NetworkError, downloadChanges, fetchSnapshot, uploadOperations } from "../api/client";
 import { isConnected as isWebSocketConnected } from "../api/websocket";
 import { isBulkContainer } from "./bulk-container";
 import type {
@@ -93,15 +93,24 @@ function pushToGroup(groups: Map<ObjectType, DecryptedItem[]>, item: DecryptedIt
 
 export type SyncStatus = "idle" | "syncing" | "error" | "needs_reauth";
 
-let listeners: Array<(status: SyncStatus, detail?: string) => void> = [];
-export function onStatusChange(cb: (status: SyncStatus, detail?: string) => void): () => void {
+let listeners: Array<(status: SyncStatus, detail?: string, code?: string) => void> = [];
+export function onStatusChange(cb: (status: SyncStatus, detail?: string, code?: string) => void): () => void {
   listeners.push(cb);
   return () => {
     listeners = listeners.filter((l) => l !== cb);
   };
 }
-function emitStatus(status: SyncStatus, detail?: string) {
-  for (const cb of listeners) cb(status, detail);
+function emitStatus(status: SyncStatus, detail?: string, code?: string) {
+  for (const cb of listeners) cb(status, detail, code);
+}
+
+/** A short code for the failures the popup words itself (in the user's
+ * language); anything else reaches it only as the English message. */
+export function syncErrorCode(err: unknown): string | undefined {
+  if (err instanceof ApiError) return err.status === 429 ? "rate_limited" : err.code;
+  // Other TypeErrors are bugs and keep their own message.
+  if (err instanceof NetworkError) return "network";
+  return undefined;
 }
 
 // --- Local operations -----------------------------------------------------
@@ -930,7 +939,7 @@ export async function runSyncCycle(): Promise<void> {
           void setSyncBlockedUntil(Date.now() + cooldownSeconds * 1000);
           scheduleCooldownRetry();
         }
-        emitStatus("error", err instanceof Error ? err.message : String(err));
+        emitStatus("error", err instanceof Error ? err.message : String(err), syncErrorCode(err));
         // A failed cycle moved nothing, so it extends the backoff. Triggers
         // that arrived during it wait for the next alarm or push rather than
         // hot-looping against whatever just failed.

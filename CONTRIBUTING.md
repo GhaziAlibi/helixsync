@@ -211,6 +211,36 @@ maintainer updates them when bumping a minor or major version. The release
 procedure, and the repository setup it needs, are in
 [`docs/releasing.md`](docs/releasing.md).
 
+## Translations
+
+The extension popup and the web dashboard are available in English (`en`, the
+default and the fallback for any missing text), Hungarian (`hu`), German
+(`de`), Spanish (`es`), French (`fr`), Simplified Chinese (`zh-CN`) and Arabic (`ar`, shown
+right to left). The language follows the browser, and can be changed in the
+dashboard's sidebar and the popup's settings. Each of the two remembers its own
+choice. The server is not translated: it sends an error `code`, which the
+clients word themselves, with the server's English `message` as the fallback.
+
+- **Web:** `web/src/i18n/locales/<lang>.json`, nested keys, `{{name}}` for
+  values, `<strong>`/`<code>`/`<anchor>` tags where the text holds markup.
+  Use `t("section.key")` (from `useTranslation()`). Errors shown to people are
+  thrown as `LocalizedError` (`web/src/i18n/errors.ts`), not as English text.
+- **Extension:** `extension/_locales/<lang>/messages.json` (`zh_CN` for
+  `zh-CN`), Chrome's format, flat keys, `{name}` for values. Use `t("key")` or
+  `tp("key", count)` from `extension/src/i18n.ts`. Plural messages have one key
+  per form (`key_one`, `key_other`, and for Arabic also `_zero`, `_two`,
+  `_few`, `_many`). Don't write a literal `$`. The service worker sends
+  codes, never English sentences, for anything the popup shows.
+
+To add a language, add it to the `LANGUAGES` list in
+`web/src/i18n/languages.ts` and `extension/src/i18n.ts`, import its catalog in
+`web/src/i18n/index.ts`, and add the catalog files. To change a text, change
+it in `en` first, then in every other language. The tests (`npm test` in
+`web/` and `extension/`) fail when a language has different keys or
+placeholders than English, or lacks a plural form its language uses. The
+extension's end-to-end test pins the browser to `--lang=en-US`, because it
+selects elements by their English text.
+
 ## Reporting bugs and proposing features
 
 Use the issue templates. For anything security-related, follow

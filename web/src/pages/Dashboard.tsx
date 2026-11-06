@@ -1,18 +1,9 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import * as api from "../api/client";
 import { formatBytes } from "../util/format-bytes";
-
-function timeAgo(iso: string | null): string {
-  if (!iso) return "never";
-  const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
+import { errorText } from "../i18n/errors";
+import { formatNumber, timeAgo } from "../i18n/format";
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
   return (
@@ -25,12 +16,13 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
 }
 
 function StorageCard({ usedBytes, limitBytes }: { usedBytes: number; limitBytes: number }) {
+  const { t } = useTranslation();
   const fraction = limitBytes > 0 ? Math.min(usedBytes / limitBytes, 1) : 0;
   const percent = Math.round(fraction * 100);
   const barColor = fraction >= 0.9 ? "bg-red-500" : fraction >= 0.7 ? "bg-amber-500" : "bg-blue-500";
   return (
     <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5">
-      <div className="text-xs uppercase tracking-wide text-slate-500">Storage used</div>
+      <div className="text-xs uppercase tracking-wide text-slate-500">{t("dashboard.storageUsed")}</div>
       <div className="text-2xl font-semibold mt-1">
         {formatBytes(usedBytes)}
         <span className="text-sm font-normal text-slate-400"> / {formatBytes(limitBytes)}</span>
@@ -41,12 +33,13 @@ function StorageCard({ usedBytes, limitBytes }: { usedBytes: number; limitBytes:
           style={{ width: `${percent}%` }}
         />
       </div>
-      <div className="text-xs text-slate-400 mt-1">{percent}% of account limit</div>
+      <div className="text-xs text-slate-400 mt-1">{t("dashboard.percentOfLimit", { percent })}</div>
     </div>
   );
 }
 
 export default function Dashboard() {
+  const { t } = useTranslation();
   const [devices, setDevices] = useState<api.DevicePublic[] | null>(null);
   const [version, setVersion] = useState<api.ServerVersion | null>(null);
   const [stats, setStats] = useState<api.SyncStats | null>(null);
@@ -59,7 +52,7 @@ export default function Dashboard() {
         setVersion(v);
         setStats(s);
       })
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+      .catch((e) => setError(errorText(e)));
   }, []);
 
   const activeDevices = devices?.filter((d) => !d.revokedAt) ?? [];
@@ -71,46 +64,45 @@ export default function Dashboard() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold mb-6">Dashboard</h1>
+      <h1 className="text-2xl font-semibold mb-6">{t("dashboard.title")}</h1>
       {error && <p className="text-red-600 text-sm mb-4">{error}</p>}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
         <StatCard
-          label="Connection"
-          value={version ? "Connected" : "…"}
-          sub={version ? `protocol v${version.protocolVersion}` : undefined}
+          label={t("dashboard.connection")}
+          value={version ? t("dashboard.connected") : "…"}
+          sub={version ? t("dashboard.protocol", { version: version.protocolVersion }) : undefined}
         />
-        <StatCard label="Last sync" value={mostRecentSync ? timeAgo(mostRecentSync) : "—"} />
-        <StatCard label="Devices" value={activeDevices.length ? String(activeDevices.length) : "0"} />
+        <StatCard label={t("dashboard.lastSync")} value={mostRecentSync ? timeAgo(mostRecentSync) : "—"} />
+        <StatCard label={t("dashboard.devices")} value={formatNumber(activeDevices.length)} />
         <StatCard
-          label="Sync health"
-          value={activeDevices.length > 0 ? "Healthy" : "No devices"}
+          label={t("dashboard.syncHealth")}
+          value={activeDevices.length > 0 ? t("dashboard.healthy") : t("dashboard.noDevices")}
         />
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-        <StatCard label="Bookmarks synced" value={stats ? stats.bookmarks.toLocaleString() : "…"} />
-        <StatCard label="History items synced" value={stats ? stats.historyVisits.toLocaleString() : "…"} />
-        <StatCard label="Tabs synced" value={stats ? stats.tabs.toLocaleString() : "…"} />
+        <StatCard label={t("dashboard.bookmarksSynced")} value={stats ? formatNumber(stats.bookmarks) : "…"} />
+        <StatCard label={t("dashboard.historySynced")} value={stats ? formatNumber(stats.historyVisits) : "…"} />
+        <StatCard label={t("dashboard.tabsSynced")} value={stats ? formatNumber(stats.tabs) : "…"} />
         {stats && <StorageCard usedBytes={stats.storageBytes} limitBytes={stats.storageLimitBytes} />}
       </div>
 
       <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5">
-        <h2 className="font-medium mb-3">Recent devices</h2>
+        <h2 className="font-medium mb-3">{t("dashboard.recentDevices")}</h2>
         {!devices ? (
-          <p className="text-sm text-slate-500">Loading…</p>
+          <p className="text-sm text-slate-500">{t("common.loading")}</p>
         ) : activeDevices.length === 0 ? (
           <p className="text-sm text-slate-500">
-            No devices registered yet. Install the HelixSync extension in Helium and connect it to this
-            server to get started.
+            {t("dashboard.noneRegistered")}
           </p>
         ) : (
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-left text-slate-500">
-                <th className="py-1 font-normal">Name</th>
-                <th className="py-1 font-normal">Browser</th>
-                <th className="py-1 font-normal">Last seen</th>
+              <tr className="text-start text-slate-500">
+                <th className="py-1 font-normal">{t("common.name")}</th>
+                <th className="py-1 font-normal">{t("common.browser")}</th>
+                <th className="py-1 font-normal">{t("dashboard.lastSeen")}</th>
               </tr>
             </thead>
             <tbody>

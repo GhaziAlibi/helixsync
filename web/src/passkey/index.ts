@@ -4,6 +4,7 @@
 // ../crypto; this file is the browser glue and the local record.
 import { randomBytes } from "@noble/hashes/utils.js";
 import { fromB64, sealRecoveryCode, toB64, unsealRecoveryCode } from "../crypto";
+import { LocalizedError } from "../i18n/localized-error";
 
 export interface PasskeyRecord {
   v: 1;
@@ -35,9 +36,9 @@ export function parseRescueFile(text: string): PasskeyRecord {
   try {
     value = JSON.parse(text);
   } catch {
-    throw new Error("That isn't a HelixSync passkey rescue file.");
+    throw new LocalizedError("errors.rescueInvalid");
   }
-  if (!isRecord(value)) throw new Error("That isn't a HelixSync passkey rescue file.");
+  if (!isRecord(value)) throw new LocalizedError("errors.rescueInvalid");
   return value;
 }
 
@@ -122,21 +123,21 @@ function nativeCredentials(): CredentialsContainer {
 }
 
 /** Turns the browser's terse WebAuthn errors into something a person can act on. */
-export function passkeyErrorMessage(err: unknown): string {
+export function passkeyError(err: unknown): Error {
   const name = err instanceof DOMException || err instanceof Error ? err.name : "";
   switch (name) {
     case "NotAllowedError":
-      return "The passkey prompt was cancelled, timed out, or the page lost focus. Try again and approve it on your device.";
+      return new LocalizedError("errors.passkeyCancelled");
     case "InvalidStateError":
-      return "This device already has a passkey for HelixSync. Use it, or remove the old one and try again.";
+      return new LocalizedError("errors.passkeyExists");
     case "NotSupportedError":
-      return "This browser or device can't make the kind of passkey HelixSync needs. Try your phone or a security key.";
+      return new LocalizedError("errors.passkeyNotSupported");
     case "SecurityError":
-      return "Passkeys need a secure address (https, or localhost) that matches this site.";
+      return new LocalizedError("errors.passkeyInsecure");
     case "AbortError":
-      return "The passkey request was interrupted. Try again.";
+      return new LocalizedError("errors.passkeyAborted");
     default:
-      return err instanceof Error && err.message ? err.message : "The passkey wasn't used.";
+      return err instanceof Error && err.message ? err : new LocalizedError("errors.passkeyUnused");
   }
 }
 
@@ -144,7 +145,7 @@ async function ceremony<T>(run: () => Promise<T>): Promise<T> {
   try {
     return await run();
   } catch (err) {
-    throw new Error(passkeyErrorMessage(err));
+    throw passkeyError(err);
   }
 }
 
@@ -170,7 +171,7 @@ export async function getPasskeyPrf(credentialId: string, prfSalt: string): Prom
     },
   }))) as PublicKeyCredential | null;
   const first = (assertion?.getClientExtensionResults() as PrfExtensionResults | undefined)?.prf?.results?.first;
-  if (!first) throw new Error("This passkey didn't return the secret HelixSync needs.");
+  if (!first) throw new LocalizedError("errors.passkeyNoSecret");
   return new Uint8Array(first);
 }
 
@@ -197,13 +198,13 @@ async function createPasskey(
       timeout: 120000,
     },
   }))) as PublicKeyCredential | null;
-  if (!credential) throw new Error("No passkey was created.");
+  if (!credential) throw new LocalizedError("errors.passkeyNotCreated");
 
   const prf = (credential.getClientExtensionResults() as PrfExtensionResults).prf;
   // Only an explicit "no" stops here: some providers say nothing at creation
   // and answer on get(), which is the real test.
   if (prf?.enabled === false) {
-    throw new Error("This passkey can't be used here: it doesn't support the secret HelixSync needs.");
+    throw new LocalizedError("errors.passkeyNoPrf");
   }
   const credentialId = toB64(new Uint8Array(credential.rawId));
   // Some authenticators return the output only on a later get().

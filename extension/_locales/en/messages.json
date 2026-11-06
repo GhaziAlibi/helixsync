@@ -1,0 +1,614 @@
+{
+  "extName": {
+    "message": "HelixSync"
+  },
+  "extDescription": {
+    "message": "Self-hosted, privacy-first browser synchronization for Helium and other Chromium browsers."
+  },
+  "common_loading": {
+    "message": "Loading…"
+  },
+  "common_cancel": {
+    "message": "Cancel"
+  },
+  "common_disconnect": {
+    "message": "Disconnect"
+  },
+  "common_delete": {
+    "message": "Delete"
+  },
+  "time_never": {
+    "message": "never"
+  },
+  "time_justNow": {
+    "message": "just now"
+  },
+  "language_legend": {
+    "message": "Language"
+  },
+  "language_label": {
+    "message": "Interface language"
+  },
+  "language_auto": {
+    "message": "Browser default"
+  },
+  "header_back": {
+    "message": "Back"
+  },
+  "header_settings": {
+    "message": "Settings"
+  },
+  "header_restorePoints": {
+    "message": "Restore points"
+  },
+  "status_syncing": {
+    "message": "Syncing…"
+  },
+  "status_error": {
+    "message": "Sync error"
+  },
+  "status_needsReauth": {
+    "message": "Needs re-authorization"
+  },
+  "status_synced": {
+    "message": "Synced"
+  },
+  "statusErr_rate_limited": {
+    "message": "Too many requests. Sync will retry shortly."
+  },
+  "statusErr_unauthorized": {
+    "message": "The server rejected this device's sign-in."
+  },
+  "statusErr_busy": {
+    "message": "The server is busy. Sync will retry shortly."
+  },
+  "statusErr_internal_error": {
+    "message": "The server hit an error. Sync will retry shortly."
+  },
+  "statusErr_network": {
+    "message": "Could not reach the server."
+  },
+  "setup_title": {
+    "message": "Connect this browser"
+  },
+  "setup_subtitle": {
+    "message": "Sign in with your HelixSync account to start syncing."
+  },
+  "setup_serverUrl": {
+    "message": "Server URL"
+  },
+  "setup_email": {
+    "message": "Email"
+  },
+  "setup_password": {
+    "message": "Password"
+  },
+  "setup_deviceName": {
+    "message": "Device name"
+  },
+  "setup_connect": {
+    "message": "Connect"
+  },
+  "setup_deviceLoginInstead": {
+    "message": "Log in with device instead"
+  },
+  "setup_noAccount": {
+    "message": "Don't have an account? {link}"
+  },
+  "setup_registerLink": {
+    "message": "Register on the web"
+  },
+  "setup_forgotLink": {
+    "message": "Forgot your password?"
+  },
+  "setup_serverUrlFirst": {
+    "message": "Enter a valid Server URL first."
+  },
+  "setup_serverUrlInvalid": {
+    "message": "Enter a valid Server URL."
+  },
+  "setup_insecureUrl": {
+    "message": "The Server URL must use https:// (http:// is only allowed for localhost, 127.0.0.1 or [::1])."
+  },
+  "setup_permissionDenied": {
+    "message": "Permission to contact the server was not granted."
+  },
+  "setup_emailAndName": {
+    "message": "Enter your email and a device name first."
+  },
+  "setup_permissionLastDevice": {
+    "message": "Permission wasn't granted last time — click \"Log in with device instead\" to try again."
+  },
+  "setup_permissionLastConnect": {
+    "message": "Permission wasn't granted last time — click Connect to try again."
+  },
+  "setup_creatingRequest": {
+    "message": "Creating sign-in request…"
+  },
+  "setup_connecting": {
+    "message": "Connecting…"
+  },
+  "setup_deriving": {
+    "message": "Deriving encryption key…"
+  },
+  "setup_failed": {
+    "message": "Failed: {message}"
+  },
+  "devicewait_title": {
+    "message": "Approve on another browser"
+  },
+  "devicewait_body": {
+    "message": "Open HelixSync on a browser that's already connected to this account and approve the request there. Approve it only if that browser shows this phrase:"
+  },
+  "devicewait_waiting": {
+    "message": "Waiting for approval…"
+  },
+  "devicewait_keyMismatch": {
+    "message": "The key check didn't match, so the approval was discarded."
+  },
+  "devicewait_denied": {
+    "message": "The sign-in request was denied."
+  },
+  "devicewait_expired": {
+    "message": "The sign-in request expired. Start a new one."
+  },
+  "devicewait_deviceLimit": {
+    "message": "This account has the maximum number of devices. Revoke one on the dashboard and this browser will connect."
+  },
+  "devicewait_stillWaiting": {
+    "message": "Still waiting: {message}"
+  },
+  "keycheck_title": {
+    "message": "Check the key"
+  },
+  "keycheck_body": {
+    "message": "The approving browser shows a key check phrase on its sign-in request. Continue only if it matches:"
+  },
+  "keycheck_matches": {
+    "message": "It matches"
+  },
+  "keycheck_mismatch": {
+    "message": "It doesn't match"
+  },
+  "statusview_lastSync": {
+    "message": "Last sync: {time} · Pending: {pending}"
+  },
+  "statusview_syncNow": {
+    "message": "Sync Now"
+  },
+  "statusview_olderHistory": {
+    "message": "Sync older history"
+  },
+  "statusview_olderHistoryTitle": {
+    "message": "Import this browser's history older than the previous retention window"
+  },
+  "statusview_importStarted": {
+    "message": "Importing older history in the background."
+  },
+  "statusview_importFailed": {
+    "message": "Failed to start: {message}"
+  },
+  "statusview_importRequestFailed": {
+    "message": "The import request failed"
+  },
+  "statusview_restoreRequestFailed": {
+    "message": "The restore request failed"
+  },
+  "statusview_signedInAs": {
+    "message": "Signed in as {email}"
+  },
+  "pending_header": {
+    "message": "Tabs from other devices ({count})"
+  },
+  "pending_restoreAll": {
+    "message": "Restore all ({count})"
+  },
+  "pending_failed": {
+    "message": "Failed to restore tab: {message}"
+  },
+  "pending_restore": {
+    "message": "Restore"
+  },
+  "pending_restoring": {
+    "message": "Restoring…"
+  },
+  "pending_showMore": {
+    "message": "Show {count} more"
+  },
+  "auth_requests_one": {
+    "message": "Sign-in request"
+  },
+  "auth_requests_other": {
+    "message": "Sign-in requests"
+  },
+  "auth_passwordReset": {
+    "message": "PASSWORD RESET"
+  },
+  "auth_webSignIn": {
+    "message": "Web dashboard sign-in"
+  },
+  "auth_newBrowser": {
+    "message": "New browser: {name}"
+  },
+  "auth_unnamed": {
+    "message": "unnamed"
+  },
+  "auth_unknownIp": {
+    "message": "Unknown IP"
+  },
+  "auth_resetWarningCompletes": {
+    "message": "WARNING: this lets someone set a new password for your account. Approve only if YOU asked to reset your password. {approvals} of 2 approvals so far; approving now completes it and hands your encryption key to that page."
+  },
+  "auth_resetWarningSecond": {
+    "message": "WARNING: this lets someone set a new password for your account. Approve only if YOU asked to reset your password. {approvals} of 2 approvals so far; a second browser must also approve."
+  },
+  "auth_webConsequence": {
+    "message": "Approving signs that browser in to your dashboard."
+  },
+  "auth_deviceConsequence": {
+    "message": "Approving gives that browser your encryption key and all your synced data."
+  },
+  "auth_approveOnlyIf": {
+    "message": "Approve only if the other screen shows:"
+  },
+  "auth_keyCheckReset": {
+    "message": "After you approve, the reset page asks you to confirm this key check phrase:"
+  },
+  "auth_keyCheckDevice": {
+    "message": "After you approve, the new browser asks you to confirm this key check phrase:"
+  },
+  "auth_approve": {
+    "message": "Approve"
+  },
+  "auth_deny": {
+    "message": "Deny"
+  },
+  "auth_alreadyAnswered": {
+    "message": "This request was already answered or has expired."
+  },
+  "auth_resetChanged": {
+    "message": "This reset changed (this browser already approved, or another one did first). Reopen the popup."
+  },
+  "auth_failed": {
+    "message": "Failed: {message}"
+  },
+  "settings_sync": {
+    "message": "Synchronization"
+  },
+  "settings_bookmarks": {
+    "message": "Bookmarks"
+  },
+  "settings_history": {
+    "message": "History"
+  },
+  "settings_tabs": {
+    "message": "Tabs"
+  },
+  "settings_tabGroups": {
+    "message": "Tab Groups"
+  },
+  "settings_tabRestore": {
+    "message": "Tab restore"
+  },
+  "settings_restoreRemoteTabs": {
+    "message": "Restore remote tabs"
+  },
+  "settings_policyDisabled": {
+    "message": "Disabled"
+  },
+  "settings_policyAsk": {
+    "message": "Ask before restoring"
+  },
+  "settings_policyAutomatic": {
+    "message": "Automatically restore"
+  },
+  "settings_historyLegend": {
+    "message": "History"
+  },
+  "settings_retention": {
+    "message": "Retention"
+  },
+  "settings_d7": {
+    "message": "7 days"
+  },
+  "settings_d30": {
+    "message": "30 days"
+  },
+  "settings_d90": {
+    "message": "90 days"
+  },
+  "settings_y1": {
+    "message": "1 year"
+  },
+  "settings_unlimited": {
+    "message": "Unlimited"
+  },
+  "settings_restorePointsLegend": {
+    "message": "Restore points"
+  },
+  "settings_autoRestorePoints": {
+    "message": "Automatic restore points"
+  },
+  "settings_restorePointsHelp": {
+    "message": "Daily and safety copies of your bookmarks. Manual ones are always available."
+  },
+  "settings_account": {
+    "message": "Account"
+  },
+  "settings_password": {
+    "message": "Password"
+  },
+  "settings_changeOnWeb": {
+    "message": "Change on the web"
+  },
+  "settings_save": {
+    "message": "Save"
+  },
+  "settings_disconnectConfirm": {
+    "message": "Disconnect this device? It will be removed from your account's device list, and you can reconnect any time by signing in again."
+  },
+  "settings_disconnecting": {
+    "message": "Disconnecting…"
+  },
+  "settings_tabGroupsNeedPermission": {
+    "message": "Tab groups need permission in this browser: press Save to allow it."
+  },
+  "settings_loadFailed": {
+    "message": "Failed to load settings: {message}"
+  },
+  "settings_saving": {
+    "message": "Saving…"
+  },
+  "settings_tabGroupsDenied": {
+    "message": "Tab group sync needs the tab groups permission. Allow it, or turn Tab Groups off."
+  },
+  "settings_saveFailed": {
+    "message": "Failed to save: {message}"
+  },
+  "app_loadFailed": {
+    "message": "Failed to load: {message}"
+  },
+  "rp_title": {
+    "message": "Restore points"
+  },
+  "rp_subtitle": {
+    "message": "Saved copies of your bookmarks. Roll back to one if something goes wrong."
+  },
+  "rp_loading": {
+    "message": "Loading…"
+  },
+  "rp_unavailable": {
+    "message": "Restore points are not available: this server doesn't support them, or bookmark sync is off or still importing."
+  },
+  "rp_create": {
+    "message": "Create restore point"
+  },
+  "rp_saving": {
+    "message": "Saving…"
+  },
+  "rp_autoOff": {
+    "message": "Automatic restore points are off (Settings)."
+  },
+  "rp_uploading": {
+    "message": "Uploading… {kind}"
+  },
+  "rp_empty": {
+    "message": "No restore points yet."
+  },
+  "rp_saved": {
+    "message": "Saved"
+  },
+  "rp_pinned": {
+    "message": "Pinned"
+  },
+  "rp_removedDevice": {
+    "message": "a removed device"
+  },
+  "rp_lastRestored": {
+    "message": "Last restored {date}"
+  },
+  "rp_restoreEllipsis": {
+    "message": "Restore…"
+  },
+  "rp_pin": {
+    "message": "Pin"
+  },
+  "rp_unpin": {
+    "message": "Unpin"
+  },
+  "rp_delete": {
+    "message": "Delete"
+  },
+  "rp_deleteConfirm": {
+    "message": "Delete the restore point from {date}? This can't be undone."
+  },
+  "rp_bookmarks_one": {
+    "message": "{count} bookmark"
+  },
+  "rp_bookmarks_other": {
+    "message": "{count} bookmarks"
+  },
+  "rp_kind_manual": {
+    "message": "Manual"
+  },
+  "rp_kind_scheduled": {
+    "message": "Daily"
+  },
+  "rp_kind_pre_restore": {
+    "message": "Before a restore"
+  },
+  "rp_kind_pre_import": {
+    "message": "Before first import"
+  },
+  "rp_kind_pre_resync": {
+    "message": "Before a resync"
+  },
+  "rp_kind_mass_delete": {
+    "message": "Before a mass delete"
+  },
+  "rp_opening": {
+    "message": "Opening the restore point…"
+  },
+  "rp_restoreTitle": {
+    "message": "Restore"
+  },
+  "rp_from": {
+    "message": "From {date}"
+  },
+  "rp_back": {
+    "message": "Back"
+  },
+  "rp_whatToRestore": {
+    "message": "What to restore"
+  },
+  "rp_allBookmarks": {
+    "message": "All bookmarks"
+  },
+  "rp_oneFolder": {
+    "message": "One folder…"
+  },
+  "rp_how": {
+    "message": "How"
+  },
+  "rp_modeMerge": {
+    "message": "Merge: bring back what's missing, undo edits. Deletes nothing."
+  },
+  "rp_modeExact": {
+    "message": "Exact: also remove bookmarks that aren't in this point."
+  },
+  "rp_preview": {
+    "message": "Preview"
+  },
+  "rp_restoreAction": {
+    "message": "Restore"
+  },
+  "rp_pickFolderBelow": {
+    "message": "Pick a folder below."
+  },
+  "rp_pickFolderFirst": {
+    "message": "Pick a folder first."
+  },
+  "rp_folder": {
+    "message": "Folder: {name}"
+  },
+  "rp_untitled": {
+    "message": "(untitled)"
+  },
+  "rp_working": {
+    "message": "Working it out…"
+  },
+  "rp_nothingToDo": {
+    "message": "Nothing to do: your bookmarks already match this restore point."
+  },
+  "rp_previewRestored_one": {
+    "message": "Bring back {count} bookmark or folder"
+  },
+  "rp_previewRestored_other": {
+    "message": "Bring back {count} bookmarks or folders"
+  },
+  "rp_previewUpdated_one": {
+    "message": "Change {count} bookmark or folder"
+  },
+  "rp_previewUpdated_other": {
+    "message": "Change {count} bookmarks or folders"
+  },
+  "rp_previewMoved_one": {
+    "message": "Move {count} bookmark or folder"
+  },
+  "rp_previewMoved_other": {
+    "message": "Move {count} bookmarks or folders"
+  },
+  "rp_previewDeleted_one": {
+    "message": "Remove {count} bookmark or folder"
+  },
+  "rp_previewDeleted_other": {
+    "message": "Remove {count} bookmarks or folders"
+  },
+  "rp_sampleMore": {
+    "message": "{titles}, and {more} more"
+  },
+  "rp_skipped_one": {
+    "message": "{count} bookmark skipped (unsupported address)."
+  },
+  "rp_skipped_other": {
+    "message": "{count} bookmarks skipped (unsupported address)."
+  },
+  "rp_confirmExactAll": {
+    "message": "Restore all your bookmarks exactly? Bookmarks added after {date} will be removed from every device. A copy of your current bookmarks is saved first."
+  },
+  "rp_confirmExactFolder": {
+    "message": "Restore the folder \"{name}\" exactly? Bookmarks added after {date} will be removed from every device. A copy of your current bookmarks is saved first."
+  },
+  "rp_confirmMergeAll": {
+    "message": "Restore all your bookmarks from {date}? A copy of your current bookmarks is saved first."
+  },
+  "rp_confirmMergeFolder": {
+    "message": "Restore the folder \"{name}\" from {date}? A copy of your current bookmarks is saved first."
+  },
+  "rp_noFolders": {
+    "message": "This restore point has no folders."
+  },
+  "rp_restoring": {
+    "message": "Restoring"
+  },
+  "rp_prepare": {
+    "message": "Saving a copy of your bookmarks and getting ready…"
+  },
+  "rp_applying": {
+    "message": "Restoring… {applied} of {total}"
+  },
+  "rp_finishing": {
+    "message": "Finishing…"
+  },
+  "rp_done": {
+    "message": "Done."
+  },
+  "rp_doneCounts": {
+    "message": "Brought back {restored}, changed {updated}, moved {moved}, removed {deleted}."
+  },
+  "rp_stopped": {
+    "message": "The restore stopped."
+  },
+  "rp_doneButton": {
+    "message": "Done"
+  },
+  "rp_err_bookmarksNotReady": {
+    "message": "Bookmarks are still being prepared for sync. Try again in a moment."
+  },
+  "rp_err_limit": {
+    "message": "No room for a new restore point: the rest are pinned. Unpin or delete one first."
+  },
+  "rp_err_pinLimit": {
+    "message": "Too many pinned restore points. Unpin one first."
+  },
+  "rp_err_inProgress": {
+    "message": "A restore is already running."
+  },
+  "rp_err_unreadable": {
+    "message": "This restore point can't be read, so it was not applied."
+  },
+  "rp_err_updateNeeded": {
+    "message": "Update the HelixSync extension to use this restore point."
+  },
+  "rp_err_offline": {
+    "message": "Could not reach the server."
+  },
+  "rp_err_reauth": {
+    "message": "Sign in again to use restore points."
+  },
+  "rp_err_syncFailed": {
+    "message": "Could not sync before restoring. Check your connection and try again."
+  },
+  "rp_err_preRestoreFailed": {
+    "message": "Could not save a copy of your bookmarks first, so nothing was restored."
+  },
+  "rp_err_unavailable": {
+    "message": "This server does not support restore points."
+  },
+  "rp_err_noAnswer": {
+    "message": "The extension did not answer."
+  },
+  "rp_err_generic": {
+    "message": "Something went wrong."
+  }
+}

@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Trans, useTranslation } from "react-i18next";
 import { useAuth } from "../auth/context";
 import { ApiError, createAuthRequest, getServerVersion } from "../api/client";
 import { authRequestFingerprint, generateAuthRequestPublicKey } from "../crypto";
 import RecoveryCodeNotice from "../components/RecoveryCodeNotice";
 import { isInsecureRemoteHttp } from "../util/secure-context";
+import LanguageSelect from "../components/LanguageSelect";
+import { errorText } from "../i18n/errors";
 
 /** How often a waiting login-with-device request is checked. */
 const DEVICE_LOGIN_POLL_MS = 3000;
@@ -18,6 +21,7 @@ interface DeviceLogin {
 
 export default function Login() {
   const { login, register, pollDeviceLogin } = useAuth();
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const wantsRegister = searchParams.get("mode") === "register";
@@ -64,12 +68,12 @@ export default function Login() {
         }
         if (result.status === "denied") {
           setDeviceLogin(null);
-          setError("The sign-in request was denied.");
+          setError(t("login.deviceDenied"));
           return;
         }
         if (result.status === "expired") {
           setDeviceLogin(null);
-          setError("The sign-in request expired. Start a new one.");
+          setError(t("login.deviceExpired"));
           return;
         }
       } catch {
@@ -78,7 +82,7 @@ export default function Login() {
       }
       if (Date.now() >= Date.parse(deviceLogin.expiresAt)) {
         setDeviceLogin(null);
-        setError("The sign-in request expired. Start a new one.");
+        setError(t("login.deviceExpired"));
         return;
       }
       timer = setTimeout(tick, DEVICE_LOGIN_POLL_MS);
@@ -88,7 +92,7 @@ export default function Login() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [deviceLogin, pollDeviceLogin, navigate]);
+  }, [deviceLogin, pollDeviceLogin, navigate, t]);
 
   const registrationClosed = registrationEnabled === false;
   const activeMode = registrationClosed ? "login" : mode;
@@ -99,11 +103,11 @@ export default function Login() {
     setError(null);
     if (activeMode === "register") {
       if (password !== confirmPassword) {
-        setError("The passwords don't match.");
+        setError(t("login.passwordsMismatch"));
         return;
       }
       if (!understood) {
-        setError("Please confirm that you understand how your password can be recovered.");
+        setError(t("login.understandRequired"));
         return;
       }
     }
@@ -116,7 +120,7 @@ export default function Login() {
         setRecoveryCode(await register(email, password));
       }
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Something went wrong");
+      setError(err instanceof ApiError ? errorText(err) : t("errors.generic"));
     } finally {
       setSubmitting(false);
     }
@@ -125,7 +129,7 @@ export default function Login() {
   async function startDeviceLogin() {
     setError(null);
     if (!email.includes("@")) {
-      setError("Enter your email first.");
+      setError(t("login.enterEmailFirst"));
       return;
     }
     setSubmitting(true);
@@ -134,7 +138,7 @@ export default function Login() {
       const created = await createAuthRequest(email, publicKey);
       setDeviceLogin({ ...created, fingerprint: await authRequestFingerprint(publicKey) });
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Something went wrong");
+      setError(err instanceof ApiError ? errorText(err) : t("errors.generic"));
     } finally {
       setSubmitting(false);
     }
@@ -142,11 +146,11 @@ export default function Login() {
 
   if (recoveryCode) {
     return (
-      <LoginCard subtitle="Save your recovery code">
+      <LoginCard subtitle={t("login.subtitleSaveCode")}>
         <RecoveryCodeNotice
           code={recoveryCode}
           email={email}
-          continueLabel="Continue to HelixSync"
+          continueLabel={t("login.continue")}
           onContinue={() => navigate("/", { replace: true })}
         />
       </LoginCard>
@@ -155,22 +159,21 @@ export default function Login() {
 
   if (deviceLogin) {
     return (
-      <LoginCard subtitle="Log in with a device">
+      <LoginCard subtitle={t("login.subtitleDevice")}>
         <div className="flex flex-col gap-4">
           <p className="text-sm text-slate-700">
-            Open the HelixSync extension on a browser that's already connected to this account, and approve the
-            request there. Approve it only if the extension shows this exact phrase:
+            {t("login.deviceIntro")}
           </p>
           <code className="block text-center font-mono text-lg tracking-wider bg-slate-100 border border-slate-200 rounded px-3 py-3">
             {deviceLogin.fingerprint}
           </code>
-          <p className="text-sm text-slate-500">Waiting for approval…</p>
+          <p className="text-sm text-slate-500">{t("login.deviceWaiting")}</p>
           <button
             type="button"
             onClick={() => setDeviceLogin(null)}
             className="rounded border border-slate-300 py-2 text-sm"
           >
-            Cancel
+            {t("common.cancel")}
           </button>
         </div>
       </LoginCard>
@@ -178,23 +181,20 @@ export default function Login() {
   }
 
   return (
-    <LoginCard subtitle={activeMode === "login" ? "Sign in to your account" : "Create an account"}>
+    <LoginCard subtitle={activeMode === "login" ? t("login.subtitleLogin") : t("login.subtitleRegister")}>
       {insecureHttp && (
         <div role="alert" className="text-sm text-amber-900 bg-amber-50 border border-amber-300 rounded px-3 py-2 mb-4">
-          <strong>This page is not using HTTPS.</strong> HelixSync's session cookies are marked <code>Secure</code>,
-          so browsers won't keep you signed in over plain HTTP, and your sign-in would travel unencrypted. Serve
-          HelixSync over HTTPS (see docs/deployment.md).
+          <Trans i18nKey="login.insecureHttp" components={{ strong: <strong />, code: <code /> }} />
         </div>
       )}
       {registrationClosed && wantsRegister && (
         <div role="status" className="text-sm text-slate-700 bg-slate-100 border border-slate-200 rounded px-3 py-2 mb-4">
-          This server has registration disabled, so new accounts can't be created here. Sign in with an existing
-          account, or ask whoever runs this server.
+          {t("login.registrationClosed")}
         </div>
       )}
       <form onSubmit={onSubmit} className="flex flex-col gap-4">
         <label className="flex flex-col gap-1 text-sm">
-          Email
+          {t("login.email")}
           <input
             type="email"
             required
@@ -204,7 +204,7 @@ export default function Login() {
           />
         </label>
         <label className="flex flex-col gap-1 text-sm">
-          Password
+          {t("login.password")}
           <input
             type="password"
             required
@@ -218,7 +218,7 @@ export default function Login() {
         {activeMode === "register" && (
           <>
             <label className="flex flex-col gap-1 text-sm">
-              Confirm password
+              {t("login.confirmPassword")}
               <input
                 type="password"
                 required
@@ -229,10 +229,7 @@ export default function Login() {
               />
             </label>
             <p className="text-sm text-slate-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
-              Your data is end-to-end encrypted with a key that's locked by your password, on your own devices. The
-              server never sees your password, so nobody, including whoever runs this server, can reset it for you.
-              After you register you'll get a recovery code: it's the only way to set a new password without losing
-              your data.
+              {t("login.registerWarning")}
             </p>
             <label className="flex items-start gap-2 text-sm">
               <input
@@ -242,7 +239,7 @@ export default function Login() {
                 onChange={(e) => setUnderstood(e.target.checked)}
                 className="mt-1"
               />
-              <span>I understand that if I lose both my password and my recovery code, my data can't be recovered.</span>
+              <span>{t("login.understood")}</span>
             </label>
           </>
         )}
@@ -252,7 +249,7 @@ export default function Login() {
           disabled={submitting}
           className="rounded bg-slate-900 text-white py-2 text-sm font-medium disabled:opacity-50"
         >
-          {activeMode === "login" ? "Sign in" : "Create account"}
+          {activeMode === "login" ? t("login.signIn") : t("login.createAccount")}
         </button>
       </form>
       {activeMode === "login" && (
@@ -263,10 +260,10 @@ export default function Login() {
             onClick={startDeviceLogin}
             className="text-sm text-slate-500 underline disabled:opacity-50"
           >
-            Log in with a device
+            {t("login.logInWithDevice")}
           </button>
           <Link to="/recover" className="text-sm text-slate-500 underline">
-            Forgot your password?
+            {t("login.forgot")}
           </Link>
         </div>
       )}
@@ -278,7 +275,7 @@ export default function Login() {
             setMode(activeMode === "login" ? "register" : "login");
           }}
         >
-          {activeMode === "login" ? "Need an account? Register" : "Already have an account? Sign in"}
+          {activeMode === "login" ? t("login.needAccount") : t("login.haveAccount")}
         </button>
       )}
     </LoginCard>
@@ -287,12 +284,13 @@ export default function Login() {
 
 function LoginCard({ subtitle, children }: { subtitle: string; children: React.ReactNode }) {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50">
+    <div className="min-h-screen flex flex-col items-center justify-center gap-4 bg-slate-50">
       <div className="w-full max-w-sm bg-white rounded-lg shadow-sm p-8">
         <h1 className="text-xl font-semibold mb-1">HelixSync</h1>
         <p className="text-sm text-slate-500 mb-6">{subtitle}</p>
         {children}
       </div>
+      <LanguageSelect />
     </div>
   );
 }

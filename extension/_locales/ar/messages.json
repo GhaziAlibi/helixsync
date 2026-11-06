@@ -1,0 +1,698 @@
+{
+  "extName": {
+    "message": "HelixSync"
+  },
+  "extDescription": {
+    "message": "مزامنة متصفحات ذاتية الاستضافة تضع الخصوصية أولًا، لمتصفح Helium ومتصفحات Chromium الأخرى."
+  },
+  "common_loading": {
+    "message": "جارٍ التحميل…"
+  },
+  "common_cancel": {
+    "message": "إلغاء الأمر"
+  },
+  "common_disconnect": {
+    "message": "قطع الاتصال"
+  },
+  "common_delete": {
+    "message": "حذف"
+  },
+  "time_never": {
+    "message": "أبدًا"
+  },
+  "time_justNow": {
+    "message": "الآن"
+  },
+  "language_legend": {
+    "message": "اللغة"
+  },
+  "language_label": {
+    "message": "لغة الواجهة"
+  },
+  "language_auto": {
+    "message": "الافتراضي للمتصفح"
+  },
+  "header_back": {
+    "message": "رجوع"
+  },
+  "header_settings": {
+    "message": "الإعدادات"
+  },
+  "header_restorePoints": {
+    "message": "نقاط الاستعادة"
+  },
+  "status_syncing": {
+    "message": "جارٍ المزامنة…"
+  },
+  "status_error": {
+    "message": "خطأ في المزامنة"
+  },
+  "status_needsReauth": {
+    "message": "يحتاج إلى إعادة التفويض"
+  },
+  "status_synced": {
+    "message": "تمت المزامنة"
+  },
+  "statusErr_rate_limited": {
+    "message": "طلبات كثيرة جدًا. ستعيد المزامنة المحاولة قريبًا."
+  },
+  "statusErr_unauthorized": {
+    "message": "رفض الخادم تسجيل دخول هذا الجهاز."
+  },
+  "statusErr_busy": {
+    "message": "الخادم مشغول. ستعيد المزامنة المحاولة قريبًا."
+  },
+  "statusErr_internal_error": {
+    "message": "واجه الخادم خطأً. ستعيد المزامنة المحاولة قريبًا."
+  },
+  "statusErr_network": {
+    "message": "تعذّر الوصول إلى الخادم."
+  },
+  "setup_title": {
+    "message": "ربط هذا المتصفح"
+  },
+  "setup_subtitle": {
+    "message": "سجّل الدخول بحساب HelixSync لبدء المزامنة."
+  },
+  "setup_serverUrl": {
+    "message": "عنوان URL للخادم"
+  },
+  "setup_email": {
+    "message": "البريد الإلكتروني"
+  },
+  "setup_password": {
+    "message": "كلمة المرور"
+  },
+  "setup_deviceName": {
+    "message": "اسم الجهاز"
+  },
+  "setup_connect": {
+    "message": "اتصال"
+  },
+  "setup_deviceLoginInstead": {
+    "message": "تسجيل الدخول بجهاز بدلًا من ذلك"
+  },
+  "setup_noAccount": {
+    "message": "ليس لديك حساب؟ {link}"
+  },
+  "setup_registerLink": {
+    "message": "سجّل على الويب"
+  },
+  "setup_forgotLink": {
+    "message": "هل نسيت كلمة المرور؟"
+  },
+  "setup_serverUrlFirst": {
+    "message": "أدخل عنوان URL صالحًا للخادم أولًا."
+  },
+  "setup_serverUrlInvalid": {
+    "message": "أدخل عنوان URL صالحًا للخادم."
+  },
+  "setup_insecureUrl": {
+    "message": "يجب أن يستخدم عنوان URL للخادم https:// (يُسمح بـ http:// فقط مع localhost أو 127.0.0.1 أو [::1])."
+  },
+  "setup_permissionDenied": {
+    "message": "لم تُمنح صلاحية الاتصال بالخادم."
+  },
+  "setup_emailAndName": {
+    "message": "أدخل بريدك الإلكتروني واسمًا للجهاز أولًا."
+  },
+  "setup_permissionLastDevice": {
+    "message": "لم تُمنح الصلاحية في المرة السابقة — انقر على «تسجيل الدخول بجهاز بدلًا من ذلك» للمحاولة مرة أخرى."
+  },
+  "setup_permissionLastConnect": {
+    "message": "لم تُمنح الصلاحية في المرة السابقة — انقر على «اتصال» للمحاولة مرة أخرى."
+  },
+  "setup_creatingRequest": {
+    "message": "جارٍ إنشاء طلب تسجيل الدخول…"
+  },
+  "setup_connecting": {
+    "message": "جارٍ الاتصال…"
+  },
+  "setup_deriving": {
+    "message": "جارٍ اشتقاق مفتاح التشفير…"
+  },
+  "setup_failed": {
+    "message": "فشل: {message}"
+  },
+  "devicewait_title": {
+    "message": "وافق من متصفح آخر"
+  },
+  "devicewait_body": {
+    "message": "افتح HelixSync في متصفح متصل بهذا الحساب بالفعل، ووافق على الطلب هناك. لا توافق عليه إلا إذا عرض ذلك المتصفح هذه العبارة:"
+  },
+  "devicewait_waiting": {
+    "message": "في انتظار الموافقة…"
+  },
+  "devicewait_keyMismatch": {
+    "message": "لم يتطابق فحص المفتاح، لذا تم تجاهل الموافقة."
+  },
+  "devicewait_denied": {
+    "message": "تم رفض طلب تسجيل الدخول."
+  },
+  "devicewait_expired": {
+    "message": "انتهت صلاحية طلب تسجيل الدخول. ابدأ طلبًا جديدًا."
+  },
+  "devicewait_deviceLimit": {
+    "message": "بلغ هذا الحساب الحد الأقصى لعدد الأجهزة. ألغِ أحدها من لوحة التحكم على الويب وسيتصل هذا المتصفح."
+  },
+  "devicewait_stillWaiting": {
+    "message": "لا يزال في الانتظار: {message}"
+  },
+  "keycheck_title": {
+    "message": "تحقق من المفتاح"
+  },
+  "keycheck_body": {
+    "message": "يعرض المتصفح الموافِق عبارة تحقق من المفتاح على طلب تسجيل الدخول. تابع فقط إذا كانت متطابقة:"
+  },
+  "keycheck_matches": {
+    "message": "متطابقة"
+  },
+  "keycheck_mismatch": {
+    "message": "غير متطابقة"
+  },
+  "statusview_lastSync": {
+    "message": "آخر مزامنة: {time} · قيد الانتظار: {pending}"
+  },
+  "statusview_syncNow": {
+    "message": "المزامنة الآن"
+  },
+  "statusview_olderHistory": {
+    "message": "مزامنة السجل الأقدم"
+  },
+  "statusview_olderHistoryTitle": {
+    "message": "استيراد سجل هذا المتصفح الأقدم من مدة الاحتفاظ السابقة"
+  },
+  "statusview_importStarted": {
+    "message": "يجري استيراد السجل الأقدم في الخلفية."
+  },
+  "statusview_importFailed": {
+    "message": "فشل البدء: {message}"
+  },
+  "statusview_importRequestFailed": {
+    "message": "فشل طلب الاستيراد"
+  },
+  "statusview_restoreRequestFailed": {
+    "message": "فشل طلب الاستعادة"
+  },
+  "statusview_signedInAs": {
+    "message": "تم تسجيل الدخول باسم {email}"
+  },
+  "pending_header": {
+    "message": "علامات تبويب من أجهزة أخرى ({count})"
+  },
+  "pending_restoreAll": {
+    "message": "استعادة الكل ({count})"
+  },
+  "pending_failed": {
+    "message": "فشلت استعادة علامة التبويب: {message}"
+  },
+  "pending_restore": {
+    "message": "استعادة"
+  },
+  "pending_restoring": {
+    "message": "جارٍ الاستعادة…"
+  },
+  "pending_showMore": {
+    "message": "عرض {count} أخرى"
+  },
+  "auth_requests_zero": {
+    "message": "طلبات تسجيل الدخول"
+  },
+  "auth_requests_one": {
+    "message": "طلب تسجيل دخول"
+  },
+  "auth_requests_two": {
+    "message": "طلبا تسجيل دخول"
+  },
+  "auth_requests_few": {
+    "message": "طلبات تسجيل الدخول"
+  },
+  "auth_requests_many": {
+    "message": "طلبات تسجيل الدخول"
+  },
+  "auth_requests_other": {
+    "message": "طلبات تسجيل الدخول"
+  },
+  "auth_passwordReset": {
+    "message": "إعادة تعيين كلمة المرور"
+  },
+  "auth_webSignIn": {
+    "message": "تسجيل الدخول إلى لوحة التحكم على الويب"
+  },
+  "auth_newBrowser": {
+    "message": "متصفح جديد: {name}"
+  },
+  "auth_unnamed": {
+    "message": "بلا اسم"
+  },
+  "auth_unknownIp": {
+    "message": "عنوان IP غير معروف"
+  },
+  "auth_resetWarningCompletes": {
+    "message": "تحذير: يتيح هذا لشخص ما تعيين كلمة مرور جديدة لحسابك. لا توافق إلا إذا كنت أنت من طلب إعادة تعيين كلمة المرور. تمت {approvals} من 2 موافقات حتى الآن؛ الموافقة الآن تكمل العملية وتسلّم مفتاح التشفير الخاص بك إلى تلك الصفحة."
+  },
+  "auth_resetWarningSecond": {
+    "message": "تحذير: يتيح هذا لشخص ما تعيين كلمة مرور جديدة لحسابك. لا توافق إلا إذا كنت أنت من طلب إعادة تعيين كلمة المرور. تمت {approvals} من 2 موافقات حتى الآن؛ يجب أن يوافق متصفح ثانٍ أيضًا."
+  },
+  "auth_webConsequence": {
+    "message": "تؤدي الموافقة إلى تسجيل دخول ذلك المتصفح إلى لوحة التحكم الخاصة بك."
+  },
+  "auth_deviceConsequence": {
+    "message": "تمنح الموافقة ذلك المتصفح مفتاح التشفير الخاص بك وكل بياناتك المزامنة."
+  },
+  "auth_approveOnlyIf": {
+    "message": "لا توافق إلا إذا عرضت الشاشة الأخرى:"
+  },
+  "auth_keyCheckReset": {
+    "message": "بعد الموافقة، ستطلب منك صفحة إعادة التعيين تأكيد عبارة التحقق من المفتاح هذه:"
+  },
+  "auth_keyCheckDevice": {
+    "message": "بعد الموافقة، سيطلب منك المتصفح الجديد تأكيد عبارة التحقق من المفتاح هذه:"
+  },
+  "auth_approve": {
+    "message": "موافقة"
+  },
+  "auth_deny": {
+    "message": "رفض"
+  },
+  "auth_alreadyAnswered": {
+    "message": "تم الرد على هذا الطلب بالفعل أو انتهت صلاحيته."
+  },
+  "auth_resetChanged": {
+    "message": "تغيرت إعادة التعيين هذه (وافق هذا المتصفح بالفعل، أو سبقه متصفح آخر). أعد فتح النافذة المنبثقة."
+  },
+  "auth_failed": {
+    "message": "فشل: {message}"
+  },
+  "settings_sync": {
+    "message": "المزامنة"
+  },
+  "settings_bookmarks": {
+    "message": "الإشارات المرجعية"
+  },
+  "settings_history": {
+    "message": "السجل"
+  },
+  "settings_tabs": {
+    "message": "علامات التبويب"
+  },
+  "settings_tabGroups": {
+    "message": "مجموعات علامات التبويب"
+  },
+  "settings_tabRestore": {
+    "message": "استعادة علامات التبويب"
+  },
+  "settings_restoreRemoteTabs": {
+    "message": "استعادة علامات التبويب البعيدة"
+  },
+  "settings_policyDisabled": {
+    "message": "معطّلة"
+  },
+  "settings_policyAsk": {
+    "message": "السؤال قبل الاستعادة"
+  },
+  "settings_policyAutomatic": {
+    "message": "الاستعادة تلقائيًا"
+  },
+  "settings_historyLegend": {
+    "message": "السجل"
+  },
+  "settings_retention": {
+    "message": "مدة الاحتفاظ"
+  },
+  "settings_d7": {
+    "message": "7 أيام"
+  },
+  "settings_d30": {
+    "message": "30 يومًا"
+  },
+  "settings_d90": {
+    "message": "90 يومًا"
+  },
+  "settings_y1": {
+    "message": "سنة واحدة"
+  },
+  "settings_unlimited": {
+    "message": "غير محدودة"
+  },
+  "settings_restorePointsLegend": {
+    "message": "نقاط الاستعادة"
+  },
+  "settings_autoRestorePoints": {
+    "message": "نقاط الاستعادة التلقائية"
+  },
+  "settings_restorePointsHelp": {
+    "message": "نسخ يومية ونسخ أمان لإشاراتك المرجعية. النسخ اليدوية متاحة دائمًا."
+  },
+  "settings_account": {
+    "message": "الحساب"
+  },
+  "settings_password": {
+    "message": "كلمة المرور"
+  },
+  "settings_changeOnWeb": {
+    "message": "التغيير على الويب"
+  },
+  "settings_save": {
+    "message": "حفظ"
+  },
+  "settings_disconnectConfirm": {
+    "message": "قطع اتصال هذا الجهاز؟ ستتم إزالته من قائمة أجهزة حسابك، ويمكنك إعادة توصيله في أي وقت بتسجيل الدخول مرة أخرى."
+  },
+  "settings_disconnecting": {
+    "message": "جارٍ قطع الاتصال…"
+  },
+  "settings_tabGroupsNeedPermission": {
+    "message": "تحتاج مجموعات علامات التبويب إلى صلاحية في هذا المتصفح: اضغط «حفظ» للسماح بها."
+  },
+  "settings_loadFailed": {
+    "message": "فشل تحميل الإعدادات: {message}"
+  },
+  "settings_saving": {
+    "message": "جارٍ الحفظ…"
+  },
+  "settings_tabGroupsDenied": {
+    "message": "تتطلب مزامنة مجموعات علامات التبويب صلاحية مجموعات علامات التبويب. اسمح بها، أو أوقف مجموعات علامات التبويب."
+  },
+  "settings_saveFailed": {
+    "message": "فشل الحفظ: {message}"
+  },
+  "app_loadFailed": {
+    "message": "فشل التحميل: {message}"
+  },
+  "rp_title": {
+    "message": "نقاط الاستعادة"
+  },
+  "rp_subtitle": {
+    "message": "نسخ محفوظة من إشاراتك المرجعية. ارجع إلى إحداها إذا حدث خطأ ما."
+  },
+  "rp_loading": {
+    "message": "جارٍ التحميل…"
+  },
+  "rp_unavailable": {
+    "message": "نقاط الاستعادة غير متاحة: هذا الخادم لا يدعمها، أو مزامنة الإشارات المرجعية متوقفة أو لا تزال قيد الاستيراد."
+  },
+  "rp_create": {
+    "message": "إنشاء نقطة استعادة"
+  },
+  "rp_saving": {
+    "message": "جارٍ الحفظ…"
+  },
+  "rp_autoOff": {
+    "message": "نقاط الاستعادة التلقائية متوقفة (الإعدادات)."
+  },
+  "rp_uploading": {
+    "message": "جارٍ الرفع… {kind}"
+  },
+  "rp_empty": {
+    "message": "لا توجد نقاط استعادة بعد."
+  },
+  "rp_saved": {
+    "message": "المحفوظة"
+  },
+  "rp_pinned": {
+    "message": "مثبّتة"
+  },
+  "rp_removedDevice": {
+    "message": "جهاز محذوف"
+  },
+  "rp_lastRestored": {
+    "message": "آخر استعادة: {date}"
+  },
+  "rp_restoreEllipsis": {
+    "message": "استعادة…"
+  },
+  "rp_pin": {
+    "message": "تثبيت"
+  },
+  "rp_unpin": {
+    "message": "إلغاء التثبيت"
+  },
+  "rp_delete": {
+    "message": "حذف"
+  },
+  "rp_deleteConfirm": {
+    "message": "حذف نقطة الاستعادة بتاريخ {date}؟ لا يمكن التراجع عن ذلك."
+  },
+  "rp_bookmarks_zero": {
+    "message": "لا إشارات مرجعية"
+  },
+  "rp_bookmarks_one": {
+    "message": "إشارة مرجعية واحدة"
+  },
+  "rp_bookmarks_two": {
+    "message": "إشارتان مرجعيتان"
+  },
+  "rp_bookmarks_few": {
+    "message": "{count} إشارات مرجعية"
+  },
+  "rp_bookmarks_many": {
+    "message": "{count} إشارة مرجعية"
+  },
+  "rp_bookmarks_other": {
+    "message": "{count} إشارة مرجعية"
+  },
+  "rp_kind_manual": {
+    "message": "يدوية"
+  },
+  "rp_kind_scheduled": {
+    "message": "يومية"
+  },
+  "rp_kind_pre_restore": {
+    "message": "قبل استعادة"
+  },
+  "rp_kind_pre_import": {
+    "message": "قبل أول استيراد"
+  },
+  "rp_kind_pre_resync": {
+    "message": "قبل إعادة مزامنة"
+  },
+  "rp_kind_mass_delete": {
+    "message": "قبل حذف جماعي"
+  },
+  "rp_opening": {
+    "message": "جارٍ فتح نقطة الاستعادة…"
+  },
+  "rp_restoreTitle": {
+    "message": "استعادة"
+  },
+  "rp_from": {
+    "message": "من {date}"
+  },
+  "rp_back": {
+    "message": "رجوع"
+  },
+  "rp_whatToRestore": {
+    "message": "ما الذي سيُستعاد"
+  },
+  "rp_allBookmarks": {
+    "message": "كل الإشارات المرجعية"
+  },
+  "rp_oneFolder": {
+    "message": "مجلد واحد…"
+  },
+  "rp_how": {
+    "message": "الطريقة"
+  },
+  "rp_modeMerge": {
+    "message": "دمج: استرجاع ما هو مفقود والتراجع عن التعديلات. لا يحذف شيئًا."
+  },
+  "rp_modeExact": {
+    "message": "مطابقة تامة: يحذف أيضًا الإشارات المرجعية غير الموجودة في هذه النقطة."
+  },
+  "rp_preview": {
+    "message": "معاينة"
+  },
+  "rp_restoreAction": {
+    "message": "استعادة"
+  },
+  "rp_pickFolderBelow": {
+    "message": "اختر مجلدًا أدناه."
+  },
+  "rp_pickFolderFirst": {
+    "message": "اختر مجلدًا أولًا."
+  },
+  "rp_folder": {
+    "message": "المجلد: {name}"
+  },
+  "rp_untitled": {
+    "message": "(بلا عنوان)"
+  },
+  "rp_working": {
+    "message": "جارٍ الحساب…"
+  },
+  "rp_nothingToDo": {
+    "message": "لا شيء لفعله: إشاراتك المرجعية تطابق نقطة الاستعادة هذه بالفعل."
+  },
+  "rp_previewRestored_zero": {
+    "message": "لا شيء لاسترجاعه"
+  },
+  "rp_previewRestored_one": {
+    "message": "استرجاع إشارة مرجعية أو مجلد واحد"
+  },
+  "rp_previewRestored_two": {
+    "message": "استرجاع إشارتين مرجعيتين أو مجلدين"
+  },
+  "rp_previewRestored_few": {
+    "message": "استرجاع {count} إشارات مرجعية أو مجلدات"
+  },
+  "rp_previewRestored_many": {
+    "message": "استرجاع {count} إشارة مرجعية أو مجلدًا"
+  },
+  "rp_previewRestored_other": {
+    "message": "استرجاع {count} إشارة مرجعية أو مجلد"
+  },
+  "rp_previewUpdated_zero": {
+    "message": "لا شيء لتغييره"
+  },
+  "rp_previewUpdated_one": {
+    "message": "تغيير إشارة مرجعية أو مجلد واحد"
+  },
+  "rp_previewUpdated_two": {
+    "message": "تغيير إشارتين مرجعيتين أو مجلدين"
+  },
+  "rp_previewUpdated_few": {
+    "message": "تغيير {count} إشارات مرجعية أو مجلدات"
+  },
+  "rp_previewUpdated_many": {
+    "message": "تغيير {count} إشارة مرجعية أو مجلدًا"
+  },
+  "rp_previewUpdated_other": {
+    "message": "تغيير {count} إشارة مرجعية أو مجلد"
+  },
+  "rp_previewMoved_zero": {
+    "message": "لا شيء لنقله"
+  },
+  "rp_previewMoved_one": {
+    "message": "نقل إشارة مرجعية أو مجلد واحد"
+  },
+  "rp_previewMoved_two": {
+    "message": "نقل إشارتين مرجعيتين أو مجلدين"
+  },
+  "rp_previewMoved_few": {
+    "message": "نقل {count} إشارات مرجعية أو مجلدات"
+  },
+  "rp_previewMoved_many": {
+    "message": "نقل {count} إشارة مرجعية أو مجلدًا"
+  },
+  "rp_previewMoved_other": {
+    "message": "نقل {count} إشارة مرجعية أو مجلد"
+  },
+  "rp_previewDeleted_zero": {
+    "message": "لا شيء لإزالته"
+  },
+  "rp_previewDeleted_one": {
+    "message": "إزالة إشارة مرجعية أو مجلد واحد"
+  },
+  "rp_previewDeleted_two": {
+    "message": "إزالة إشارتين مرجعيتين أو مجلدين"
+  },
+  "rp_previewDeleted_few": {
+    "message": "إزالة {count} إشارات مرجعية أو مجلدات"
+  },
+  "rp_previewDeleted_many": {
+    "message": "إزالة {count} إشارة مرجعية أو مجلدًا"
+  },
+  "rp_previewDeleted_other": {
+    "message": "إزالة {count} إشارة مرجعية أو مجلد"
+  },
+  "rp_sampleMore": {
+    "message": "{titles}، و{more} أخرى"
+  },
+  "rp_skipped_zero": {
+    "message": "لم يتم تخطي أي إشارة مرجعية."
+  },
+  "rp_skipped_one": {
+    "message": "تم تخطي إشارة مرجعية واحدة (عنوان غير مدعوم)."
+  },
+  "rp_skipped_two": {
+    "message": "تم تخطي إشارتين مرجعيتين (عنوان غير مدعوم)."
+  },
+  "rp_skipped_few": {
+    "message": "تم تخطي {count} إشارات مرجعية (عنوان غير مدعوم)."
+  },
+  "rp_skipped_many": {
+    "message": "تم تخطي {count} إشارة مرجعية (عنوان غير مدعوم)."
+  },
+  "rp_skipped_other": {
+    "message": "تم تخطي {count} إشارة مرجعية (عنوان غير مدعوم)."
+  },
+  "rp_confirmExactAll": {
+    "message": "استعادة كل إشاراتك المرجعية بمطابقة تامة؟ ستُزال الإشارات المرجعية المضافة بعد {date} من كل جهاز. تُحفظ أولًا نسخة من إشاراتك المرجعية الحالية."
+  },
+  "rp_confirmExactFolder": {
+    "message": "استعادة المجلد «{name}» بمطابقة تامة؟ ستُزال الإشارات المرجعية المضافة بعد {date} من كل جهاز. تُحفظ أولًا نسخة من إشاراتك المرجعية الحالية."
+  },
+  "rp_confirmMergeAll": {
+    "message": "استعادة كل إشاراتك المرجعية من {date}؟ تُحفظ أولًا نسخة من إشاراتك المرجعية الحالية."
+  },
+  "rp_confirmMergeFolder": {
+    "message": "استعادة المجلد «{name}» من {date}؟ تُحفظ أولًا نسخة من إشاراتك المرجعية الحالية."
+  },
+  "rp_noFolders": {
+    "message": "لا تحتوي نقطة الاستعادة هذه على مجلدات."
+  },
+  "rp_restoring": {
+    "message": "جارٍ الاستعادة"
+  },
+  "rp_prepare": {
+    "message": "جارٍ حفظ نسخة من إشاراتك المرجعية والتحضير…"
+  },
+  "rp_applying": {
+    "message": "جارٍ الاستعادة… {applied} من {total}"
+  },
+  "rp_finishing": {
+    "message": "جارٍ الإنهاء…"
+  },
+  "rp_done": {
+    "message": "تم."
+  },
+  "rp_doneCounts": {
+    "message": "تم استرجاع {restored}، وتغيير {updated}، ونقل {moved}، وإزالة {deleted}."
+  },
+  "rp_stopped": {
+    "message": "توقفت الاستعادة."
+  },
+  "rp_doneButton": {
+    "message": "تم"
+  },
+  "rp_err_bookmarksNotReady": {
+    "message": "لا تزال الإشارات المرجعية قيد التحضير للمزامنة. حاول مرة أخرى بعد قليل."
+  },
+  "rp_err_limit": {
+    "message": "لا توجد مساحة لنقطة استعادة جديدة: البقية مثبّتة. ألغِ تثبيت إحداها أو احذفها أولًا."
+  },
+  "rp_err_pinLimit": {
+    "message": "عدد نقاط الاستعادة المثبّتة كبير جدًا. ألغِ تثبيت إحداها أولًا."
+  },
+  "rp_err_inProgress": {
+    "message": "هناك استعادة قيد التشغيل بالفعل."
+  },
+  "rp_err_unreadable": {
+    "message": "تعذّرت قراءة نقطة الاستعادة هذه، لذا لم تُطبَّق."
+  },
+  "rp_err_updateNeeded": {
+    "message": "حدّث إضافة HelixSync لاستخدام نقطة الاستعادة هذه."
+  },
+  "rp_err_offline": {
+    "message": "تعذّر الوصول إلى الخادم."
+  },
+  "rp_err_reauth": {
+    "message": "سجّل الدخول مرة أخرى لاستخدام نقاط الاستعادة."
+  },
+  "rp_err_syncFailed": {
+    "message": "تعذّرت المزامنة قبل الاستعادة. تحقق من اتصالك وحاول مرة أخرى."
+  },
+  "rp_err_preRestoreFailed": {
+    "message": "تعذّر حفظ نسخة من إشاراتك المرجعية أولًا، لذا لم تتم استعادة شيء."
+  },
+  "rp_err_unavailable": {
+    "message": "هذا الخادم لا يدعم نقاط الاستعادة."
+  },
+  "rp_err_noAnswer": {
+    "message": "لم تستجب الإضافة."
+  },
+  "rp_err_generic": {
+    "message": "حدث خطأ ما."
+  }
+}

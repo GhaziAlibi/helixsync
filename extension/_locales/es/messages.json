@@ -1,0 +1,614 @@
+{
+  "extName": {
+    "message": "HelixSync"
+  },
+  "extDescription": {
+    "message": "Sincronización de navegador autoalojada y centrada en la privacidad para Helium y otros navegadores Chromium."
+  },
+  "common_loading": {
+    "message": "Cargando…"
+  },
+  "common_cancel": {
+    "message": "Cancelar"
+  },
+  "common_disconnect": {
+    "message": "Desconectar"
+  },
+  "common_delete": {
+    "message": "Eliminar"
+  },
+  "time_never": {
+    "message": "nunca"
+  },
+  "time_justNow": {
+    "message": "ahora mismo"
+  },
+  "language_legend": {
+    "message": "Idioma"
+  },
+  "language_label": {
+    "message": "Idioma de la interfaz"
+  },
+  "language_auto": {
+    "message": "Predeterminado del navegador"
+  },
+  "header_back": {
+    "message": "Atrás"
+  },
+  "header_settings": {
+    "message": "Ajustes"
+  },
+  "header_restorePoints": {
+    "message": "Puntos de restauración"
+  },
+  "status_syncing": {
+    "message": "Sincronizando…"
+  },
+  "status_error": {
+    "message": "Error de sincronización"
+  },
+  "status_needsReauth": {
+    "message": "Requiere volver a autorizar"
+  },
+  "status_synced": {
+    "message": "Sincronizado"
+  },
+  "statusErr_rate_limited": {
+    "message": "Demasiadas solicitudes. La sincronización se reintentará en breve."
+  },
+  "statusErr_unauthorized": {
+    "message": "El servidor rechazó el inicio de sesión de este dispositivo."
+  },
+  "statusErr_busy": {
+    "message": "El servidor está ocupado. La sincronización se reintentará en breve."
+  },
+  "statusErr_internal_error": {
+    "message": "El servidor encontró un error. La sincronización se reintentará en breve."
+  },
+  "statusErr_network": {
+    "message": "No se pudo conectar con el servidor."
+  },
+  "setup_title": {
+    "message": "Conectar este navegador"
+  },
+  "setup_subtitle": {
+    "message": "Inicia sesión con tu cuenta de HelixSync para empezar a sincronizar."
+  },
+  "setup_serverUrl": {
+    "message": "URL del servidor"
+  },
+  "setup_email": {
+    "message": "Correo electrónico"
+  },
+  "setup_password": {
+    "message": "Contraseña"
+  },
+  "setup_deviceName": {
+    "message": "Nombre del dispositivo"
+  },
+  "setup_connect": {
+    "message": "Conectar"
+  },
+  "setup_deviceLoginInstead": {
+    "message": "Iniciar sesión con un dispositivo"
+  },
+  "setup_noAccount": {
+    "message": "¿No tienes una cuenta? {link}"
+  },
+  "setup_registerLink": {
+    "message": "Regístrate en la web"
+  },
+  "setup_forgotLink": {
+    "message": "¿Olvidaste tu contraseña?"
+  },
+  "setup_serverUrlFirst": {
+    "message": "Introduce primero una URL de servidor válida."
+  },
+  "setup_serverUrlInvalid": {
+    "message": "Introduce una URL de servidor válida."
+  },
+  "setup_insecureUrl": {
+    "message": "La URL del servidor debe usar https:// (http:// solo se permite para localhost, 127.0.0.1 o [::1])."
+  },
+  "setup_permissionDenied": {
+    "message": "No se concedió el permiso para contactar con el servidor."
+  },
+  "setup_emailAndName": {
+    "message": "Introduce primero tu correo electrónico y un nombre de dispositivo."
+  },
+  "setup_permissionLastDevice": {
+    "message": "La última vez no se concedió el permiso — haz clic en «Iniciar sesión con un dispositivo» para intentarlo de nuevo."
+  },
+  "setup_permissionLastConnect": {
+    "message": "La última vez no se concedió el permiso — haz clic en Conectar para intentarlo de nuevo."
+  },
+  "setup_creatingRequest": {
+    "message": "Creando solicitud de inicio de sesión…"
+  },
+  "setup_connecting": {
+    "message": "Conectando…"
+  },
+  "setup_deriving": {
+    "message": "Derivando la clave de cifrado…"
+  },
+  "setup_failed": {
+    "message": "Error: {message}"
+  },
+  "devicewait_title": {
+    "message": "Aprueba en otro navegador"
+  },
+  "devicewait_body": {
+    "message": "Abre HelixSync en un navegador que ya esté conectado a esta cuenta y aprueba allí la solicitud. Apruébala solo si ese navegador muestra esta frase:"
+  },
+  "devicewait_waiting": {
+    "message": "Esperando aprobación…"
+  },
+  "devicewait_keyMismatch": {
+    "message": "La comprobación de la clave no coincidió, así que se descartó la aprobación."
+  },
+  "devicewait_denied": {
+    "message": "La solicitud de inicio de sesión fue rechazada."
+  },
+  "devicewait_expired": {
+    "message": "La solicitud de inicio de sesión ha caducado. Inicia una nueva."
+  },
+  "devicewait_deviceLimit": {
+    "message": "Esta cuenta tiene el número máximo de dispositivos. Revoca uno en el panel web y este navegador se conectará."
+  },
+  "devicewait_stillWaiting": {
+    "message": "Sigue esperando: {message}"
+  },
+  "keycheck_title": {
+    "message": "Comprueba la clave"
+  },
+  "keycheck_body": {
+    "message": "El navegador que aprueba muestra una frase de comprobación de la clave en su solicitud de inicio de sesión. Continúa solo si coincide:"
+  },
+  "keycheck_matches": {
+    "message": "Coincide"
+  },
+  "keycheck_mismatch": {
+    "message": "No coincide"
+  },
+  "statusview_lastSync": {
+    "message": "Última sincronización: {time} · Pendientes: {pending}"
+  },
+  "statusview_syncNow": {
+    "message": "Sincronizar ahora"
+  },
+  "statusview_olderHistory": {
+    "message": "Sincronizar historial anterior"
+  },
+  "statusview_olderHistoryTitle": {
+    "message": "Importar el historial de este navegador anterior al período de conservación previo"
+  },
+  "statusview_importStarted": {
+    "message": "Importando el historial anterior en segundo plano."
+  },
+  "statusview_importFailed": {
+    "message": "No se pudo iniciar: {message}"
+  },
+  "statusview_importRequestFailed": {
+    "message": "Falló la solicitud de importación"
+  },
+  "statusview_restoreRequestFailed": {
+    "message": "Falló la solicitud de restauración"
+  },
+  "statusview_signedInAs": {
+    "message": "Sesión iniciada como {email}"
+  },
+  "pending_header": {
+    "message": "Pestañas de otros dispositivos ({count})"
+  },
+  "pending_restoreAll": {
+    "message": "Restaurar todas ({count})"
+  },
+  "pending_failed": {
+    "message": "No se pudo restaurar la pestaña: {message}"
+  },
+  "pending_restore": {
+    "message": "Restaurar"
+  },
+  "pending_restoring": {
+    "message": "Restaurando…"
+  },
+  "pending_showMore": {
+    "message": "Mostrar {count} más"
+  },
+  "auth_requests_one": {
+    "message": "Solicitud de inicio de sesión"
+  },
+  "auth_requests_other": {
+    "message": "Solicitudes de inicio de sesión"
+  },
+  "auth_passwordReset": {
+    "message": "RESTABLECIMIENTO DE CONTRASEÑA"
+  },
+  "auth_webSignIn": {
+    "message": "Inicio de sesión en el panel web"
+  },
+  "auth_newBrowser": {
+    "message": "Navegador nuevo: {name}"
+  },
+  "auth_unnamed": {
+    "message": "sin nombre"
+  },
+  "auth_unknownIp": {
+    "message": "IP desconocida"
+  },
+  "auth_resetWarningCompletes": {
+    "message": "ADVERTENCIA: esto permite a alguien establecer una contraseña nueva para tu cuenta. Aprueba solo si TÚ pediste restablecer tu contraseña. Hay {approvals} de 2 aprobaciones hasta ahora; aprobar ahora lo completa y entrega tu clave de cifrado a esa página."
+  },
+  "auth_resetWarningSecond": {
+    "message": "ADVERTENCIA: esto permite a alguien establecer una contraseña nueva para tu cuenta. Aprueba solo si TÚ pediste restablecer tu contraseña. Hay {approvals} de 2 aprobaciones hasta ahora; también debe aprobar un segundo navegador."
+  },
+  "auth_webConsequence": {
+    "message": "Al aprobar, ese navegador inicia sesión en tu panel."
+  },
+  "auth_deviceConsequence": {
+    "message": "Al aprobar, ese navegador recibe tu clave de cifrado y todos tus datos sincronizados."
+  },
+  "auth_approveOnlyIf": {
+    "message": "Aprueba solo si la otra pantalla muestra:"
+  },
+  "auth_keyCheckReset": {
+    "message": "Tras aprobar, la página de restablecimiento te pedirá que confirmes esta frase de comprobación de la clave:"
+  },
+  "auth_keyCheckDevice": {
+    "message": "Tras aprobar, el navegador nuevo te pedirá que confirmes esta frase de comprobación de la clave:"
+  },
+  "auth_approve": {
+    "message": "Aprobar"
+  },
+  "auth_deny": {
+    "message": "Rechazar"
+  },
+  "auth_alreadyAnswered": {
+    "message": "Esta solicitud ya se respondió o ha caducado."
+  },
+  "auth_resetChanged": {
+    "message": "Este restablecimiento cambió (este navegador ya aprobó, o lo hizo otro antes). Vuelve a abrir la ventana emergente."
+  },
+  "auth_failed": {
+    "message": "Error: {message}"
+  },
+  "settings_sync": {
+    "message": "Sincronización"
+  },
+  "settings_bookmarks": {
+    "message": "Marcadores"
+  },
+  "settings_history": {
+    "message": "Historial"
+  },
+  "settings_tabs": {
+    "message": "Pestañas"
+  },
+  "settings_tabGroups": {
+    "message": "Grupos de pestañas"
+  },
+  "settings_tabRestore": {
+    "message": "Restauración de pestañas"
+  },
+  "settings_restoreRemoteTabs": {
+    "message": "Restaurar pestañas remotas"
+  },
+  "settings_policyDisabled": {
+    "message": "Desactivada"
+  },
+  "settings_policyAsk": {
+    "message": "Preguntar antes de restaurar"
+  },
+  "settings_policyAutomatic": {
+    "message": "Restaurar automáticamente"
+  },
+  "settings_historyLegend": {
+    "message": "Historial"
+  },
+  "settings_retention": {
+    "message": "Conservación"
+  },
+  "settings_d7": {
+    "message": "7 días"
+  },
+  "settings_d30": {
+    "message": "30 días"
+  },
+  "settings_d90": {
+    "message": "90 días"
+  },
+  "settings_y1": {
+    "message": "1 año"
+  },
+  "settings_unlimited": {
+    "message": "Sin límite"
+  },
+  "settings_restorePointsLegend": {
+    "message": "Puntos de restauración"
+  },
+  "settings_autoRestorePoints": {
+    "message": "Puntos de restauración automáticos"
+  },
+  "settings_restorePointsHelp": {
+    "message": "Copias diarias y de seguridad de tus marcadores. Las manuales siempre están disponibles."
+  },
+  "settings_account": {
+    "message": "Cuenta"
+  },
+  "settings_password": {
+    "message": "Contraseña"
+  },
+  "settings_changeOnWeb": {
+    "message": "Cambiar en la web"
+  },
+  "settings_save": {
+    "message": "Guardar"
+  },
+  "settings_disconnectConfirm": {
+    "message": "¿Desconectar este dispositivo? Se eliminará de la lista de dispositivos de tu cuenta y podrás volver a conectarlo cuando quieras iniciando sesión de nuevo."
+  },
+  "settings_disconnecting": {
+    "message": "Desconectando…"
+  },
+  "settings_tabGroupsNeedPermission": {
+    "message": "Los grupos de pestañas necesitan un permiso en este navegador: pulsa Guardar para permitirlo."
+  },
+  "settings_loadFailed": {
+    "message": "No se pudieron cargar los ajustes: {message}"
+  },
+  "settings_saving": {
+    "message": "Guardando…"
+  },
+  "settings_tabGroupsDenied": {
+    "message": "La sincronización de grupos de pestañas necesita el permiso de grupos de pestañas. Permítelo o desactiva los grupos de pestañas."
+  },
+  "settings_saveFailed": {
+    "message": "No se pudo guardar: {message}"
+  },
+  "app_loadFailed": {
+    "message": "No se pudo cargar: {message}"
+  },
+  "rp_title": {
+    "message": "Puntos de restauración"
+  },
+  "rp_subtitle": {
+    "message": "Copias guardadas de tus marcadores. Vuelve a una si algo sale mal."
+  },
+  "rp_loading": {
+    "message": "Cargando…"
+  },
+  "rp_unavailable": {
+    "message": "Los puntos de restauración no están disponibles: este servidor no los admite, o la sincronización de marcadores está desactivada o aún importando."
+  },
+  "rp_create": {
+    "message": "Crear punto de restauración"
+  },
+  "rp_saving": {
+    "message": "Guardando…"
+  },
+  "rp_autoOff": {
+    "message": "Los puntos de restauración automáticos están desactivados (Ajustes)."
+  },
+  "rp_uploading": {
+    "message": "Subiendo… {kind}"
+  },
+  "rp_empty": {
+    "message": "Aún no hay puntos de restauración."
+  },
+  "rp_saved": {
+    "message": "Guardados"
+  },
+  "rp_pinned": {
+    "message": "Fijado"
+  },
+  "rp_removedDevice": {
+    "message": "un dispositivo eliminado"
+  },
+  "rp_lastRestored": {
+    "message": "Última restauración: {date}"
+  },
+  "rp_restoreEllipsis": {
+    "message": "Restaurar…"
+  },
+  "rp_pin": {
+    "message": "Fijar"
+  },
+  "rp_unpin": {
+    "message": "Desfijar"
+  },
+  "rp_delete": {
+    "message": "Eliminar"
+  },
+  "rp_deleteConfirm": {
+    "message": "¿Eliminar el punto de restauración del {date}? No se puede deshacer."
+  },
+  "rp_bookmarks_one": {
+    "message": "{count} marcador"
+  },
+  "rp_bookmarks_other": {
+    "message": "{count} marcadores"
+  },
+  "rp_kind_manual": {
+    "message": "Manual"
+  },
+  "rp_kind_scheduled": {
+    "message": "Diario"
+  },
+  "rp_kind_pre_restore": {
+    "message": "Antes de una restauración"
+  },
+  "rp_kind_pre_import": {
+    "message": "Antes de la primera importación"
+  },
+  "rp_kind_pre_resync": {
+    "message": "Antes de una resincronización"
+  },
+  "rp_kind_mass_delete": {
+    "message": "Antes de un borrado masivo"
+  },
+  "rp_opening": {
+    "message": "Abriendo el punto de restauración…"
+  },
+  "rp_restoreTitle": {
+    "message": "Restaurar"
+  },
+  "rp_from": {
+    "message": "Del {date}"
+  },
+  "rp_back": {
+    "message": "Atrás"
+  },
+  "rp_whatToRestore": {
+    "message": "Qué restaurar"
+  },
+  "rp_allBookmarks": {
+    "message": "Todos los marcadores"
+  },
+  "rp_oneFolder": {
+    "message": "Una carpeta…"
+  },
+  "rp_how": {
+    "message": "Cómo"
+  },
+  "rp_modeMerge": {
+    "message": "Combinar: recupera lo que falta y deshace ediciones. No elimina nada."
+  },
+  "rp_modeExact": {
+    "message": "Exacto: también elimina los marcadores que no están en este punto."
+  },
+  "rp_preview": {
+    "message": "Vista previa"
+  },
+  "rp_restoreAction": {
+    "message": "Restaurar"
+  },
+  "rp_pickFolderBelow": {
+    "message": "Elige una carpeta abajo."
+  },
+  "rp_pickFolderFirst": {
+    "message": "Elige primero una carpeta."
+  },
+  "rp_folder": {
+    "message": "Carpeta: {name}"
+  },
+  "rp_untitled": {
+    "message": "(sin título)"
+  },
+  "rp_working": {
+    "message": "Calculando…"
+  },
+  "rp_nothingToDo": {
+    "message": "Nada que hacer: tus marcadores ya coinciden con este punto de restauración."
+  },
+  "rp_previewRestored_one": {
+    "message": "Recuperar {count} marcador o carpeta"
+  },
+  "rp_previewRestored_other": {
+    "message": "Recuperar {count} marcadores o carpetas"
+  },
+  "rp_previewUpdated_one": {
+    "message": "Cambiar {count} marcador o carpeta"
+  },
+  "rp_previewUpdated_other": {
+    "message": "Cambiar {count} marcadores o carpetas"
+  },
+  "rp_previewMoved_one": {
+    "message": "Mover {count} marcador o carpeta"
+  },
+  "rp_previewMoved_other": {
+    "message": "Mover {count} marcadores o carpetas"
+  },
+  "rp_previewDeleted_one": {
+    "message": "Eliminar {count} marcador o carpeta"
+  },
+  "rp_previewDeleted_other": {
+    "message": "Eliminar {count} marcadores o carpetas"
+  },
+  "rp_sampleMore": {
+    "message": "{titles} y {more} más"
+  },
+  "rp_skipped_one": {
+    "message": "{count} marcador omitido (dirección no admitida)."
+  },
+  "rp_skipped_other": {
+    "message": "{count} marcadores omitidos (dirección no admitida)."
+  },
+  "rp_confirmExactAll": {
+    "message": "¿Restaurar exactamente todos tus marcadores? Los marcadores añadidos después del {date} se eliminarán de todos los dispositivos. Antes se guarda una copia de tus marcadores actuales."
+  },
+  "rp_confirmExactFolder": {
+    "message": "¿Restaurar exactamente la carpeta «{name}»? Los marcadores añadidos después del {date} se eliminarán de todos los dispositivos. Antes se guarda una copia de tus marcadores actuales."
+  },
+  "rp_confirmMergeAll": {
+    "message": "¿Restaurar todos tus marcadores del {date}? Antes se guarda una copia de tus marcadores actuales."
+  },
+  "rp_confirmMergeFolder": {
+    "message": "¿Restaurar la carpeta «{name}» del {date}? Antes se guarda una copia de tus marcadores actuales."
+  },
+  "rp_noFolders": {
+    "message": "Este punto de restauración no tiene carpetas."
+  },
+  "rp_restoring": {
+    "message": "Restaurando"
+  },
+  "rp_prepare": {
+    "message": "Guardando una copia de tus marcadores y preparando todo…"
+  },
+  "rp_applying": {
+    "message": "Restaurando… {applied} de {total}"
+  },
+  "rp_finishing": {
+    "message": "Finalizando…"
+  },
+  "rp_done": {
+    "message": "Hecho."
+  },
+  "rp_doneCounts": {
+    "message": "Recuperados {restored}, cambiados {updated}, movidos {moved}, eliminados {deleted}."
+  },
+  "rp_stopped": {
+    "message": "La restauración se detuvo."
+  },
+  "rp_doneButton": {
+    "message": "Hecho"
+  },
+  "rp_err_bookmarksNotReady": {
+    "message": "Los marcadores aún se están preparando para la sincronización. Inténtalo de nuevo en un momento."
+  },
+  "rp_err_limit": {
+    "message": "No hay espacio para un nuevo punto de restauración: los demás están fijados. Desfija o elimina uno primero."
+  },
+  "rp_err_pinLimit": {
+    "message": "Demasiados puntos de restauración fijados. Desfija uno primero."
+  },
+  "rp_err_inProgress": {
+    "message": "Ya hay una restauración en curso."
+  },
+  "rp_err_unreadable": {
+    "message": "No se puede leer este punto de restauración, por lo que no se aplicó."
+  },
+  "rp_err_updateNeeded": {
+    "message": "Actualiza la extensión de HelixSync para usar este punto de restauración."
+  },
+  "rp_err_offline": {
+    "message": "No se pudo conectar con el servidor."
+  },
+  "rp_err_reauth": {
+    "message": "Inicia sesión de nuevo para usar los puntos de restauración."
+  },
+  "rp_err_syncFailed": {
+    "message": "No se pudo sincronizar antes de restaurar. Comprueba tu conexión e inténtalo de nuevo."
+  },
+  "rp_err_preRestoreFailed": {
+    "message": "No se pudo guardar antes una copia de tus marcadores, así que no se restauró nada."
+  },
+  "rp_err_unavailable": {
+    "message": "Este servidor no admite puntos de restauración."
+  },
+  "rp_err_noAnswer": {
+    "message": "La extensión no respondió."
+  },
+  "rp_err_generic": {
+    "message": "Algo salió mal."
+  }
+}

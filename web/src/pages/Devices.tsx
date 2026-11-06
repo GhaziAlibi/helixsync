@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import * as api from "../api/client";
+import { errorText } from "../i18n/errors";
+import { formatDate, formatDateTime } from "../i18n/format";
 
 export default function Devices() {
+  const { t } = useTranslation();
   const [devices, setDevices] = useState<api.DevicePublic[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -13,7 +17,7 @@ export default function Devices() {
     try {
       setDevices(await api.listDevices());
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(errorText(e));
     } finally {
       setLoading(false);
     }
@@ -24,7 +28,7 @@ export default function Devices() {
   }, []);
 
   async function handleRevoke(id: string) {
-    if (!confirm("Revoke this device? It will immediately lose sync access.")) return;
+    if (!confirm(t("devices.revokeConfirm"))) return;
     await api.revokeDevice(id);
     await load();
   }
@@ -37,24 +41,24 @@ export default function Devices() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold mb-6">Devices</h1>
+      <h1 className="text-2xl font-semibold mb-6">{t("devices.title")}</h1>
       {error && <p className="text-red-600 text-sm mb-4">{error}</p>}
       <div className="bg-white rounded-lg shadow-xs border border-slate-200 overflow-hidden">
         {loading ? (
-          <p className="p-5 text-sm text-slate-500">Loading…</p>
+          <p className="p-5 text-sm text-slate-500">{t("common.loading")}</p>
         ) : devices.length === 0 ? (
-          <p className="p-5 text-sm text-slate-500">No devices registered yet.</p>
+          <p className="p-5 text-sm text-slate-500">{t("devices.none")}</p>
         ) : (
           <table className="w-full text-sm">
-            <thead className="bg-slate-50 text-left text-slate-500">
+            <thead className="bg-slate-50 text-start text-slate-500">
               <tr>
-                <th className="px-4 py-2 font-normal">Name</th>
-                <th className="px-4 py-2 font-normal">Browser</th>
-                <th className="px-4 py-2 font-normal">Platform</th>
-                <th className="px-4 py-2 font-normal">Extension</th>
-                <th className="px-4 py-2 font-normal">Last seen</th>
-                <th className="px-4 py-2 font-normal">Created</th>
-                <th className="px-4 py-2 font-normal">Status</th>
+                <th className="px-4 py-2 font-normal">{t("common.name")}</th>
+                <th className="px-4 py-2 font-normal">{t("common.browser")}</th>
+                <th className="px-4 py-2 font-normal">{t("devices.platform")}</th>
+                <th className="px-4 py-2 font-normal">{t("devices.extension")}</th>
+                <th className="px-4 py-2 font-normal">{t("devices.lastSeen")}</th>
+                <th className="px-4 py-2 font-normal">{t("devices.created")}</th>
+                <th className="px-4 py-2 font-normal">{t("devices.status")}</th>
                 <th className="px-4 py-2 font-normal"></th>
               </tr>
             </thead>
@@ -73,7 +77,7 @@ export default function Devices() {
                       />
                     ) : (
                       <button
-                        className="hover:underline text-left"
+                        className="hover:underline text-start"
                         onClick={() => {
                           setRenamingId(d.id);
                           setRenameValue(d.name);
@@ -87,14 +91,14 @@ export default function Devices() {
                   <td className="px-4 py-3 text-slate-500">{d.platform ?? "—"}</td>
                   <td className="px-4 py-3 text-slate-500">{d.extensionVersion ?? "—"}</td>
                   <td className="px-4 py-3 text-slate-500">
-                    {d.lastSeenAt ? new Date(d.lastSeenAt).toLocaleString() : "never"}
+                    {d.lastSeenAt ? formatDateTime(d.lastSeenAt) : t("common.never")}
                   </td>
-                  <td className="px-4 py-3 text-slate-500">{new Date(d.createdAt).toLocaleDateString()}</td>
+                  <td className="px-4 py-3 text-slate-500">{formatDate(d.createdAt)}</td>
                   <td className="px-4 py-3">
                     {d.revokedAt ? (
-                      <span className="text-red-600">Revoked</span>
+                      <span className="text-red-600">{t("devices.revoked")}</span>
                     ) : (
-                      <span className="text-emerald-600">Active</span>
+                      <span className="text-emerald-600">{t("devices.active")}</span>
                     )}
                   </td>
                   <td className="px-4 py-3">
@@ -103,7 +107,7 @@ export default function Devices() {
                         className="text-red-600 hover:underline"
                         onClick={() => handleRevoke(d.id)}
                       >
-                        Revoke
+                        {t("common.revoke")}
                       </button>
                     )}
                   </td>

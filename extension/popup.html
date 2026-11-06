@@ -196,7 +196,7 @@
         position: absolute;
         width: 16px;
         height: 16px;
-        left: 2px;
+        inset-inline-start: 2px;
         top: 2px;
         background: white;
         border-radius: 50%;
@@ -210,6 +210,15 @@
 
       .switch input:checked + .track::before {
         transform: translateX(14px);
+      }
+
+      [dir="rtl"] .switch input:checked + .track::before {
+        transform: translateX(-14px);
+      }
+
+      /* The back arrow points the other way in right-to-left languages. */
+      [dir="rtl"] #back-to-status svg {
+        transform: scaleX(-1);
       }
 
       button {
@@ -475,7 +484,7 @@
       <h1>HelixSync</h1>
       <span id="header-actions"></span>
     </header>
-    <main id="app">Loading…</main>
+    <main id="app"></main>
     <script type="module" src="/src/popup/main.ts"></script>
   </body>
 </html>

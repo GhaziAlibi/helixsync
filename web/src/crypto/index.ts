@@ -7,6 +7,7 @@
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { argon2idAsync } from "@noble/hashes/argon2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
+import { LocalizedError } from "../i18n/localized-error";
 
 const sharedTextEncoder = new TextEncoder();
 
@@ -67,7 +68,7 @@ function assertSaneKdfParams(kdfParams: KdfParams, salt: Uint8Array): void {
     salt.length >= KDF_SALT_MIN_BYTES &&
     salt.length <= KDF_SALT_MAX_BYTES;
   if (!sane) {
-    throw new Error("The server returned unsafe key-derivation parameters");
+    throw new LocalizedError("errors.kdfUnsafe");
   }
 }
 
@@ -202,7 +203,7 @@ export function parseRecoveryCode(input: string): Uint8Array {
     .replace(/[IL]/g, "1")
     .replace(/O/g, "0");
   if (normalized.length !== RECOVERY_CODE_CHARS) {
-    throw new Error("A recovery code has 32 characters.");
+    throw new LocalizedError("errors.codeLength");
   }
   const bytes = new Uint8Array(RECOVERY_CODE_BYTES);
   let bits = 0;
@@ -211,7 +212,7 @@ export function parseRecoveryCode(input: string): Uint8Array {
   for (const char of normalized) {
     const digit = CROCKFORD_ALPHABET.indexOf(char);
     if (digit < 0) {
-      throw new Error(`"${char}" can't appear in a recovery code.`);
+      throw new LocalizedError("errors.codeChar", { char });
     }
     value = ((value << 5) | digit) & 0xfff;
     bits += 5;
@@ -329,7 +330,7 @@ export async function decryptAccountKeyFromApproval(
   const key = await hkdfSha256(new Uint8Array(shared), AUTH_REQUEST_LABEL);
   const envelope = JSON.parse(encryptedAccountKey) as AuthRequestKeyEnvelope;
   if (envelope.v !== 1 || envelope.alg !== "xchacha20poly1305") {
-    throw new Error("unsupported encrypted account key");
+    throw new LocalizedError("errors.unsupportedKey");
   }
   return xchacha20poly1305(key, fromB64(envelope.nonce), sharedTextEncoder.encode(requestId)).decrypt(
     fromB64(envelope.ciphertext),
@@ -396,7 +397,7 @@ export async function unsealRecoveryCode(
   const key = await hkdfSha256(prfOutput, PASSKEY_SEAL_LABEL);
   const envelope = JSON.parse(sealed) as SealedEnvelope;
   if (envelope.v !== 1 || envelope.alg !== "xchacha20poly1305") {
-    throw new Error("unsupported sealed recovery code");
+    throw new LocalizedError("errors.unsupportedSeal");
   }
   const bytes = xchacha20poly1305(key, fromB64(envelope.nonce), sealAad(email, credentialId)).decrypt(
     fromB64(envelope.ciphertext),

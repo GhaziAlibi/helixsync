@@ -90,7 +90,7 @@ async function launch(label, exe) {
     executablePath: exe,
     headless: false,
     viewport: { width: 1000, height: 800 },
-    args: ["--headless=new", `--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, "--no-first-run", "--no-default-browser-check"],
+    args: ["--headless=new", "--lang=en-US", `--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, "--no-first-run", "--no-default-browser-check"],
   });
   const sw = ctx.serviceWorkers()[0] ?? (await ctx.waitForEvent("serviceworker", { timeout: 15_000 }));
   watchWorker(label, sw);
@@ -223,6 +223,7 @@ async function syncUntil(popups, predicate, timeout) {
   }, { timeout });
 }
 
+let RECOVERY_CODE = "";
 const devices = [];
 try {
   const a = await launch("A", BROWSER_A);
@@ -238,9 +239,12 @@ try {
   await passwords.nth(1).fill(PASSWORD);
   await dash.locator('form input[type="checkbox"]').check();
   await dash.getByRole("button", { name: "Create account" }).click();
-  const savedCode = dash.getByText("I saved my recovery code somewhere safe.");
-  check("dashboard: register shows the recovery code", await savedCode.waitFor({ timeout: 60_000 }).then(() => true, () => false));
-  await savedCode.click();
+  // The code is shown once; the screen stays until it is typed back.
+  const codeBox = dash.locator("code").first();
+  const codeShown = await codeBox.waitFor({ timeout: 60_000 }).then(() => true, () => false);
+  check("dashboard: register shows the recovery code", codeShown);
+  RECOVERY_CODE = (await codeBox.innerText()).trim();
+  await dash.locator('input[placeholder^="XXXX-"]').fill(RECOVERY_CODE);
   await dash.getByRole("button", { name: "Continue to HelixSync" }).click();
   await dash.waitForURL(`${BASE}/`, { timeout: 30_000 }).catch(() => {});
   check("dashboard: signed in after registering", dash.url() === `${BASE}/`, dash.url());
@@ -445,6 +449,96 @@ try {
   check("tab groups: title, color and collapsed state changed in A reach B", updated === true, JSON.stringify((await tabsAt(b, GROUPED_TAB_URL))[0]));
   await tabPage.close();
 
+  // Passkey-sealed recovery code (docs/encryption.md §9.5), with Chromium's
+  // virtual authenticator standing in for a real one (it supports PRF).
+  {
+    const sec = await openPage(a, `${BASE}/security`, "dashboard");
+    const cdp = await a.ctx.newCDPSession(sec);
+    await cdp.send("WebAuthn.enable");
+    await cdp.send("WebAuthn.addVirtualAuthenticator", {
+      options: {
+        protocol: "ctap2",
+        transport: "internal",
+        hasResidentKey: true,
+        hasUserVerification: true,
+        isUserVerified: true,
+        hasPrf: true,
+        automaticPresenceSimulation: true,
+      },
+    });
+    await sec.getByLabel("Type your current recovery code").fill(RECOVERY_CODE);
+    await sec.getByRole("button", { name: "Add a passkey" }).click();
+    const added = await sec.getByText("Passkey added.").waitFor({ timeout: 30_000 }).then(() => true, () => false);
+    check("passkey: a passkey seals the recovery code", added);
+    await sec.getByRole("button", { name: "Check it still works" }).click();
+    const works = await sec.getByText("Your passkey opens your current recovery code.").waitFor({ timeout: 30_000 }).then(() => true, () => false);
+    check("passkey: it unseals to the current recovery code", works);
+    await sec.close();
+  }
+
+  // Two-device password reset (docs/encryption.md §9.4): two different
+  // connected extensions approve, the second hands over the account key.
+  {
+    const NEW_PASSWORD = randomBytes(18).toString("base64url");
+    const reset = await openPage(a, `${BASE}/reset`, "dashboard");
+    await reset.fill('input[type="email"]', EMAIL);
+    await reset.getByRole("button", { name: "Ask my browsers" }).click();
+    await reset.locator("code").waitFor({ timeout: 30_000 });
+    const requestPhrase = (await reset.locator("code").textContent())?.trim();
+
+    const resetCard = async (dev) => {
+      return waitFor(async () => {
+        await dev.popup.reload();
+        const card = dev.popup.locator(".auth-request.password-reset");
+        return (await card.first().waitFor({ timeout: 15_000 }).then(() => true, () => false)) ? card.first() : null;
+      }, { timeout: 60_000, interval: 500 });
+    };
+
+    const cardA = await resetCard(ca);
+    const shownA = cardA ? (await cardA.locator(".fingerprint").first().textContent())?.trim() : undefined;
+    check("reset: A shows the request with the same phrase", !!requestPhrase && requestPhrase === shownA, `${requestPhrase} / ${shownA}`);
+    check("reset: the first approval carries no key phrase", cardA ? (await cardA.locator(".fingerprint").count()) === 1 : false);
+    if (cardA) await cardA.getByRole("button", { name: "Approve" }).click();
+
+    const cardB = await resetCard(cb);
+    const keyPhrase = cardB && (await cardB.locator(".fingerprint").count()) === 2
+      ? (await cardB.locator(".fingerprint").nth(1).textContent())?.trim()
+      : undefined;
+    check("reset: B asks as the second approver and shows the key check phrase", !!keyPhrase, keyPhrase ?? "");
+    if (cardB) await cardB.getByRole("button", { name: "Approve" }).click();
+
+    const approvedOk = await reset.getByText("Two of your browsers approved").waitFor({ timeout: 60_000 }).then(() => true, () => false);
+    check("reset: the dashboard sees two approvals", approvedOk);
+    const pagePhrase = approvedOk ? (await reset.locator("code").first().textContent())?.trim() : undefined;
+    check("reset: the dashboard's key check phrase equals B's", !!keyPhrase && keyPhrase === pagePhrase, `${keyPhrase} / ${pagePhrase}`);
+
+    await reset.getByLabel("The phrase matches the one in the extension.").check();
+    await reset.getByLabel("New password", { exact: true }).fill(NEW_PASSWORD);
+    await reset.getByLabel("Confirm new password").fill(NEW_PASSWORD);
+    await reset.getByRole("button", { name: "Reset password" }).click();
+    // The new code's screen is the one with the type-it-back field.
+    const typeBack = reset.locator('input[placeholder^="XXXX-"]');
+    const gotCode = await typeBack.waitFor({ timeout: 60_000 }).then(() => true, () => false);
+    const newCode = gotCode ? (await reset.locator("code").first().innerText()).trim() : "";
+    check("reset: a new recovery code is shown", /^[0-9A-Z]{4}(-[0-9A-Z]{4}){7}$/.test(newCode), newCode ? "shown" : "");
+    await typeBack.fill(newCode);
+    await reset.getByRole("button", { name: "Sign in" }).click();
+    await reset.waitForURL(`${BASE}/login`, { timeout: 30_000 }).catch(() => {});
+
+    // The new password works and the old one no longer does.
+    const loginWith = async (password) => {
+      await reset.goto(`${BASE}/login`);
+      await reset.fill('input[type="email"]', EMAIL);
+      await reset.fill('input[type="password"]', password);
+      await reset.getByRole("button", { name: "Sign in", exact: true }).first().click();
+      await reset.waitForURL(`${BASE}/`, { timeout: 15_000 }).catch(() => {});
+      return reset.url() === `${BASE}/`;
+    };
+    check("reset: the old password no longer signs in", (await loginWith(PASSWORD)) === false);
+    check("reset: the new password signs in", (await loginWith(NEW_PASSWORD)) === true);
+    await reset.close();
+  }
+
   // Disconnect B from its popup: the server revokes the device.
   await cb.popup.reload();
   await cb.popup.click("#open-settings");
@@ -460,11 +554,14 @@ try {
   await login.getByRole("button", { name: "Log in with a device" }).click();
   await login.locator("code").waitFor({ timeout: 30_000 });
   const phrase = (await login.locator("code").textContent())?.trim();
+  // The popup renders only after the service worker answers its status
+  // request, which can take seconds while the worker is busy syncing. Reload,
+  // then give that render time to finish instead of reloading it away.
   const request = await waitFor(async () => {
     await ca.popup.reload();
     const card = ca.popup.locator(".auth-request");
-    return (await card.count()) > 0 ? card.first() : null;
-  }, { timeout: 30_000 });
+    return (await card.first().waitFor({ timeout: 15_000 }).then(() => true, () => false)) ? card.first() : null;
+  }, { timeout: 60_000, interval: 500 });
   const shown = request ? (await request.locator(".fingerprint").first().textContent())?.trim() : undefined;
   check("login with device: A shows the request with the same phrase", !!phrase && phrase === shown, `${phrase} / ${shown}`);
   if (request) await request.getByRole("button", { name: "Approve" }).click();

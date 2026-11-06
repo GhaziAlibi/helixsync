@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useAuth } from "../auth/context";
 import * as api from "../api/client";
 import {
@@ -10,14 +11,13 @@ import {
   unsealWithPasskey,
 } from "../passkey";
 
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
+import { errorText as describe } from "../i18n/errors";
 
 /** Typing the current recovery code back (docs/encryption.md §9.1): the
  * server compares only its derived key and sets the "confirmed" flag. */
 export function ConfirmRecoveryCodeForm() {
   const { user, markRecoveryCodeConfirmed } = useAuth();
+  const { t } = useTranslation();
   const [typed, setTyped] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [working, setWorking] = useState(false);
@@ -34,7 +34,7 @@ export function ConfirmRecoveryCodeForm() {
     } catch (err) {
       setError(
         err instanceof api.ApiError && err.status === 401
-          ? "That isn't your current recovery code. If you can't find it, generate a new one below."
+          ? t("safeguards.wrongCurrentGenerate")
           : describe(err),
       );
     } finally {
@@ -43,13 +43,13 @@ export function ConfirmRecoveryCodeForm() {
   }
 
   if (confirmed) {
-    return <p className="text-sm text-emerald-600 mb-4">You've confirmed your recovery code.</p>;
+    return <p className="text-sm text-emerald-600 mb-4">{t("safeguards.confirmed")}</p>;
   }
 
   return (
     <form onSubmit={onSubmit} className="flex flex-col gap-3 max-w-sm mb-6">
       <label className="flex flex-col gap-1 text-sm">
-        Type your current recovery code to confirm you still have it
+        {t("safeguards.confirmLabel")}
         <input
           type="text"
           required
@@ -67,7 +67,7 @@ export function ConfirmRecoveryCodeForm() {
         disabled={working}
         className="self-start rounded bg-slate-900 text-white px-4 py-2 text-sm disabled:opacity-50"
       >
-        {working ? "Checking…" : "Confirm recovery code"}
+        {working ? t("safeguards.checking") : t("safeguards.confirmButton")}
       </button>
     </form>
   );
@@ -78,6 +78,7 @@ export function ConfirmRecoveryCodeForm() {
  * keeps the sealed copy in this browser and offers a rescue file. */
 export function PasskeySection() {
   const { user, markRecoveryCodeConfirmed } = useAuth();
+  const { t } = useTranslation();
   const email = user?.email ?? "";
   const [supported, setSupported] = useState<boolean | null>(null);
   const [record, setRecord] = useState(() => loadPasskeyRecord(email));
@@ -100,7 +101,7 @@ export function PasskeySection() {
   if (!supported) {
     return (
       <p className="text-sm text-slate-500">
-        This browser can't protect your recovery code with a passkey. Your recovery code still works.
+        {t("safeguards.noPasskeySupport")}
       </p>
     );
   }
@@ -119,10 +120,10 @@ export function PasskeySection() {
       downloadRescueFile(next);
       setRecord(next);
       setTyped("");
-      setStatus("Passkey added. Keep the rescue file somewhere safe, such as your email or a cloud drive.");
+      setStatus(t("safeguards.passkeyAdded"));
     } catch (err) {
       setError(
-        err instanceof api.ApiError && err.status === 401 ? "That isn't your current recovery code." : describe(err),
+        err instanceof api.ApiError && err.status === 401 ? t("safeguards.wrongCurrent") : describe(err),
       );
     } finally {
       setBusy(false);
@@ -137,11 +138,11 @@ export function PasskeySection() {
     try {
       await api.confirmRecoveryCode(await unsealWithPasskey(record));
       markRecoveryCodeConfirmed();
-      setStatus("Your passkey opens your current recovery code.");
+      setStatus(t("safeguards.passkeyWorks"));
     } catch (err) {
       setError(
         err instanceof api.ApiError && err.status === 401
-          ? "Your passkey holds an old recovery code. Add the passkey again with your current code."
+          ? t("safeguards.passkeyOldCode")
           : describe(err),
       );
     } finally {
@@ -153,7 +154,7 @@ export function PasskeySection() {
     <div className="flex flex-col gap-3 max-w-sm">
       {record && (
         <div className="flex flex-col gap-2 text-sm">
-          <p className="text-slate-700">A passkey protects your recovery code in this browser.</p>
+          <p className="text-slate-700">{t("safeguards.protects")}</p>
           <div className="flex gap-2">
             <button
               type="button"
@@ -161,21 +162,21 @@ export function PasskeySection() {
               onClick={check}
               className="rounded border border-slate-300 px-3 py-2 disabled:opacity-50"
             >
-              Check it still works
+              {t("safeguards.checkWorks")}
             </button>
             <button
               type="button"
               onClick={() => downloadRescueFile(record)}
               className="rounded border border-slate-300 px-3 py-2"
             >
-              Download rescue file
+              {t("safeguards.downloadRescue")}
             </button>
           </div>
         </div>
       )}
       <form onSubmit={enrol} className="flex flex-col gap-3">
         <label className="flex flex-col gap-1 text-sm">
-          {record ? "Replace the passkey: type your current recovery code" : "Type your current recovery code"}
+          {record ? t("safeguards.replaceLabel") : t("safeguards.typeCurrent")}
           <input
             type="text"
             required
@@ -191,7 +192,7 @@ export function PasskeySection() {
           disabled={busy}
           className="self-start rounded bg-slate-900 text-white px-4 py-2 text-sm disabled:opacity-50"
         >
-          {busy ? "Waiting for the passkey…" : "Add a passkey"}
+          {busy ? t("safeguards.waitingPasskey") : t("safeguards.addPasskey")}
         </button>
       </form>
       {status && <p className="text-sm text-emerald-600">{status}</p>}

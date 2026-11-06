@@ -1,5 +1,6 @@
 import {
   ApiError,
+  NetworkError,
   registerDevice,
   prelogin,
   fetchSettings,
@@ -41,6 +42,17 @@ import {
 import { retentionCutoffMs } from "../util/retention";
 import { assertSecureServerUrl, InsecureServerUrlError } from "./serverUrl";
 import { renderRestorePointsView } from "./restore-points";
+import {
+  LANGUAGES,
+  LANGUAGE_STORAGE_KEY,
+  hasMessage,
+  initI18n,
+  isSupportedLanguage,
+  setUiLanguage,
+  t,
+  timeAgo,
+  tp,
+} from "../i18n";
 
 /** The https origin and its wss counterpart (for the WebSocket channel),
  * requested together so the user is prompted only once. */
@@ -191,8 +203,25 @@ function selectById(id: string): HTMLSelectElement {
   return document.getElementById(id) as HTMLSelectElement;
 }
 
+/** The text for a failure: the translated message for a known server code or a
+ * network failure (the same `statusErr_*` strings the sync status uses),
+ * otherwise the error's own message. */
 function errorMessage(err: unknown): string {
+  const code =
+    err instanceof ApiError ? (err.status === 429 ? "rate_limited" : err.code) : err instanceof NetworkError ? "network" : undefined;
+  if (code && hasMessage(`statusErr_${code}`)) return t(`statusErr_${code}`);
   return err instanceof Error ? err.message : String(err);
+}
+
+/** `t`, escaped for use inside an innerHTML template. */
+function th(key: string, params?: Record<string, string | number>): string {
+  return escapeAttr(t(key, params));
+}
+
+/** Like `th`, for a message with a {link} placeholder that becomes `linkHtml`
+ * (already escaped markup). */
+function thWithLink(key: string, linkHtml: string): string {
+  return th(key, { link: "{link}" }).replace("{link}", linkHtml);
 }
 
 function showError(status: HTMLElement, message: string): void {
@@ -206,7 +235,7 @@ function escapeAttr(value: string): string {
 
 // window.confirm() ignores the popup's fixed width and can clip its buttons
 // out of reach, so the dialog is rendered inside the popup instead.
-function showConfirmDialog(message: string, confirmLabel = "Disconnect"): Promise<boolean> {
+function showConfirmDialog(message: string, confirmLabel = t("common_disconnect")): Promise<boolean> {
   return new Promise((resolve) => {
     const overlay = document.createElement("div");
     overlay.className = "modal-overlay";
@@ -214,7 +243,7 @@ function showConfirmDialog(message: string, confirmLabel = "Disconnect"): Promis
       <div class="modal-card">
         <p>${escapeAttr(message)}</p>
         <div class="modal-actions">
-          <button class="ghost" id="modal-cancel">Cancel</button>
+          <button class="ghost" id="modal-cancel">${th("common_cancel")}</button>
           <button class="danger" id="modal-confirm">${escapeAttr(confirmLabel)}</button>
         </div>
       </div>
@@ -237,15 +266,29 @@ const HISTORY_ICON =
 const BACK_ICON =
   '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>';
 
-function timeAgo(iso?: string): string {
-  if (!iso) return "never";
-  const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-  if (seconds < 5) return "just now";
-  if (seconds < 60) return `${seconds} seconds ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+/** The language picker: "browser default" or one of the languages, each
+ * named in itself. */
+async function languageFieldHtml(): Promise<string> {
+  const stored = (await chrome.storage.local.get(LANGUAGE_STORAGE_KEY))[LANGUAGE_STORAGE_KEY];
+  const selected = isSupportedLanguage(stored) ? stored : "";
+  const options = [
+    `<option value=""${selected === "" ? " selected" : ""}>${th("language_auto")}</option>`,
+    ...LANGUAGES.map(
+      (l) => `<option value="${l.code}"${selected === l.code ? " selected" : ""}>${escapeAttr(l.name)}</option>`,
+    ),
+  ];
+  return `<label class="field"><span>${th("language_label")}</span><select id="uiLanguage">${options.join("")}</select></label>`;
+}
+
+/** `beforeChange` runs first, to save what the user typed: the view is drawn
+ * again in the new language. */
+function bindLanguageField(beforeChange: () => Promise<void>): void {
+  document.getElementById("uiLanguage")?.addEventListener("change", async (e) => {
+    const value = (e.currentTarget as HTMLSelectElement).value;
+    await beforeChange();
+    await setUiLanguage(isSupportedLanguage(value) ? value : null);
+    await render();
+  });
 }
 
 function statusDotClass(status: string): string {
@@ -257,13 +300,13 @@ function statusDotClass(status: string): string {
 function statusLabel(status: string): string {
   switch (status) {
     case "syncing":
-      return "Syncing…";
+      return t("status_syncing");
     case "error":
-      return "Sync error";
+      return t("status_error");
     case "needs_reauth":
-      return "Needs re-authorization";
+      return t("status_needsReauth");
     default:
-      return "Synced";
+      return t("status_synced");
   }
 }
 
@@ -297,8 +340,8 @@ function renderPendingTabRestores(
   const restoreAllButton = document.createElement("button");
   let remainingCount = totalCount;
   const updateCount = () => {
-    label.textContent = `Tabs from other devices (${remainingCount})`;
-    restoreAllButton.textContent = `Restore all (${remainingCount})`;
+    label.textContent = t("pending_header", { count: remainingCount });
+    restoreAllButton.textContent = t("pending_restoreAll", { count: remainingCount });
   };
   updateCount();
   section.appendChild(label);
@@ -313,7 +356,7 @@ function renderPendingTabRestores(
       error.className = "status-message error restore-error";
       section.appendChild(error);
     }
-    error.textContent = `Failed to restore tab: ${errorMessage(err)}`;
+    error.textContent = t("pending_failed", { message: errorMessage(err) });
   };
 
   const renderedObjectIds = new Set<string>();
@@ -330,11 +373,11 @@ function renderPendingTabRestores(
 
     const restoreButton = document.createElement("button");
     restoreButton.className = "restore-button";
-    restoreButton.textContent = "Restore";
+    restoreButton.textContent = t("pending_restore");
     restoreButton.addEventListener("click", () => {
       void (async () => {
         restoreButton.disabled = true;
-        restoreButton.textContent = "Restoring…";
+        restoreButton.textContent = t("pending_restoring");
         section.querySelector(".restore-error")?.remove();
         try {
           await onRestore(objectId);
@@ -348,7 +391,7 @@ function renderPendingTabRestores(
         } catch (err) {
           // Keep the row so the user can retry.
           restoreButton.disabled = false;
-          restoreButton.textContent = "Restore";
+          restoreButton.textContent = t("pending_restore");
           showRestoreError(err);
         }
       })();
@@ -367,7 +410,7 @@ function renderPendingTabRestores(
     const hiddenAtRender = totalCount - initial.length;
     const showMoreButton = document.createElement("button");
     showMoreButton.className = "ghost";
-    showMoreButton.textContent = `Show ${hiddenAtRender} more`;
+    showMoreButton.textContent = t("pending_showMore", { count: hiddenAtRender });
     showMoreButton.addEventListener("click", () => {
       showMoreButton.disabled = true;
       void (async () => {
@@ -405,7 +448,7 @@ async function render(): Promise<void> {
   if (connectedView === "settings") {
     await renderSettings(device);
   } else if (connectedView === "restorePoints") {
-    renderHeaderButton("back-to-status", "Back", BACK_ICON, "status");
+    renderHeaderButton("back-to-status", t("header_back"), BACK_ICON, "status");
     await renderRestorePointsView(app, { rerender: render, confirm: showConfirmDialog });
   } else {
     await renderStatusView(device);
@@ -423,36 +466,38 @@ async function renderSetup(): Promise<void> {
   const draft = (await loadDraft<SetupDraft>(SETUP_DRAFT_KEY)) ?? {};
   const password = (await loadPasswordDraft()) ?? "";
 
+  const languageField = await languageFieldHtml();
   app.innerHTML = `
-    <h2 class="view-title">Connect this browser</h2>
-    <p class="view-subtitle">Sign in with your HelixSync account to start syncing.</p>
+    <h2 class="view-title">${th("setup_title")}</h2>
+    <p class="view-subtitle">${th("setup_subtitle")}</p>
     <form id="setup-form">
       <label class="field">
-        <span>Server URL</span>
+        <span>${th("setup_serverUrl")}</span>
         <input type="text" id="serverUrl" placeholder="https://sync.example.com" value="${escapeAttr(draft.serverUrl ?? "")}" required />
       </label>
       <label class="field">
-        <span>Email</span>
+        <span>${th("setup_email")}</span>
         <input type="email" id="email" value="${escapeAttr(draft.email ?? "")}" required />
       </label>
       <label class="field">
-        <span>Password</span>
+        <span>${th("setup_password")}</span>
         <input type="password" id="password" value="${escapeAttr(password)}" required />
       </label>
       <label class="field">
-        <span>Device name</span>
+        <span>${th("setup_deviceName")}</span>
         <input type="text" id="deviceName" value="${escapeAttr(draft.deviceName ?? defaultDeviceName())}" required />
       </label>
-      <button type="submit" class="primary">Connect</button>
-      <button type="button" id="device-login" class="ghost">Log in with device instead</button>
+      <button type="submit" class="primary">${th("setup_connect")}</button>
+      <button type="button" id="device-login" class="ghost">${th("setup_deviceLoginInstead")}</button>
     </form>
-    <p class="view-subtitle">
-      Don't have an account? <a href="#" id="register-link">Register on the web</a>
-    </p>
-    <p class="view-subtitle">
-      <a href="#" id="forgot-password-link">Forgot your password?</a>
-    </p>
     <div class="status-message" id="status"></div>
+    <p class="view-subtitle">
+      ${thWithLink("setup_noAccount", `<a href="#" id="register-link">${th("setup_registerLink")}</a>`)}
+    </p>
+    <p class="view-subtitle">
+      <a href="#" id="forgot-password-link">${th("setup_forgotLink")}</a>
+    </p>
+    ${languageField}
   `;
 
   const form = document.getElementById("setup-form") as HTMLFormElement;
@@ -467,7 +512,7 @@ async function renderSetup(): Promise<void> {
     try {
       origin = new URL(serverUrl).origin;
     } catch {
-      showError(status, "Enter a valid Server URL first.");
+      showError(status, t("setup_serverUrlFirst"));
       return;
     }
 
@@ -496,6 +541,13 @@ async function renderSetup(): Promise<void> {
   document.getElementById("password")?.addEventListener("input", () => {
     void savePasswordDraft(inputById("password").value);
   });
+  bindLanguageField(async () => {
+    await saveDraft<SetupDraft>(SETUP_DRAFT_KEY, {
+      serverUrl: inputById("serverUrl").value,
+      email: inputById("email").value,
+      deviceName: inputById("deviceName").value,
+    });
+  });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -516,7 +568,7 @@ async function renderSetup(): Promise<void> {
         assertSecureServerUrl(serverUrl);
         origins = hostPermissionOrigins(serverUrl);
       } catch (err) {
-        showError(status, err instanceof InsecureServerUrlError ? err.message : "Enter a valid Server URL.");
+        showError(status, err instanceof InsecureServerUrlError ? t("setup_insecureUrl") : t("setup_serverUrlInvalid"));
         return;
       }
 
@@ -529,7 +581,7 @@ async function renderSetup(): Promise<void> {
       const granted = await chrome.permissions.request({ origins });
       if (!granted) {
         await saveDraft<SetupDraft>(SETUP_DRAFT_KEY, { serverUrl, email, deviceName, pendingConnect: false });
-        showError(status, "Permission to contact the server was not granted.");
+        showError(status, t("setup_permissionDenied"));
         return;
       }
 
@@ -548,7 +600,7 @@ async function renderSetup(): Promise<void> {
 
     status.classList.remove("error");
     if (!email.includes("@") || !deviceName.trim()) {
-      showError(status, "Enter your email and a device name first.");
+      showError(status, t("setup_emailAndName"));
       return;
     }
     let origins: string[];
@@ -556,7 +608,7 @@ async function renderSetup(): Promise<void> {
       assertSecureServerUrl(serverUrl);
       origins = hostPermissionOrigins(serverUrl);
     } catch (err) {
-      showError(status, err instanceof InsecureServerUrlError ? err.message : "Enter a valid Server URL.");
+      showError(status, err instanceof InsecureServerUrlError ? t("setup_insecureUrl") : t("setup_serverUrlInvalid"));
       return;
     }
 
@@ -565,7 +617,7 @@ async function renderSetup(): Promise<void> {
     const granted = await chrome.permissions.request({ origins });
     if (!granted) {
       await saveDraft<SetupDraft>(SETUP_DRAFT_KEY, { serverUrl, email, deviceName, pendingDeviceLogin: false });
-      showError(status, "Permission to contact the server was not granted.");
+      showError(status, t("setup_permissionDenied"));
       return;
     }
     await startDeviceLogin({ serverUrl, email, deviceName }, status);
@@ -590,7 +642,7 @@ async function resumePendingDeviceLogin(draft: SetupDraft, status: HTMLElement):
     return;
   }
   if (!(await chrome.permissions.contains({ origins }))) {
-    showError(status, "Permission wasn't granted last time — click \"Log in with device instead\" to try again.");
+    showError(status, t("setup_permissionLastDevice"));
     return;
   }
   await startDeviceLogin(
@@ -608,7 +660,7 @@ async function startDeviceLogin(
   if (connectInFlight) return;
   connectInFlight = true;
   status.classList.remove("error");
-  status.textContent = "Creating sign-in request…";
+  status.textContent = t("setup_creatingRequest");
   try {
     const keyPair = await generateAuthRequestKeyPair();
     const created = await createAuthRequest(input.serverUrl, input.email, keyPair.publicKey, input.deviceName);
@@ -623,7 +675,7 @@ async function startDeviceLogin(
     await chrome.storage.session.set({ [DEVICE_LOGIN_KEY]: pending });
     await saveDraft<SetupDraft>(SETUP_DRAFT_KEY, { ...input, pendingDeviceLogin: false });
   } catch (err) {
-    showError(status, `Failed: ${errorMessage(err)}`);
+    showError(status, t("setup_failed", { message: errorMessage(err) }));
     return;
   } finally {
     connectInFlight = false;
@@ -653,14 +705,11 @@ async function abandonDeviceLogin(message?: string): Promise<void> {
  * storage. */
 async function renderDeviceLoginWait(pending: PendingDeviceLogin): Promise<void> {
   app.innerHTML = `
-    <h2 class="view-title">Approve on another browser</h2>
-    <p class="view-subtitle">
-      Open HelixSync on a browser that's already connected to this account and approve the request there.
-      Approve it only if that browser shows this phrase:
-    </p>
+    <h2 class="view-title">${th("devicewait_title")}</h2>
+    <p class="view-subtitle">${th("devicewait_body")}</p>
     <div class="fingerprint" id="fingerprint"></div>
-    <div class="status-message" id="status">Waiting for approval…</div>
-    <button id="cancel-device-login" class="ghost">Cancel</button>
+    <div class="status-message" id="status">${th("devicewait_waiting")}</div>
+    <button id="cancel-device-login" class="ghost">${th("common_cancel")}</button>
   `;
   document.getElementById("fingerprint")!.textContent = await authRequestFingerprint(pending.publicKey);
   const status = document.getElementById("status")!;
@@ -695,16 +744,16 @@ async function renderDeviceLoginWait(pending: PendingDeviceLogin): Promise<void>
             }
             await finishConnect({ serverUrl: pending.serverUrl, email: pending.email }, result, toB64(accountKey));
           },
-          onMismatch: () => abandonDeviceLogin("The key check didn't match, so the approval was discarded."),
+          onMismatch: () => abandonDeviceLogin(t("devicewait_keyMismatch")),
         });
         return;
       }
       if (result.status === "denied") {
-        await abandonDeviceLogin("The sign-in request was denied.");
+        await abandonDeviceLogin(t("devicewait_denied"));
         return;
       }
       if (result.status === "expired") {
-        await abandonDeviceLogin("The sign-in request expired. Start a new one.");
+        await abandonDeviceLogin(t("devicewait_expired"));
         return;
       }
     } catch (err) {
@@ -713,11 +762,11 @@ async function renderDeviceLoginWait(pending: PendingDeviceLogin): Promise<void>
       status.classList.add("error");
       status.textContent =
         err instanceof ApiError && err.code === "device_limit_reached"
-          ? "This account has the maximum number of devices. Revoke one on the dashboard and this browser will connect."
-          : `Still waiting: ${errorMessage(err)}`;
+          ? t("devicewait_deviceLimit")
+          : t("devicewait_stillWaiting", { message: errorMessage(err) });
     }
     if (Date.now() >= Date.parse(pending.expiresAt)) {
-      await abandonDeviceLogin("The sign-in request expired. Start a new one.");
+      await abandonDeviceLogin(t("devicewait_expired"));
       return;
     }
     deviceLoginPollTimer = setTimeout(() => void tick(), DEVICE_LOGIN_POLL_MS);
@@ -732,14 +781,12 @@ async function renderKeyCheck(
   handlers: { onMatch: () => Promise<void>; onMismatch: () => Promise<void> },
 ): Promise<void> {
   app.innerHTML = `
-    <h2 class="view-title">Check the key</h2>
-    <p class="view-subtitle">
-      The approving browser shows a key check phrase on its sign-in request. Continue only if it matches:
-    </p>
+    <h2 class="view-title">${th("keycheck_title")}</h2>
+    <p class="view-subtitle">${th("keycheck_body")}</p>
     <div class="fingerprint" id="key-check"></div>
     <div class="status-message" id="status"></div>
-    <button id="key-check-match" class="primary">It matches</button>
-    <button id="key-check-mismatch">It doesn't match</button>
+    <button id="key-check-match" class="primary">${th("keycheck_matches")}</button>
+    <button id="key-check-mismatch">${th("keycheck_mismatch")}</button>
   `;
   document.getElementById("key-check")!.textContent = phrase;
   const status = document.getElementById("status")!;
@@ -771,7 +818,7 @@ async function resumePendingConnect(draft: SetupDraft, password: string, status:
   } catch (err) {
     await saveDraft<SetupDraft>(SETUP_DRAFT_KEY, { ...draft, pendingConnect: false });
     if (err instanceof InsecureServerUrlError) {
-      showError(status, err.message);
+      showError(status, t("setup_insecureUrl"));
     }
     return;
   }
@@ -779,7 +826,7 @@ async function resumePendingConnect(draft: SetupDraft, password: string, status:
   const alreadyGranted = await chrome.permissions.contains({ origins });
   if (!alreadyGranted) {
     await saveDraft<SetupDraft>(SETUP_DRAFT_KEY, { ...draft, pendingConnect: false });
-    showError(status, "Permission wasn't granted last time — click Connect to try again.");
+    showError(status, t("setup_permissionLastConnect"));
     return;
   }
   if (connectInFlight) return;
@@ -804,7 +851,7 @@ async function resumePendingConnect(draft: SetupDraft, password: string, status:
 async function attemptConnect(input: ConnectInput, status: HTMLElement): Promise<void> {
   const { serverUrl, email, password, deviceName } = input;
   status.classList.remove("error");
-  status.textContent = "Connecting…";
+  status.textContent = t("setup_connecting");
 
   try {
     await ensureCryptoReady();
@@ -812,13 +859,13 @@ async function attemptConnect(input: ConnectInput, status: HTMLElement): Promise
     // SEC-01 / docs/encryption.md §2: the password never leaves the device.
     // It derives the authKey (sent in place of the password) and the KEK
     // (unwraps the account key, never sent).
-    status.textContent = "Deriving encryption key…";
+    status.textContent = t("setup_deriving");
     const { kdfSalt, kdfParams } = await prelogin(serverUrl, email);
     const masterKey = await deriveMasterKey(password, kdfSalt, kdfParams);
     const authKey = await deriveAuthKey(masterKey);
     const kek = await deriveKek(masterKey);
 
-    status.textContent = "Connecting…";
+    status.textContent = t("setup_connecting");
     const result = await registerDevice({
       serverUrl,
       email,
@@ -832,7 +879,7 @@ async function attemptConnect(input: ConnectInput, status: HTMLElement): Promise
     await finishConnect({ serverUrl, email }, result, accountKey);
   } catch (err) {
     await saveDraft<SetupDraft>(SETUP_DRAFT_KEY, { serverUrl, email, deviceName, pendingConnect: false });
-    showError(status, `Failed: ${errorMessage(err)}`);
+    showError(status, t("setup_failed", { message: errorMessage(err) }));
   }
 }
 
@@ -881,7 +928,7 @@ function renderHeaderButton(id: string, title: string, icon: string, targetView:
 
 function renderHeaderButtons(buttons: Array<{ id: string; title: string; icon: string; targetView: ConnectedView }>): void {
   headerActions.innerHTML = buttons
-    .map(({ id, title, icon }) => `<button class="icon-button" id="${id}" title="${title}">${icon}</button>`)
+    .map(({ id, title, icon }) => `<button class="icon-button" id="${id}" title="${escapeAttr(title)}">${icon}</button>`)
     .join("");
   for (const { id, targetView } of buttons) {
     document.getElementById(id)?.addEventListener("click", async () => {
@@ -892,7 +939,7 @@ function renderHeaderButtons(buttons: Array<{ id: string; title: string; icon: s
 }
 
 async function renderStatusView(device: DeviceRecord): Promise<void> {
-  renderHeaderButton("open-settings", "Settings", GEAR_ICON, "settings");
+  renderHeaderButton("open-settings", t("header_settings"), GEAR_ICON, "settings");
 
   const [response, settings, authRequests, restorePointsSupported] = await Promise.all([
     chrome.runtime.sendMessage({ type: "GET_STATUS" }),
@@ -909,8 +956,8 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
     restorePointsSupported
   ) {
     renderHeaderButtons([
-      { id: "open-restore-points", title: "Restore points", icon: HISTORY_ICON, targetView: "restorePoints" },
-      { id: "open-settings", title: "Settings", icon: GEAR_ICON, targetView: "settings" },
+      { id: "open-restore-points", title: t("header_restorePoints"), icon: HISTORY_ICON, targetView: "restorePoints" },
+      { id: "open-settings", title: t("header_settings"), icon: GEAR_ICON, targetView: "settings" },
     ]);
   }
 
@@ -919,10 +966,10 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
       <span class="dot ${statusDotClass(response.status)}"></span>
       <div class="status-text">
         <strong>${statusLabel(response.status)}</strong>
-        <span>Last sync: ${timeAgo(response.lastSyncAt)} · Pending: ${response.pendingCount ?? 0}</span>
+        <span>${escapeAttr(t("statusview_lastSync", { time: timeAgo(response.lastSyncAt), pending: response.pendingCount ?? 0 }))}</span>
       </div>
     </div>
-    <button id="sync-now" class="primary">Sync Now</button>
+    <button id="sync-now" class="primary">${th("statusview_syncNow")}</button>
   `;
 
   // The detail is an error message that can echo server text, so it's set
@@ -930,15 +977,16 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
   if ((response.status === "error" || response.status === "needs_reauth") && response.errorDetail) {
     const detail = document.createElement("div");
     detail.className = "status-message error";
-    detail.textContent = response.errorDetail;
+    const codeKey = `statusErr_${response.errorCode}`;
+    detail.textContent = response.errorCode && hasMessage(codeKey) ? t(codeKey) : response.errorDetail;
     document.querySelector(".status-card")!.insertAdjacentElement("afterend", detail);
   }
 
   if ((await chrome.storage.local.get(OLDER_HISTORY_OFFER_KEY))[OLDER_HISTORY_OFFER_KEY]) {
     const olderHistory = document.createElement("button");
     olderHistory.id = "sync-older-history";
-    olderHistory.textContent = "Sync older history";
-    olderHistory.title = "Import this browser's history older than the previous retention window";
+    olderHistory.textContent = t("statusview_olderHistory");
+    olderHistory.title = t("statusview_olderHistoryTitle");
     document.getElementById("sync-now")!.insertAdjacentElement("afterend", olderHistory);
     olderHistory.addEventListener("click", async () => {
       olderHistory.remove();
@@ -948,10 +996,10 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
       document.getElementById("sync-now")!.insertAdjacentElement("afterend", message);
       try {
         const result = await chrome.runtime.sendMessage({ type: "IMPORT_OLDER_HISTORY" });
-        if (!result?.ok) throw new Error(result?.error ?? "The import request failed");
-        message.textContent = "Importing older history in the background.";
+        if (!result?.ok) throw new Error(result?.error ?? t("statusview_importRequestFailed"));
+        message.textContent = t("statusview_importStarted");
       } catch (err) {
-        showError(message, `Failed to start: ${errorMessage(err)}`);
+        showError(message, t("statusview_importFailed", { message: errorMessage(err) }));
       }
     });
   }
@@ -965,7 +1013,7 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
   document.getElementById("sync-now")?.addEventListener("click", async (e) => {
     const button = e.currentTarget as HTMLButtonElement;
     button.disabled = true;
-    button.textContent = "Syncing…";
+    button.textContent = t("status_syncing");
     try {
       await chrome.runtime.sendMessage({ type: "SYNC_NOW" });
     } finally {
@@ -983,7 +1031,7 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
         const response = await chrome.runtime.sendMessage({ type: "RESTORE_TAB", objectId });
         // The worker reports failures in the response rather than rejecting.
         if (!response?.ok) {
-          throw new Error(response?.error ?? "The restore request failed");
+          throw new Error(response?.error ?? t("statusview_restoreRequestFailed"));
         }
       },
       async () => {
@@ -998,7 +1046,7 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
   footer.className = "meta";
   footer.style.marginTop = "16px";
   footer.style.textAlign = "center";
-  footer.textContent = `Signed in as ${device.email}`;
+  footer.textContent = t("statusview_signedInAs", { email: device.email });
   app.appendChild(footer);
 }
 
@@ -1009,7 +1057,7 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
   const section = document.createElement("div");
   const label = document.createElement("div");
   label.className = "section-label";
-  label.textContent = requests.length === 1 ? "Sign-in request" : "Sign-in requests";
+  label.textContent = tp("auth_requests", requests.length);
   section.appendChild(label);
 
   for (const request of requests) {
@@ -1023,33 +1071,29 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
     // the account key.
     const completesReset = isReset && (request.approvals ?? 0) >= 1;
     title.textContent = isReset
-      ? "PASSWORD RESET"
+      ? t("auth_passwordReset")
       : request.kind === "web"
-        ? "Web dashboard sign-in"
-        : `New browser: ${request.deviceName ?? "unnamed"}`;
+        ? t("auth_webSignIn")
+        : t("auth_newBrowser", { name: request.deviceName ?? t("auth_unnamed") });
     if (isReset) card.classList.add("password-reset");
 
     const meta = document.createElement("div");
     meta.className = "item-meta";
-    meta.textContent = `${request.requestIp ?? "Unknown IP"} · ${timeAgo(request.createdAt)}`;
+    meta.textContent = `${request.requestIp ?? t("auth_unknownIp")} · ${timeAgo(request.createdAt)}`;
     if (request.userAgent) meta.title = request.userAgent;
 
     const consequence = document.createElement("div");
     consequence.className = "item-meta";
     consequence.textContent = isReset
-      ? `WARNING: this lets someone set a new password for your account. Approve only if YOU asked to reset your password. ${request.approvals ?? 0} of 2 approvals so far; ${
-          completesReset
-            ? "approving now completes it and hands your encryption key to that page."
-            : "a second browser must also approve."
-        }`
+      ? t(completesReset ? "auth_resetWarningCompletes" : "auth_resetWarningSecond", { approvals: request.approvals ?? 0 })
       : request.kind === "web"
-        ? "Approving signs that browser in to your dashboard."
-        : "Approving gives that browser your encryption key and all your synced data.";
+        ? t("auth_webConsequence")
+        : t("auth_deviceConsequence");
     if (isReset) consequence.style.fontWeight = "600";
 
     const prompt = document.createElement("div");
     prompt.className = "item-meta";
-    prompt.textContent = "Approve only if the other screen shows:";
+    prompt.textContent = t("auth_approveOnlyIf");
 
     const fingerprint = document.createElement("div");
     fingerprint.className = "fingerprint";
@@ -1059,9 +1103,7 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
     if (request.kind === "device" || completesReset) {
       const keyCheckLabel = document.createElement("div");
       keyCheckLabel.className = "item-meta";
-      keyCheckLabel.textContent = isReset
-        ? "After you approve, the reset page asks you to confirm this key check phrase:"
-        : "After you approve, the new browser asks you to confirm this key check phrase:";
+      keyCheckLabel.textContent = isReset ? t("auth_keyCheckReset") : t("auth_keyCheckDevice");
       const keyCheck = document.createElement("div");
       keyCheck.className = "fingerprint";
       keyCheck.textContent = await accountKeyCheckPhrase(fromB64(device.accountKey));
@@ -1072,9 +1114,9 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
     actions.className = "auth-actions";
     const approve = document.createElement("button");
     approve.className = "primary";
-    approve.textContent = "Approve";
+    approve.textContent = t("auth_approve");
     const deny = document.createElement("button");
-    deny.textContent = "Deny";
+    deny.textContent = t("auth_deny");
     actions.append(approve, deny);
 
     const error = document.createElement("div");
@@ -1095,10 +1137,10 @@ async function renderAuthRequests(device: DeviceRecord, requests: PendingAuthReq
       } catch (err) {
         error.textContent =
           err instanceof ApiError && err.status === 404
-            ? "This request was already answered or has expired."
+            ? t("auth_alreadyAnswered")
             : err instanceof ApiError && (err.status === 409 || err.status === 422) && isReset
-              ? "This reset changed (this browser already approved, or another one did first). Reopen the popup."
-              : `Failed: ${errorMessage(err)}`;
+              ? t("auth_resetChanged")
+              : t("auth_failed", { message: errorMessage(err) });
         approve.disabled = false;
         deny.disabled = false;
       }
@@ -1151,66 +1193,71 @@ function fillSettingsForm(settings: UserSettingsDto, draft: SettingsDraft): void
 }
 
 async function renderSettings(device: DeviceRecord): Promise<void> {
-  renderHeaderButton("back-to-status", "Back", BACK_ICON, "status");
+  renderHeaderButton("back-to-status", t("header_back"), BACK_ICON, "status");
 
+  const languageField = await languageFieldHtml();
   app.innerHTML = `
     <div class="account-row">
       <span class="email">${escapeAttr(device.email)}</span>
-      <button id="disconnect" class="danger" style="width:auto;margin-top:0;padding:5px 10px;font-size:12px;">Disconnect</button>
+      <button id="disconnect" class="danger" style="width:auto;margin-top:0;padding:5px 10px;font-size:12px;">${th("common_disconnect")}</button>
     </div>
     <fieldset>
-      <legend>Synchronization</legend>
-      <div class="row"><span class="row-label">Bookmarks</span>
+      <legend>${th("settings_sync")}</legend>
+      <div class="row"><span class="row-label">${th("settings_bookmarks")}</span>
         <label class="switch"><input type="checkbox" id="syncBookmarks" /><span class="track"></span></label>
       </div>
-      <div class="row"><span class="row-label">History</span>
+      <div class="row"><span class="row-label">${th("settings_history")}</span>
         <label class="switch"><input type="checkbox" id="syncHistory" /><span class="track"></span></label>
       </div>
-      <div class="row"><span class="row-label">Tabs</span>
+      <div class="row"><span class="row-label">${th("settings_tabs")}</span>
         <label class="switch"><input type="checkbox" id="syncTabs" /><span class="track"></span></label>
       </div>
-      <div class="row"><span class="row-label">Tab Groups</span>
+      <div class="row"><span class="row-label">${th("settings_tabGroups")}</span>
         <label class="switch"><input type="checkbox" id="syncTabGroups" /><span class="track"></span></label>
       </div>
     </fieldset>
     <fieldset>
-      <legend>Tab restore</legend>
+      <legend>${th("settings_tabRestore")}</legend>
       <label class="field">
-        <span>Restore remote tabs</span>
+        <span>${th("settings_restoreRemoteTabs")}</span>
         <select id="tabRestorePolicy">
-          <option value="disabled">Disabled</option>
-          <option value="ask">Ask before restoring</option>
-          <option value="automatic">Automatically restore</option>
+          <option value="disabled">${th("settings_policyDisabled")}</option>
+          <option value="ask">${th("settings_policyAsk")}</option>
+          <option value="automatic">${th("settings_policyAutomatic")}</option>
         </select>
       </label>
     </fieldset>
     <fieldset>
-      <legend>History</legend>
+      <legend>${th("settings_historyLegend")}</legend>
       <label class="field">
-        <span>Retention</span>
+        <span>${th("settings_retention")}</span>
         <select id="historyRetention">
-          <option value="7d">7 days</option>
-          <option value="30d">30 days</option>
-          <option value="90d">90 days</option>
-          <option value="1y">1 year</option>
-          <option value="unlimited">Unlimited</option>
+          <option value="7d">${th("settings_d7")}</option>
+          <option value="30d">${th("settings_d30")}</option>
+          <option value="90d">${th("settings_d90")}</option>
+          <option value="1y">${th("settings_y1")}</option>
+          <option value="unlimited">${th("settings_unlimited")}</option>
         </select>
       </label>
     </fieldset>
     <fieldset>
-      <legend>Restore points</legend>
-      <div class="row" id="restore-points-row" hidden><span class="row-label">Automatic restore points</span>
+      <legend>${th("settings_restorePointsLegend")}</legend>
+      <div class="row" id="restore-points-row" hidden><span class="row-label">${th("settings_autoRestorePoints")}</span>
         <label class="switch"><input type="checkbox" id="restorePointsAutomatic" /><span class="track"></span></label>
       </div>
-      <div class="item-meta">Daily and safety copies of your bookmarks. Manual ones are always available.</div>
+      <div class="item-meta">${th("settings_restorePointsHelp")}</div>
     </fieldset>
     <fieldset>
-      <legend>Account</legend>
-      <div class="row"><span class="row-label">Password</span>
-        <a href="#" id="change-password-link">Change on the web</a>
+      <legend>${th("language_legend")}</legend>
+      ${languageField}
+    </fieldset>
+    <fieldset>
+      <legend>${th("settings_account")}</legend>
+      <div class="row"><span class="row-label">${th("settings_password")}</span>
+        <a href="#" id="change-password-link">${th("settings_changeOnWeb")}</a>
       </div>
     </fieldset>
-    <button id="save-settings" class="primary" disabled>Save</button>
+    <button id="save-settings" class="primary" disabled>${th("settings_save")}</button>
     <div class="status-message" id="status"></div>
   `;
 
@@ -1222,14 +1269,12 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
   });
 
   document.getElementById("disconnect")?.addEventListener("click", async () => {
-    const confirmed = await showConfirmDialog(
-      "Disconnect this device? It will be removed from your account's device list, and you can reconnect any time by signing in again."
-    );
+    const confirmed = await showConfirmDialog(t("settings_disconnectConfirm"));
     if (!confirmed) return;
     const disconnectButton = document.getElementById("disconnect") as HTMLButtonElement | null;
     if (disconnectButton) {
       disconnectButton.disabled = true;
-      disconnectButton.textContent = "Disconnecting…";
+      disconnectButton.textContent = t("settings_disconnecting");
     }
     // Before the local wipe, which deletes the tokens this call needs. The
     // outcome is deliberately ignored: offline or failed, this device still
@@ -1258,10 +1303,10 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
     // The setting is account-wide (it can be turned on from the dashboard or
     // another browser), but each browser grants the permission itself.
     if (inputById("syncTabGroups").checked && !(await chrome.permissions.contains(TAB_GROUPS_PERMISSION))) {
-      status.textContent = "Tab groups need permission in this browser: press Save to allow it.";
+      status.textContent = t("settings_tabGroupsNeedPermission");
     }
   } catch (err) {
-    showError(status, `Failed to load settings: ${errorMessage(err)}`);
+    showError(status, t("settings_loadFailed", { message: errorMessage(err) }));
   }
 
   const persistSettingsDraft = () => {
@@ -1270,11 +1315,14 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
   for (const id of [...SYNC_TOGGLE_IDS, ...SETTINGS_SELECT_IDS, RESTORE_POINTS_TOGGLE_ID]) {
     document.getElementById(id)?.addEventListener("change", persistSettingsDraft);
   }
+  bindLanguageField(async () => {
+    if (loaded) await saveDraft<SettingsDraft>(SETTINGS_DRAFT_KEY, readSettingsForm());
+  });
 
   saveButton.addEventListener("click", async () => {
     if (!loaded) return;
     status.classList.remove("error");
-    status.textContent = "Saving…";
+    status.textContent = t("settings_saving");
     const form = readSettingsForm();
     // Settings are account-wide: sending only what changed here keeps a
     // change made meanwhile on another device or the dashboard.
@@ -1284,7 +1332,7 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
     const tabGroupsGranted = form.syncTabGroups ? chrome.permissions.request(TAB_GROUPS_PERMISSION) : Promise.resolve(true);
     try {
       if (!(await tabGroupsGranted)) {
-        showError(status, "Tab group sync needs the tab groups permission. Allow it, or turn Tab Groups off.");
+        showError(status, t("settings_tabGroupsDenied"));
         return;
       }
       await updateSettings(patch);
@@ -1294,11 +1342,14 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
       connectedView = "status";
       await render();
     } catch (err) {
-      showError(status, `Failed to save: ${errorMessage(err)}`);
+      showError(status, t("settings_saveFailed", { message: errorMessage(err) }));
     }
   });
 }
 
-render().catch((e) => {
-  app.innerHTML = `<p class="meta">Failed to load: ${escapeAttr(String(e))}</p>`;
-});
+initI18n()
+  .catch((e) => console.error("HelixSync: could not load the interface language", e))
+  .then(() => render())
+  .catch((e) => {
+    app.innerHTML = `<p class="meta">${th("app_loadFailed", { message: String(e) })}</p>`;
+  });

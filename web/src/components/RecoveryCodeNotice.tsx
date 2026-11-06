@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useAuth } from "../auth/context";
 import { confirmRecoveryCode } from "../api/client";
 import { recoveryCodesMatch } from "../crypto";
@@ -10,7 +11,8 @@ import {
   savePasskeyRecord,
   sealWithNewPasskey,
 } from "../passkey";
-import { RECOVERY_KIT_STEPS, RECOVERY_KIT_WARNING, recoveryKitDate, recoveryKitText } from "../util/recovery-kit";
+import { recoveryKitDate, recoveryKitSteps, recoveryKitText, recoveryKitWarning } from "../util/recovery-kit";
+import { errorText } from "../i18n/errors";
 
 /** Shows a recovery code once (docs/encryption.md §9.1) and keeps the user
  * on this screen until they type it back: the server keeps only a hash, so it
@@ -34,6 +36,7 @@ export default function RecoveryCodeNotice({
   confirmOnServer?: boolean;
 }) {
   const { markRecoveryCodeConfirmed } = useAuth();
+  const { t } = useTranslation();
   const [typed, setTyped] = useState("");
   const [copied, setCopied] = useState(false);
   const [generatedAt] = useState(() => new Date());
@@ -53,7 +56,7 @@ export default function RecoveryCodeNotice({
   const kit = { email, serverUrl: window.location.origin, code, generatedAt };
 
   function download() {
-    const url = URL.createObjectURL(new Blob([recoveryKitText(kit)], { type: "text/plain" }));
+    const url = URL.createObjectURL(new Blob([recoveryKitText(kit, t)], { type: "text/plain" }));
     const link = document.createElement("a");
     link.href = url;
     link.download = "helixsync-recovery-kit.txt";
@@ -70,7 +73,7 @@ export default function RecoveryCodeNotice({
         await confirmRecoveryCode(code);
         markRecoveryCodeConfirmed();
       } catch {
-        setError("Couldn't record that on the server. Try again.");
+        setError(t("notice.saveFailed"));
         setContinuing(false);
         return;
       }
@@ -81,33 +84,31 @@ export default function RecoveryCodeNotice({
   return (
     <div className="flex flex-col gap-4">
       <p className="text-sm text-slate-700">
-        This is your recovery code. If you forget your password, it's the only way back into your account without
-        losing your synced data. It's shown only now.
+        {t("notice.intro")}
       </p>
       <code className="block text-center font-mono text-lg tracking-wider bg-slate-100 border border-slate-200 rounded px-3 py-3 break-all select-all">
         {code}
       </code>
       <div className="flex gap-2">
         <button type="button" onClick={copy} className="flex-1 rounded border border-slate-300 py-2 text-sm">
-          {copied ? "Copied" : "Copy"}
+          {copied ? t("notice.copied") : t("notice.copy")}
         </button>
         <button
           type="button"
           onClick={() => window.print()}
           className="flex-1 rounded border border-slate-300 py-2 text-sm"
         >
-          Print kit
+          {t("notice.print")}
         </button>
         <button type="button" onClick={download} className="flex-1 rounded border border-slate-300 py-2 text-sm">
-          Download .txt
+          {t("notice.download")}
         </button>
       </div>
       <p className="text-sm text-slate-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
-        Keep it offline, printed or in a password manager. Anyone with this code and your email can reset your
-        password and read your synced data.
+        {t("notice.keepOffline")}
       </p>
       <label className="flex flex-col gap-1 text-sm">
-        Type your recovery code to confirm you saved it
+        {t("notice.typeLabel")}
         <input
           type="text"
           autoComplete="off"
@@ -117,8 +118,8 @@ export default function RecoveryCodeNotice({
           onChange={(e) => setTyped(e.target.value)}
           className="rounded border border-slate-300 px-3 py-2 font-mono"
         />
-        {typed.length > 0 && !matches && <span className="text-xs text-slate-500">Doesn't match yet.</span>}
-        {matches && <span className="text-xs text-emerald-600">Matches.</span>}
+        {typed.length > 0 && !matches && <span className="text-xs text-slate-500">{t("notice.noMatch")}</span>}
+        {matches && <span className="text-xs text-emerald-600">{t("notice.matches")}</span>}
       </label>
       {matches && <PasskeySeal code={code} email={email} />}
       {error && <p className="text-sm text-red-600">{error}</p>}
@@ -128,22 +129,22 @@ export default function RecoveryCodeNotice({
         onClick={onDone}
         className="rounded bg-slate-900 text-white py-2 text-sm font-medium disabled:opacity-50"
       >
-        {continuing ? "Saving…" : continueLabel}
+        {continuing ? t("notice.saving") : continueLabel}
       </button>
 
       <section className="recovery-kit-print" style={{ display: "none" }} aria-hidden="true">
-        <h1 style={{ fontSize: "20pt", fontWeight: 600 }}>HelixSync recovery kit</h1>
-        <p>Account: {email}</p>
-        <p>Server: {kit.serverUrl}</p>
-        <p>Generated: {recoveryKitDate(generatedAt)}</p>
+        <h1 style={{ fontSize: "20pt", fontWeight: 600 }}>{t("kit.title")}</h1>
+        <p>{t("kit.account")}: {email}</p>
+        <p>{t("kit.server")}: {kit.serverUrl}</p>
+        <p>{t("kit.generated")}: {recoveryKitDate(generatedAt)}</p>
         <p style={{ fontFamily: "monospace", fontSize: "16pt", margin: "16pt 0" }}>{code}</p>
-        <p>If you forget your password:</p>
+        <p>{t("kit.ifForget")}</p>
         <ol>
-          {RECOVERY_KIT_STEPS.map((step) => (
+          {recoveryKitSteps(t).map((step) => (
             <li key={step}>{step}</li>
           ))}
         </ol>
-        <p>{RECOVERY_KIT_WARNING}</p>
+        <p>{recoveryKitWarning(t)}</p>
       </section>
     </div>
   );
@@ -153,6 +154,7 @@ export default function RecoveryCodeNotice({
  * existing passkey record is re-sealed with the new code; otherwise a passkey
  * can be added. Never blocks continuing. */
 function PasskeySeal({ code, email }: { code: string; email: string }) {
+  const { t } = useTranslation();
   const [supported, setSupported] = useState(false);
   const [done, setDone] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -171,7 +173,7 @@ function PasskeySeal({ code, email }: { code: string; email: string }) {
 
   if (!supported) return null;
   if (done) {
-    return <p className="text-sm text-emerald-600">Passkey updated. Keep the rescue file somewhere safe.</p>;
+    return <p className="text-sm text-emerald-600">{t("notice.passkeyUpdated")}</p>;
   }
 
   async function run() {
@@ -183,7 +185,7 @@ function PasskeySeal({ code, email }: { code: string; email: string }) {
       downloadRescueFile(record);
       setDone(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "The passkey wasn't used.");
+      setError(errorText(err, "errors.passkeyUnused"));
     } finally {
       setBusy(false);
     }
@@ -192,9 +194,7 @@ function PasskeySeal({ code, email }: { code: string; email: string }) {
   return (
     <div className="flex flex-col gap-2 border border-slate-200 rounded px-3 py-2">
       <p className="text-sm text-slate-700">
-        {existing
-          ? "Your passkey still holds your old code. Seal this new one with it."
-          : "Optional: protect this code with a passkey (fingerprint, OS PIN or security key)."}
+        {existing ? t("notice.passkeyExisting") : t("notice.passkeyNew")}
       </p>
       {error && <p className="text-sm text-red-600">{error}</p>}
       <button
@@ -203,7 +203,7 @@ function PasskeySeal({ code, email }: { code: string; email: string }) {
         onClick={run}
         className="self-start rounded border border-slate-300 px-3 py-2 text-sm disabled:opacity-50"
       >
-        {busy ? "Waiting for the passkey…" : existing ? "Update my passkey" : "Add a passkey"}
+        {busy ? t("notice.waitingPasskey") : existing ? t("notice.updatePasskey") : t("notice.addPasskey")}
       </button>
     </div>
   );

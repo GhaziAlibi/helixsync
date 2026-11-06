@@ -8,6 +8,17 @@ All notable changes to HelixSync are documented here. The format follows
 
 ### Added
 
+- Interface languages. The web dashboard and the extension popup now follow
+  the browser's language and can be switched by hand (dashboard sidebar, popup
+  settings): English, Hungarian, German, Spanish, French, Simplified Chinese
+  and Arabic (shown right to left). The recovery kit is written in the chosen
+  language. The server is unchanged; it still sends English messages, which
+  the clients replace with translated ones.
+
+## [1.0.10] - 2026-11-05
+
+### Added
+
 - Safer account recovery. The dashboard now makes you type your recovery code
   back before it continues, offers a printable recovery kit (or a `.txt`),
   and shows a banner until the current code is confirmed. A forgotten

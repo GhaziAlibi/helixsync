@@ -6,6 +6,7 @@
 import type { RestorePointMeta } from "../api/client";
 import type { OutboxItem } from "../restore-points/outbox";
 import type { RestoreProgress } from "../restore-points/state";
+import { formatDateTime, formatNumber, t, tp } from "../i18n";
 
 export interface ViewContext {
   /** Draws the view again from scratch. */
@@ -19,42 +20,41 @@ interface ServiceError {
 }
 type Reply<T> = ({ ok: true } & T) | { ok: false; error: ServiceError };
 
-const KIND_LABELS: Record<string, string> = {
-  manual: "Manual",
-  scheduled: "Daily",
-  pre_restore: "Before a restore",
-  pre_import: "Before first import",
-  pre_resync: "Before a resync",
-  mass_delete: "Before a mass delete",
-};
+function kindLabel(kind: string): string {
+  const key = `rp_kind_${kind}`;
+  const text = t(key);
+  return text === key ? kind : text;
+}
 
 /** Words for the codes the worker reports. Anything else shows its message. */
 export function describeError(error: ServiceError): string {
   switch (error.code) {
     case "bookmarks_not_ready":
-      return "Bookmarks are still being prepared for sync. Try again in a moment.";
+      return t("rp_err_bookmarksNotReady");
     case "restore_point_limit":
-      return "No room for a new restore point: the rest are pinned. Unpin or delete one first.";
+      return t("rp_err_limit");
     case "restore_point_pin_limit":
-      return "Too many pinned restore points. Unpin one first.";
+      return t("rp_err_pinLimit");
     case "restore_in_progress":
-      return "A restore is already running.";
+      return t("rp_err_inProgress");
     case "unreadable":
-      return "This restore point can't be read, so it was not applied.";
+      return t("rp_err_unreadable");
     case "update_needed":
-      return error.message || "Update the HelixSync extension to use this restore point.";
+      return t("rp_err_updateNeeded");
     case "offline":
-      return "Could not reach the server.";
+      return t("rp_err_offline");
     case "reauth":
-      return "Sign in again to use restore points.";
+      return t("rp_err_reauth");
     case "sync_failed":
-      return "Could not sync before restoring. Check your connection and try again.";
+      return t("rp_err_syncFailed");
     case "pre_restore_failed":
-      return "Could not save a copy of your bookmarks first, so nothing was restored.";
+      return t("rp_err_preRestoreFailed");
     case "unavailable":
-      return "This server does not support restore points.";
+      return t("rp_err_unavailable");
+    case "no_answer":
+      return t("rp_err_noAnswer");
     default:
-      return error.message || "Something went wrong.";
+      return error.message || t("rp_err_generic");
   }
 }
 
@@ -62,7 +62,7 @@ async function ask<T extends object>(message: Record<string, unknown>): Promise<
   try {
     const reply = (await chrome.runtime.sendMessage(message)) as Reply<T> | { error?: string } | undefined;
     if (reply && "ok" in reply) return reply;
-    return { ok: false, error: { code: "failed", message: "The extension did not answer." } };
+    return { ok: false, error: { code: "no_answer", message: "The extension did not answer." } };
   } catch (err) {
     return { ok: false, error: { code: "failed", message: err instanceof Error ? err.message : String(err) } };
   }
@@ -85,22 +85,18 @@ function button(text: string, className?: string): HTMLButtonElement {
 }
 
 export function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024) return `${formatNumber(bytes)} B`;
+  if (bytes < 1024 * 1024) {
+    const digits = bytes < 10 * 1024 ? 1 : 0;
+    return `${formatNumber(bytes / 1024, { minimumFractionDigits: digits, maximumFractionDigits: digits })} KB`;
+  }
+  return `${formatNumber(bytes / (1024 * 1024), { minimumFractionDigits: 1, maximumFractionDigits: 1 })} MB`;
 }
 
-function formatDate(iso: string): string {
-  const date = new Date(iso);
-  return Number.isNaN(date.getTime()) ? iso : date.toLocaleString();
-}
-
-function countLabel(count: number, noun: string): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
-}
+const formatDate = formatDateTime;
 
 export async function renderRestorePointsView(app: HTMLElement, ctx: ViewContext): Promise<void> {
-  app.replaceChildren(el("div", { className: "meta", text: "Loading…" }));
+  app.replaceChildren(el("div", { className: "meta", text: t("rp_loading") }));
 
   // A restore may be running (or have just finished) from an earlier open.
   const current = await ask<{ progress: RestoreProgress }>({ type: "GET_RESTORE_PROGRESS" });
@@ -115,11 +111,8 @@ export async function renderRestorePointsView(app: HTMLElement, ctx: ViewContext
 
   const root = el("div");
   root.append(
-    el("h2", { className: "view-title", text: "Restore points" }),
-    el("p", {
-      className: "view-subtitle",
-      text: "Saved copies of your bookmarks. Roll back to one if something goes wrong.",
-    }),
+    el("h2", { className: "view-title", text: t("rp_title") }),
+    el("p", { className: "view-subtitle", text: t("rp_subtitle") }),
   );
   app.replaceChildren(root);
 
@@ -131,17 +124,17 @@ export async function renderRestorePointsView(app: HTMLElement, ctx: ViewContext
     root.append(
       el("div", {
         className: "status-message",
-        text: "Restore points are not available: this server doesn't support them, or bookmark sync is off or still importing.",
+        text: t("rp_unavailable"),
       }),
     );
     return;
   }
 
   const status = el("div", { className: "status-message" });
-  const create = button("Create restore point", "primary");
+  const create = button(t("rp_create"), "primary");
   create.addEventListener("click", async () => {
     create.disabled = true;
-    create.textContent = "Saving…";
+    create.textContent = t("rp_saving");
     status.className = "status-message";
     status.textContent = "";
     const reply = await ask<{ id: string; uploaded: boolean }>({ type: "CREATE_RESTORE_POINT" });
@@ -149,7 +142,7 @@ export async function renderRestorePointsView(app: HTMLElement, ctx: ViewContext
       status.className = "status-message error";
       status.textContent = describeError(reply.error);
       create.disabled = false;
-      create.textContent = "Create restore point";
+      create.textContent = t("rp_create");
       return;
     }
     await ctx.rerender();
@@ -160,7 +153,7 @@ export async function renderRestorePointsView(app: HTMLElement, ctx: ViewContext
     root.append(
       el("div", {
         className: "meta",
-        text: "Automatic restore points are off (Settings).",
+        text: t("rp_autoOff"),
       }),
     );
   }
@@ -170,46 +163,46 @@ export async function renderRestorePointsView(app: HTMLElement, ctx: ViewContext
   for (const item of listed.pending) {
     const row = el("li", { className: "item" });
     row.append(
-      el("div", { className: "item-title", text: `Uploading… ${KIND_LABELS[item.kind] ?? item.kind}` }),
-      el("div", { className: "item-meta", text: `${formatDate(item.createdAt)} · ${countLabel(item.bookmarkCount, "bookmark")}` }),
+      el("div", { className: "item-title", text: t("rp_uploading", { kind: kindLabel(item.kind) }) }),
+      el("div", { className: "item-meta", text: `${formatDate(item.createdAt)} · ${tp("rp_bookmarks", item.bookmarkCount)}` }),
     );
     list.append(row);
   }
   for (const point of listed.points) list.append(renderPointRow(point, app, ctx, status));
   if (listed.points.length === 0 && listed.pending.length === 0) {
     const empty = el("li", { className: "item" });
-    empty.append(el("div", { className: "item-meta", text: "No restore points yet." }));
+    empty.append(el("div", { className: "item-meta", text: t("rp_empty") }));
     list.append(empty);
   }
-  root.append(el("div", { className: "section-label", text: "Saved" }), list);
+  root.append(el("div", { className: "section-label", text: t("rp_saved") }), list);
 }
 
 function renderPointRow(point: RestorePointMeta, app: HTMLElement, ctx: ViewContext, status: HTMLElement): HTMLElement {
   const row = el("li", { className: "item" });
   const title = el("div", { className: "item-title", text: formatDate(point.createdAt) });
   if (point.pinned) {
-    const badge = el("span", { text: " · Pinned" });
+    const badge = el("span", { text: ` · ${t("rp_pinned")}` });
     badge.style.color = "var(--accent)";
     title.append(badge);
   }
   const meta = el("div", {
     className: "item-meta",
     text: [
-      KIND_LABELS[point.kind] ?? point.kind,
-      point.deviceName ?? "a removed device",
-      countLabel(point.bookmarkCount, "bookmark"),
+      kindLabel(point.kind),
+      point.deviceName ?? t("rp_removedDevice"),
+      tp("rp_bookmarks", point.bookmarkCount),
       formatSize(point.sizeBytes),
     ].join(" · "),
   });
   const restoredLine = point.lastRestoredAt
-    ? el("div", { className: "item-meta", text: `Last restored ${formatDate(point.lastRestoredAt)}` })
+    ? el("div", { className: "item-meta", text: t("rp_lastRestored", { date: formatDate(point.lastRestoredAt) }) })
     : undefined;
 
   const actions = el("div", { className: "auth-actions" });
   actions.style.marginTop = "6px";
-  const restore = button("Restore…", "primary");
-  const pin = button(point.pinned ? "Unpin" : "Pin");
-  const remove = button("Delete", "danger");
+  const restore = button(t("rp_restoreEllipsis"), "primary");
+  const pin = button(point.pinned ? t("rp_unpin") : t("rp_pin"));
+  const remove = button(t("rp_delete"), "danger");
   for (const b of [restore, pin, remove]) {
     b.style.marginTop = "0";
     b.style.padding = "5px";
@@ -235,8 +228,8 @@ function renderPointRow(point: RestorePointMeta, app: HTMLElement, ctx: ViewCont
   });
   remove.addEventListener("click", async () => {
     const confirmed = await ctx.confirm(
-      `Delete the restore point from ${formatDate(point.createdAt)}? This can't be undone.`,
-      "Delete",
+      t("rp_deleteConfirm", { date: formatDate(point.createdAt) }),
+      t("rp_delete"),
     );
     if (!confirmed) return;
     remove.disabled = true;
@@ -265,7 +258,7 @@ interface FolderInfo {
 }
 
 async function renderRestoreFlow(app: HTMLElement, ctx: ViewContext, point: RestorePointMeta): Promise<void> {
-  app.replaceChildren(el("div", { className: "meta", text: "Opening the restore point…" }));
+  app.replaceChildren(el("div", { className: "meta", text: t("rp_opening") }));
   const tree = await ask<{ folders: FolderInfo[]; bookmarkCount: number }>({
     type: "GET_RESTORE_POINT_TREE",
     pointId: point.id,
@@ -274,11 +267,11 @@ async function renderRestoreFlow(app: HTMLElement, ctx: ViewContext, point: Rest
   const root = el("div");
   app.replaceChildren(root);
   root.append(
-    el("h2", { className: "view-title", text: "Restore" }),
-    el("p", { className: "view-subtitle", text: `From ${formatDate(point.createdAt)}` }),
+    el("h2", { className: "view-title", text: t("rp_restoreTitle") }),
+    el("p", { className: "view-subtitle", text: t("rp_from", { date: formatDate(point.createdAt) }) }),
   );
 
-  const back = button("Back", "ghost");
+  const back = button(t("rp_back"), "ghost");
   back.addEventListener("click", () => void ctx.rerender());
 
   if (!tree.ok) {
@@ -292,18 +285,18 @@ async function renderRestoreFlow(app: HTMLElement, ctx: ViewContext, point: Rest
 
   // Scope
   const scopeBox = el("fieldset");
-  scopeBox.append(el("legend", { text: "What to restore" }));
+  scopeBox.append(el("legend", { text: t("rp_whatToRestore") }));
   const wholeLabel = el("label", { className: "row" });
   const whole = document.createElement("input");
   whole.type = "radio";
   whole.name = "scope";
   whole.checked = true;
-  wholeLabel.append(el("span", { className: "row-label", text: "All bookmarks" }), whole);
+  wholeLabel.append(el("span", { className: "row-label", text: t("rp_allBookmarks") }), whole);
   const folderLabel = el("label", { className: "row" });
   const folderRadio = document.createElement("input");
   folderRadio.type = "radio";
   folderRadio.name = "scope";
-  folderLabel.append(el("span", { className: "row-label", text: "One folder…" }), folderRadio);
+  folderLabel.append(el("span", { className: "row-label", text: t("rp_oneFolder") }), folderRadio);
   const picker = el("div");
   picker.hidden = true;
   const chosen = el("div", { className: "item-meta" });
@@ -311,14 +304,14 @@ async function renderRestoreFlow(app: HTMLElement, ctx: ViewContext, point: Rest
 
   // Mode
   const modeBox = el("fieldset");
-  modeBox.append(el("legend", { text: "How" }));
+  modeBox.append(el("legend", { text: t("rp_how") }));
   const mergeLabel = el("label", { className: "row" });
   const merge = document.createElement("input");
   merge.type = "radio";
   merge.name = "mode";
   merge.checked = true;
   mergeLabel.append(
-    el("span", { className: "row-label", text: "Merge: bring back what's missing, undo edits. Deletes nothing." }),
+    el("span", { className: "row-label", text: t("rp_modeMerge") }),
     merge,
   );
   const exactLabel = el("label", { className: "row" });
@@ -326,14 +319,14 @@ async function renderRestoreFlow(app: HTMLElement, ctx: ViewContext, point: Rest
   exact.type = "radio";
   exact.name = "mode";
   exactLabel.append(
-    el("span", { className: "row-label", text: "Exact: also remove bookmarks that aren't in this point." }),
+    el("span", { className: "row-label", text: t("rp_modeExact") }),
     exact,
   );
   modeBox.append(mergeLabel, exactLabel);
 
   const previewBox = el("div", { className: "status-message" });
-  const previewButton = button("Preview");
-  const restoreButton = button("Restore", "primary");
+  const previewButton = button(t("rp_preview"));
+  const restoreButton = button(t("rp_restoreAction"), "primary");
   restoreButton.disabled = true;
   root.append(scopeBox, modeBox, previewButton, previewBox, restoreButton, back);
 
@@ -352,7 +345,7 @@ async function renderRestoreFlow(app: HTMLElement, ctx: ViewContext, point: Rest
   folderRadio.addEventListener("change", () => {
     picker.hidden = false;
     scope = "";
-    chosen.textContent = "Pick a folder below.";
+    chosen.textContent = t("rp_pickFolderBelow");
     resetPreview();
   });
   merge.addEventListener("change", () => {
@@ -367,19 +360,19 @@ async function renderRestoreFlow(app: HTMLElement, ctx: ViewContext, point: Rest
   renderFolderPicker(picker, tree.folders, (folder) => {
     scope = folder.id;
     scopeTitle = folder.title;
-    chosen.textContent = `Folder: ${folder.title || "(untitled)"}`;
+    chosen.textContent = t("rp_folder", { name: folder.title || t("rp_untitled") });
     resetPreview();
   });
 
   previewButton.addEventListener("click", async () => {
     if (scope === "") {
       previewBox.className = "status-message error";
-      previewBox.textContent = "Pick a folder first.";
+      previewBox.textContent = t("rp_pickFolderFirst");
       return;
     }
     previewButton.disabled = true;
     previewBox.className = "status-message";
-    previewBox.textContent = "Working it out…";
+    previewBox.textContent = t("rp_working");
     const reply = await ask<{
       counts: { restored: number; updated: number; moved: number; deleted: number; skipped: number };
       sample: { restored: string[]; updated: string[]; moved: string[]; deleted: string[] };
@@ -393,41 +386,47 @@ async function renderRestoreFlow(app: HTMLElement, ctx: ViewContext, point: Rest
     previewBox.replaceChildren();
     const { counts, sample } = reply;
     const lines: Array<[string, number, string[]]> = [
-      ["Bring back", counts.restored, sample.restored],
-      ["Change", counts.updated, sample.updated],
-      ["Move", counts.moved, sample.moved],
-      ["Remove", counts.deleted, sample.deleted],
+      ["rp_previewRestored", counts.restored, sample.restored],
+      ["rp_previewUpdated", counts.updated, sample.updated],
+      ["rp_previewMoved", counts.moved, sample.moved],
+      ["rp_previewDeleted", counts.deleted, sample.deleted],
     ];
     const total = lines.reduce((sum, [, n]) => sum + n, 0);
     if (total === 0) {
-      previewBox.textContent = "Nothing to do: your bookmarks already match this restore point.";
+      previewBox.textContent = t("rp_nothingToDo");
       return;
     }
-    for (const [label, n, titles] of lines) {
+    for (const [labelKey, n, titles] of lines) {
       if (n === 0) continue;
-      const line = el("div", { text: `${label} ${countLabel(n, "bookmark or folder")}` });
+      const line = el("div", { text: tp(labelKey, n) });
       line.style.fontWeight = "500";
       previewBox.append(line);
       if (titles.length > 0) {
-        const more = n > titles.length ? `, and ${n - titles.length} more` : "";
-        previewBox.append(el("div", { className: "item-meta", text: titles.map((t) => t || "(untitled)").join(", ") + more }));
+        const shown = titles.map((title) => title || t("rp_untitled")).join(", ");
+        const text = n > titles.length ? t("rp_sampleMore", { titles: shown, more: formatNumber(n - titles.length) }) : shown;
+        previewBox.append(el("div", { className: "item-meta", text }));
       }
     }
     if (counts.skipped > 0) {
       previewBox.append(
-        el("div", { className: "item-meta", text: `${countLabel(counts.skipped, "bookmark")} skipped (unsupported address).` }),
+        el("div", { className: "item-meta", text: tp("rp_skipped", counts.skipped) }),
       );
     }
     restoreButton.disabled = false;
   });
 
   restoreButton.addEventListener("click", async () => {
-    const where = scope === "all" ? "all your bookmarks" : `the folder "${scopeTitle || "(untitled)"}"`;
+    const date = formatDate(point.createdAt);
+    const name = scopeTitle || t("rp_untitled");
     const warning =
       mode === "exact"
-        ? `Restore ${where} exactly? Bookmarks added after ${formatDate(point.createdAt)} will be removed from every device. A copy of your current bookmarks is saved first.`
-        : `Restore ${where} from ${formatDate(point.createdAt)}? A copy of your current bookmarks is saved first.`;
-    if (!(await ctx.confirm(warning, "Restore"))) return;
+        ? scope === "all"
+          ? t("rp_confirmExactAll", { date })
+          : t("rp_confirmExactFolder", { date, name })
+        : scope === "all"
+          ? t("rp_confirmMergeAll", { date })
+          : t("rp_confirmMergeFolder", { date, name });
+    if (!(await ctx.confirm(warning, t("rp_restoreAction")))) return;
     restoreButton.disabled = true;
     const reply = await ask<{ started: true }>({ type: "START_RESTORE", pointId: point.id, mode, scope });
     if (!reply.ok) {
@@ -438,6 +437,11 @@ async function renderRestoreFlow(app: HTMLElement, ctx: ViewContext, point: Rest
     }
     renderProgress(app, ctx);
   });
+}
+
+// The "closed" arrow points to where the text continues.
+function closedArrow(): string {
+  return document.documentElement.dir === "rtl" ? "◂" : "▸";
 }
 
 /** Folders as a tree, children drawn only when their parent is opened. */
@@ -461,18 +465,18 @@ function renderFolderPicker(
     const list = el("ul", { className: "item-list" });
     list.style.maxHeight = "160px";
     list.style.margin = "4px 0";
-    if (depth > 0) list.style.marginLeft = "12px";
+    if (depth > 0) list.style.marginInlineStart = "12px";
     for (const folder of byParent.get(parentKey) ?? []) {
       const item = el("li", { className: "item" });
       const line = el("div", { className: "restore-item" });
       const hasChildren = (byParent.get(folder.id)?.length ?? 0) > 0;
-      const toggle = button(hasChildren ? "▸" : "·", "ghost");
+      const toggle = button(hasChildren ? closedArrow() : "·", "ghost");
       toggle.style.width = "22px";
       toggle.style.padding = "0";
       toggle.style.marginTop = "0";
       toggle.disabled = !hasChildren;
-      const name = button(folder.title || "(untitled)", "ghost");
-      name.style.textAlign = "left";
+      const name = button(folder.title || t("rp_untitled"), "ghost");
+      name.style.textAlign = "start";
       name.style.marginTop = "0";
       name.style.padding = "3px 4px";
       line.append(toggle, name);
@@ -484,7 +488,7 @@ function renderFolderPicker(
         if (opened) {
           opened.remove();
           opened = undefined;
-          toggle.textContent = "▸";
+          toggle.textContent = closedArrow();
           return;
         }
         opened = el("div");
@@ -502,7 +506,7 @@ function renderFolderPicker(
     into.append(list);
   };
   if ((byParent.get("")?.length ?? 0) === 0) {
-    container.append(el("div", { className: "item-meta", text: "This restore point has no folders." }));
+    container.append(el("div", { className: "item-meta", text: t("rp_noFolders") }));
     return;
   }
   draw("", container, 0);
@@ -515,14 +519,14 @@ const PROGRESS_POLL_MS = 700;
 function renderProgress(app: HTMLElement, ctx: ViewContext): void {
   const root = el("div");
   app.replaceChildren(root);
-  root.append(el("h2", { className: "view-title", text: "Restoring" }));
+  root.append(el("h2", { className: "view-title", text: t("rp_restoring") }));
   const message = el("p", { className: "view-subtitle" });
   const bar = document.createElement("progress");
   bar.style.width = "100%";
   bar.max = 1;
   bar.value = 0;
   const result = el("div", { className: "status-message" });
-  const done = button("Done", "primary");
+  const done = button(t("rp_doneButton"), "primary");
   done.hidden = true;
   done.addEventListener("click", () => void ctx.rerender());
   root.append(message, bar, result, done);
@@ -536,24 +540,30 @@ function renderProgress(app: HTMLElement, ctx: ViewContext): void {
       const p = reply.progress;
       bar.max = Math.max(p.total, 1);
       bar.value = p.applied;
-      if (p.phase === "preparing") message.textContent = "Saving a copy of your bookmarks and getting ready…";
-      else if (p.phase === "applying") message.textContent = `Restoring… ${p.applied} of ${p.total}`;
-      else if (p.phase === "finishing") message.textContent = "Finishing…";
+      if (p.phase === "preparing") message.textContent = t("rp_prepare");
+      else if (p.phase === "applying") {
+        message.textContent = t("rp_applying", { applied: formatNumber(p.applied), total: formatNumber(p.total) });
+      } else if (p.phase === "finishing") message.textContent = t("rp_finishing");
       else if (p.phase === "done") {
         stopped = true;
-        message.textContent = "Done.";
+        message.textContent = t("rp_done");
         bar.value = bar.max;
         const c = p.counts;
         result.textContent = c
-          ? `Brought back ${c.restored}, changed ${c.updated}, moved ${c.moved}, removed ${c.deleted}.`
+          ? t("rp_doneCounts", {
+              restored: formatNumber(c.restored),
+              updated: formatNumber(c.updated),
+              moved: formatNumber(c.moved),
+              deleted: formatNumber(c.deleted),
+            })
           : "";
         done.hidden = false;
         return;
       } else if (p.phase === "error") {
         stopped = true;
-        message.textContent = "The restore stopped.";
+        message.textContent = t("rp_stopped");
         result.className = "status-message error";
-        result.textContent = p.error ? describeError(p.error) : "Something went wrong.";
+        result.textContent = p.error ? describeError(p.error) : t("rp_err_generic");
         done.hidden = false;
         return;
       } else if (p.phase === "idle") {

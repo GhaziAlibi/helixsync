@@ -259,7 +259,12 @@ describe("historyBulkEndMs set before capture registration (Change 2)", () => {
     // `historyBulkEndMs` must have been persisted strictly before
     // `registerCapture` (history) was called — not merely "at some point".
     const putIndex = orderLog.indexOf("putDevice:historyBulkEndMs");
-    const registerIndex = orderLog.indexOf("registerHistoryCapture");
+    // Capture is also registered when the worker loads (so an event that wakes
+    // a stopped worker isn't missed); that early call is safe because the
+    // flush runs a delay after the event, by when initialization has persisted
+    // the boundary. What matters here is that the registration made while
+    // initializing comes after it.
+    const registerIndex = orderLog.lastIndexOf("registerHistoryCapture");
     expect(putIndex).toBeGreaterThanOrEqual(0);
     expect(registerIndex).toBeGreaterThanOrEqual(0);
     expect(putIndex).toBeLessThan(registerIndex);
