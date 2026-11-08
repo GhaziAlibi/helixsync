@@ -535,6 +535,7 @@ synced data in it).
 | [`docs/releasing.md`](docs/releasing.md) | How releases are built and published (maintainers) |
 | [`PRIVACY.md`](PRIVACY.md) | What the extension accesses and where data goes |
 | [`SECURITY.md`](SECURITY.md) | How to report a vulnerability privately |
+| [`ACCESSIBILITY.md`](ACCESSIBILITY.md) | Accessibility goals, known limitations, how to report a barrier |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes and upgrade notes |
 
 ## Contributing
