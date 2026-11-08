@@ -29,12 +29,16 @@ Nothing is tagged, pushed or published until the CI workflow
    release only if its files differ. A change only in `extension/firefox/`
    therefore releases Firefox alone, one only in `extension/chrome/` Chrome
    alone, and one in shared code whichever packages it actually changed.
-   Firefox installs the Firefox zip only after Mozilla has signed it;
-   uploading it to addons.mozilla.org is manual for now.
+   Firefox installs the Firefox zip only after Mozilla has signed it.
 4. **Chrome Web Store.** When the Chrome zip changed, it is uploaded to the
    Web Store from a separate, protected job (below). The upload is staged:
    after the store approves it, releasing it to users is a manual click in
    the Web Store developer dashboard.
+5. **addons.mozilla.org.** When the Firefox zip changed, it is submitted to
+   AMO as a new listed version of `helixsync@ghazialibi.github.io`, with the
+   source code (the commit, with the stamped manifest versions) and build
+   notes for the reviewers, from a separate, protected job (below). Mozilla
+   reviews, signs and publishes it; nothing else is clicked.
 
 Pull requests run the same builds but push, tag and publish nothing.
 
@@ -61,9 +65,14 @@ credentials, so it should be protected:
    skips itself while `CHROME_EXTENSION_ID` is unset, so releases keep working
    before this is set up. The store item must already exist from a manual first
    submission; the API can only publish updates to it.
-3. In Settings → Code security, enable **private vulnerability reporting**
+3. **Create the `firefox-amo` environment** the same way, with the AMO API
+   keys (addons.mozilla.org Developer Hub → Tools → Manage API Keys) as
+   environment secrets `AMO_JWT_ISSUER` and `AMO_JWT_SECRET`. The publish job
+   skips itself while `AMO_JWT_ISSUER` is unset. The add-on must already exist
+   on AMO from a manual first upload; the job only adds versions to it.
+4. In Settings → Code security, enable **private vulnerability reporting**
    (the link in [`SECURITY.md`](../SECURITY.md) depends on it).
-4. In Settings → Branches, add a **protection rule for `main`** that requires
+5. In Settings → Branches, add a **protection rule for `main`** that requires
    pull requests and the status checks from `ci.yml` (`Server (fmt, clippy,
    tests)`, `Extension (typecheck, tests, build)`, `Web (typecheck, tests,
    build)`, `Audit (npm, cargo)`). The release workflow commits the version

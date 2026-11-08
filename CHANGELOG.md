@@ -15,7 +15,9 @@ All notable changes to HelixSync are documented here. The format follows
   folders map to the same synced roots as Chromium's; its Bookmarks Menu
   shows on Chromium as a "Bookmarks menu" folder, made only once something
   in it syncs; separators sync as `https://separator.floccus.org/` bookmarks
-  (floccus's convention). See `docs/firefox.md`.
+  (floccus's convention). See `docs/firefox.md`. It is published on
+  addons.mozilla.org as `helixsync@ghazialibi.github.io`; releases submit
+  each changed version there automatically.
 
 - Per-browser releases. Browser-specific extension code moved to
   `extension/chrome/` and `extension/firefox/`; releases attach, and publish

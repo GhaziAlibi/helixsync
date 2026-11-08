@@ -20,7 +20,11 @@
   ],
   "browser_specific_settings": {
     "gecko": {
-      "strict_min_version": "159.0"
+      "id": "helixsync@ghazialibi.github.io",
+      "strict_min_version": "159.0",
+      "data_collection_permissions": {
+        "required": ["bookmarksInfo", "browsingActivity"]
+      }
     }
   },
   "background": {

@@ -271,6 +271,10 @@ jobs:
         run: |
           (cd dist && zip -r "../helixsync-extension-${VERSION}.zip" .)
           (cd dist-firefox && zip -r "../helixsync-extension-firefox-${VERSION}.zip" .)
+          # Source for AMO's reviewers: the commit plus the stamped manifest
+          # versions, so their build matches the package exactly.
+          ref=$(git -c user.name=ci -c user.email=ci@localhost stash create)
+          git -C .. archive --format=zip -o "extension/helixsync-extension-firefox-source-${VERSION}.zip" "${ref:-HEAD}"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -285,6 +289,13 @@ jobs:
         with:
           name: helixsync-extension-firefox
           path: extension/helixsync-extension-firefox-${{ needs.version.outputs.version }}.zip
+          retention-days: 30
+
+      - name: Upload Firefox source artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: helixsync-extension-firefox-source
+          path: extension/helixsync-extension-firefox-source-${{ needs.version.outputs.version }}.zip
           retention-days: 30
 
   # Decides which browsers this run releases: a package is released only when
@@ -490,3 +501,102 @@ jobs:
             -H "Authorization: Bearer $access_token" \
             -H "Content-Type: application/json" \
             -d '{"publishType":"STAGED_PUBLISH"}' > /dev/null
+
+  # Submits this version to addons.mozilla.org, which reviews, signs and
+  # publishes it. Built like publish-chrome-web-store: the AMO_* secrets live
+  # in a protected `firefox-amo` environment, and the job only downloads the
+  # already-built zips and calls AMO's API with curl and openssl, so no
+  # package install script ever runs next to them. The add-on must already
+  # exist on AMO (first version uploaded by hand) under the manifest's
+  # gecko.id. Skips itself while AMO_JWT_ISSUER is unset.
+  #
+  # Runs only when the Firefox package changed (`extension-changes`).
+  publish-firefox-amo:
+    needs: [ci, version, extension, extension-changes]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' && needs.extension-changes.outputs.firefox == 'true' }}
+    runs-on: ubuntu-latest
+    environment: firefox-amo
+    concurrency:
+      group: release-publish-firefox
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helixsync-extension-firefox
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helixsync-extension-firefox-source
+
+      - name: Submit to addons.mozilla.org
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          if [ -z "$AMO_JWT_ISSUER" ]; then
+            echo "AMO_JWT_ISSUER not set, skipping AMO submission"
+            exit 0
+          fi
+          api=https://addons.mozilla.org/api/v5/addons
+          zip="helixsync-extension-firefox-${VERSION}.zip"
+          source="helixsync-extension-firefox-source-${VERSION}.zip"
+          guid=$(unzip -p "$zip" manifest.json | jq -er '.browser_specific_settings.gecko.id')
+
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          # A fresh token per call: AMO wants a unique jti and exp <= iat + 5 min.
+          token() {
+            local now header payload sig
+            now=$(date +%s)
+            header=$(printf '%s' '{"alg":"HS256","typ":"JWT"}' | b64url)
+            payload=$(jq -nc --arg iss "$AMO_JWT_ISSUER" --arg jti "$(openssl rand -hex 16)" \
+              --argjson iat "$now" --argjson exp "$((now + 240))" \
+              '{iss: $iss, jti: $jti, iat: $iat, exp: $exp}' | b64url)
+            sig=$(printf '%s' "$header.$payload" | openssl dgst -sha256 -hmac "$AMO_JWT_SECRET" -binary | b64url)
+            printf '%s' "$header.$payload.$sig"
+          }
+          # Prints the body; on a non-2xx status prints it to stderr and fails.
+          call() {
+            local method="$1" url="$2" status
+            shift 2
+            status=$(curl -s -o /tmp/amo_response.json -w '%{http_code}' -X "$method" \
+              -H "Authorization: JWT $(token)" "$@" "$url")
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+              echo "AMO API call failed: $method $url (HTTP $status)" >&2
+              cat /tmp/amo_response.json >&2
+              exit 1
+            fi
+            cat /tmp/amo_response.json
+          }
+
+          uuid=$(call POST "$api/upload/" -F "upload=@$zip" -F channel=listed | jq -er '.uuid')
+
+          # Wait for AMO's validator (usually under a minute).
+          for _ in $(seq 60); do
+            upload=$(call GET "$api/upload/$uuid/")
+            [ "$(echo "$upload" | jq -r '.processed')" = true ] && break
+            sleep 10
+          done
+          if [ "$(echo "$upload" | jq -r '.processed')" != true ]; then
+            echo "AMO did not finish validating upload $uuid in time" >&2
+            exit 1
+          fi
+          if [ "$(echo "$upload" | jq -r '.valid')" != true ]; then
+            echo "AMO rejected the package:" >&2
+            echo "$upload" | jq '.validation' >&2
+            exit 1
+          fi
+
+          # The license is inherited from the previous version.
+          version_id=$(call POST "$api/addon/$guid/versions/" \
+            -F "upload=$uuid" -F "source=@$source" | jq -er '.id')
+
+          notes='Build: Node.js 22, npm 10. From the source root: cd extension && npm ci && npm run build:firefox. Output: extension/dist-firefox/, identical to the package. Testing needs a HelixSync server: docker compose up (see README.md). innerHTML values in the popup are escaped (src/popup/main.ts, th/esc helpers).'
+          call PATCH "$api/addon/$guid/versions/$version_id/" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg n "$notes" '{approval_notes: $n}')" > /dev/null
+
+          echo "Submitted $VERSION to AMO for review (version $version_id)"
