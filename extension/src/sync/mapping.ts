@@ -2,6 +2,7 @@ import {
   deleteMappingByLocalId,
   getMappingByLocalId,
   getMappingByObjectId,
+  getOrPutMapping,
   putMapping,
 } from "../storage/db";
 import type { ObjectType } from "./types";
@@ -26,9 +27,16 @@ export async function getOrCreateObjectId(
   const existing = await getMappingByLocalId(objectType, chromiumLocalId);
   if (existing) return existing.objectId;
 
-  const objectId = uuidv7();
-  await saveMapping(objectType, chromiumLocalId, objectId);
-  return objectId;
+  // Two flushes can capture one new tab at the same time; minting in the same
+  // transaction as the read keeps them on one objectId (a second one would be
+  // a duplicate tab on every other device, never closed).
+  const stored = await getOrPutMapping({
+    key: `${objectType}:${chromiumLocalId}`,
+    objectType,
+    chromiumLocalId,
+    objectId: uuidv7(),
+  });
+  return stored.objectId;
 }
 
 export async function lookupObjectId(

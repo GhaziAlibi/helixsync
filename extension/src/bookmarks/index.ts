@@ -52,7 +52,8 @@ import {
   standInRootObjectId,
   type BookmarkRoots,
 } from "./roots";
-import { isFirefox } from "../util/browser";
+import { platform } from "@platform";
+import type { BookmarkNodeLike } from "../platform";
 import { chunk } from "../util/chunk";
 import { keyBetween } from "../util/fractional-index";
 import { uuidv7 } from "../util/uuid";
@@ -73,39 +74,12 @@ const roots = (): Promise<BookmarkRoots> => bookmarkRoots(guard);
 type BookmarkMove = { parent: string; position: string };
 type RecordedMove = { parent?: string | null; position?: string };
 
-// Firefox has bookmark separators; Chromium doesn't. A separator syncs as a
-// bookmark with this URL (floccus's convention, so the two interoperate):
-// Chromium shows it as a plain bookmark, Firefox turns it back into a
-// separator. Firefox's own separator nodes carry `url: "data:"`.
-export const SEPARATOR_URL = "https://separator.floccus.org/";
-export const SEPARATOR_TITLE = "⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯";
+// What a native node syncs as. Differs per browser: Firefox's separators
+// sync as marker bookmarks (firefox/platform.ts).
+const syncedUrl = (node: BookmarkNodeLike): string | undefined => platform.syncedUrl(node);
+const syncedTitle = (node: BookmarkNodeLike): string => platform.syncedTitle(node);
 
-type NodeLike = { url?: string; title?: string; type?: string };
-
-export function isSeparatorNode(node: NodeLike): boolean {
-  return node.type === "separator";
-}
-
-export function isSeparatorUrl(url: string | null | undefined): boolean {
-  if (!url) return false;
-  try {
-    return new URL(url).hostname === "separator.floccus.org";
-  } catch {
-    return false;
-  }
-}
-
-/** The URL a node syncs with: a separator's marker, else its own. */
-export function syncedUrl(node: NodeLike): string | undefined {
-  return isSeparatorNode(node) ? SEPARATOR_URL : node.url;
-}
-
-/** The title a node syncs with. */
-export function syncedTitle(node: NodeLike): string {
-  return isSeparatorNode(node) ? SEPARATOR_TITLE : (node.title ?? "");
-}
-
-function bookmarkObjectType(node: NodeLike): ObjectType {
+function bookmarkObjectType(node: BookmarkNodeLike): ObjectType {
   return syncedUrl(node) ? "bookmark" : "bookmarkFolder";
 }
 
@@ -358,7 +332,7 @@ async function stageChanged(
   if (!objectId) return null;
   const node = nodeCache?.get(id) ?? (await chrome.bookmarks.get(id))[0];
   // A separator has nothing to change; its title and URL are fixed.
-  if (isSeparatorNode(node)) return null;
+  if (platform.isSeparatorNode(node)) return null;
   const objectType = bookmarkObjectType(node);
 
   const payload: Partial<BookmarkPayload> = {};
@@ -1062,13 +1036,11 @@ async function materialize(
   }
 
   const created = await guard.run(() =>
-    isFirefox() && isSeparatorUrl(p.url)
-      ? chrome.bookmarks.create({ parentId: parentChromiumId, type: "separator" } as chrome.bookmarks.CreateDetails)
-      : chrome.bookmarks.create({
-          parentId: parentChromiumId,
-          title: p.title,
-          url: p.url ?? undefined,
-        }),
+    platform.createBookmark({
+      parentId: parentChromiumId,
+      title: p.title,
+      url: p.url ?? undefined,
+    }),
   );
   await establishMapping(MAP_TYPE, created.id, objectId);
   prefetched?.set(objectId, created.id);
@@ -1083,17 +1055,8 @@ async function materializeLazyRoot(rootObjectId: string): Promise<void> {
   if (chromiumIdByObjectId.has(rootObjectId)) await retryDeferredParent(rootObjectId);
 }
 
-/** On Firefox, true when the node is a separator, whose title and URL can't
- * be set. */
-async function isLocalSeparator(chromiumId: string): Promise<boolean> {
-  if (!isFirefox()) return false;
-  try {
-    const [node] = await chrome.bookmarks.get(chromiumId);
-    return !!node && isSeparatorNode(node);
-  } catch {
-    return false;
-  }
-}
+/** True when the node is a separator, whose title and URL can't be set. */
+const isLocalSeparator = (chromiumId: string): Promise<boolean> => platform.isLocalSeparator(chromiumId);
 
 // IPC-heavy iterations (each may create a bookmark and recurse), so this
 // yields more often than the crypto loops do.

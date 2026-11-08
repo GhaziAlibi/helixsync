@@ -13,5 +13,5 @@
 - [ ] If I added or changed a `sqlx::query!` family macro in `server/src`, I regenerated and committed `server/.sqlx/` (`cargo sqlx prepare`).
 - [ ] If I changed the wire format, an endpoint or the schema, I updated `docs/protocol.md` and the other affected docs.
 - [ ] I added a line under "Unreleased" in `CHANGELOG.md` for anything users or operators will notice.
-- [ ] I did not edit `VERSION` or the version in `extension/manifest.json` (release automation owns them).
+- [ ] I did not edit `VERSION` or the version in `extension/chrome/manifest.json` or `extension/firefox/manifest.json` (release automation owns them).
 - [ ] No secrets, personal data or real browsing data in code, tests, logs or screenshots.

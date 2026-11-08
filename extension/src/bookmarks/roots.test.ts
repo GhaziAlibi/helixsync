@@ -44,7 +44,6 @@ describe("bookmarkRoots", () => {
     vi.clearAllMocks();
     stored = {};
     invalidateBookmarkRoots();
-    delete (globalThis as { location?: unknown }).location;
   });
 
   it("uses the built-in roots and creates nothing on desktop", async () => {
@@ -192,35 +191,5 @@ describe("bookmarkRoots", () => {
     invalidateBookmarkRoots();
     expect((await bookmarkRoots(guard)).chromiumIdByObjectId.get(MENU)).toBe("400");
     expect(createMock).toHaveBeenCalledTimes(1);
-  });
-
-  it("maps Firefox's built-in roots, Bookmarks menu included, and creates nothing", async () => {
-    (globalThis as { location?: unknown }).location = { protocol: "moz-extension:" };
-    getChildrenMock.mockImplementation(async (parentId) =>
-      parentId === "root________"
-        ? [{ id: "menu________" }, { id: "toolbar_____" }, { id: "unfiled_____" }, { id: "mobile______" }]
-        : [],
-    );
-
-    const roots = await bookmarkRoots(guard);
-
-    expect(createMock).not.toHaveBeenCalled();
-    expect(roots.standInIds.size).toBe(0);
-    const expected: Record<string, string> = {
-      root________: ROOT_OBJECT_IDS["0"],
-      toolbar_____: ROOT_OBJECT_IDS["1"],
-      unfiled_____: ROOT_OBJECT_IDS["2"],
-      mobile______: ROOT_OBJECT_IDS["3"],
-      menu________: MENU,
-    };
-    for (const [firefoxId, objectId] of Object.entries(expected)) {
-      expect(roots.objectIdByChromiumId.get(firefoxId)).toBe(objectId);
-      expect(roots.chromiumIdByObjectId.get(objectId)).toBe(firefoxId);
-      expect(isNativeRootId(firefoxId)).toBe(true);
-    }
-    expect(isNativeRootId("1")).toBe(false);
-    // Already there, so nothing to make.
-    expect((await ensureStandInRoot(guard, MENU)).chromiumIdByObjectId.get(MENU)).toBe("menu________");
-    expect(createMock).not.toHaveBeenCalled();
   });
 });

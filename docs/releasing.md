@@ -15,22 +15,26 @@ Nothing is tagged, pushed or published until the CI workflow
 1. **Version.** [`VERSION`](../VERSION) is the single source of truth. If the
    push itself changed `VERSION` (a deliberate minor or major bump), that value
    is used as-is. Otherwise the workflow bumps the patch number and commits it
-   to `main`. It then copies the version into `extension/manifest.json` and
-   tags `vX.Y.Z`.
+   to `main`. It then copies the version into `extension/chrome/manifest.json`
+   and `extension/firefox/manifest.json` and tags `vX.Y.Z`.
 2. **Images.** The `server` and `web` images are built and pushed to GitHub
    Container Registry as `ghcr.io/<owner>/helixsync-server` and
    `ghcr.io/<owner>/helixsync-web`, tagged `latest` and with the release
    version. Deployments should pin the version rather than follow `latest`.
 3. **Extension.** The extension is built and tested, zipped as
    `helixsync-extension-<version>.zip` (Chromium) and
-   `helixsync-extension-firefox-<version>.zip` (Firefox, unsigned), and both
-   are attached to the GitHub release. Firefox installs the Firefox zip only
-   after Mozilla has signed it; uploading it to addons.mozilla.org is manual
-   for now.
-4. **Chrome Web Store.** The same zip is uploaded to the Web Store from a
-   separate, protected job (below). The upload is staged: after the store
-   approves it, releasing it to users is a manual click in the Web Store
-   developer dashboard.
+   `helixsync-extension-firefox-<version>.zip` (Firefox, unsigned).
+   Each zip is compared with the same browser's zip in the last release that
+   has one, ignoring the manifest's version, and is attached to the GitHub
+   release only if its files differ. A change only in `extension/firefox/`
+   therefore releases Firefox alone, one only in `extension/chrome/` Chrome
+   alone, and one in shared code whichever packages it actually changed.
+   Firefox installs the Firefox zip only after Mozilla has signed it;
+   uploading it to addons.mozilla.org is manual for now.
+4. **Chrome Web Store.** When the Chrome zip changed, it is uploaded to the
+   Web Store from a separate, protected job (below). The upload is staged:
+   after the store approves it, releasing it to users is a manual click in
+   the Web Store developer dashboard.
 
 Pull requests run the same builds but push, tag and publish nothing.
 
@@ -38,7 +42,7 @@ Pull requests run the same builds but push, tag and publish nothing.
 version too, but nothing depends on them matching exactly between releases. A
 maintainer updates them when bumping a minor or major version.
 
-Contributors never change `VERSION` or the version in `extension/manifest.json`
+Contributors never change `VERSION` or the version in either extension manifest
 in an ordinary pull request.
 
 ## One-time repository setup

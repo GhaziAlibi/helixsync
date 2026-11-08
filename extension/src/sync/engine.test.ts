@@ -92,6 +92,7 @@ class FakeApiError extends Error {
 vi.mock("../api/client", () => ({
   ApiError: FakeApiError,
   NetworkError: class NetworkError extends TypeError {},
+  ReauthRequiredError: class ReauthRequiredError extends Error {},
   uploadOperations: (ops: LocalOperation[]) => uploadOperationsMock(ops),
   downloadChanges: vi.fn(),
   fetchSnapshot: vi.fn(),
@@ -99,7 +100,7 @@ vi.mock("../api/client", () => ({
 
 const { uploadPending, runSyncCycle, clearSyncBlockedState, MAX_UPLOAD_ATTEMPTS, applySnapshot, downloadAndApply, shouldChainAnotherCycle, registerApplier, onStatusChange } = await import("./engine");
 const { getDevice, getPendingOperations, markAppliedBatch, getSyncState, updateSyncState, getAppliedOperationIds } = await import("../storage/db");
-const { downloadChanges } = await import("../api/client");
+const { downloadChanges, ReauthRequiredError } = await import("../api/client");
 
 function pendingRecord(operationId: string): PendingOperationRecord {
   return {
@@ -1096,6 +1097,30 @@ describe("envelope version handling in downloadAndApply / applySnapshot", () => 
     expect(last[1]).toMatch(/Update the HelixSync extension/);
     expect(markedApplied()).not.toContain("op-unreadable");
     expect(updateSyncState).not.toHaveBeenCalled();
+  });
+
+  // The server no longer accepts this device (revoked, account deleted,
+  // session expired): an expected state the popup shows, not a fault, so it
+  // is reported as "needs re-authorization" and nothing is logged as an error
+  // (found end to end, after deleting the account).
+  it("reports a refused device as needing re-authorization, without logging an error", async () => {
+    stubChromeStorageSession();
+    await clearSyncBlockedState();
+    vi.mocked(getPendingOperations).mockReset();
+    vi.mocked(getPendingOperations).mockImplementation(async () => []);
+    vi.mocked(downloadChanges).mockRejectedValue(new ReauthRequiredError("refresh failed with status 401"));
+    const consoleError = vi.spyOn(console, "error");
+    const statuses: Array<[string, string | undefined]> = [];
+    const unsubscribe = onStatusChange((status, detail) => statuses.push([status, detail]));
+    try {
+      await runSyncCycle();
+    } finally {
+      unsubscribe();
+    }
+
+    expect(statuses[statuses.length - 1]).toEqual(["needs_reauth", "refresh failed with status 401"]);
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
   });
 });
 

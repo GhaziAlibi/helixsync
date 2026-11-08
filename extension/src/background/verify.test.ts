@@ -286,6 +286,22 @@ describe("historyBulkEndMs set before capture registration (Change 2)", () => {
 });
 
 describe("badge throttle (perf fix P3)", () => {
+  it("clears the badge without reading settings while no device is connected", async () => {
+    const { getDevice } = await import("../storage/db");
+    vi.mocked(getDevice).mockResolvedValueOnce(undefined);
+    const warn = vi.spyOn(console, "warn");
+    bg.resetBadgeStateForTesting();
+    fetchSettingsCalls = 0;
+    setBadgeCalls = [];
+
+    await bg.updateBadge(true);
+
+    expect(fetchSettingsCalls).toBe(0);
+    expect(setBadgeCalls).toEqual([{ text: "" }]);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it("throttles recounts, skips identical badge writes, forces on demand", async () => {
     vi.useFakeTimers();
     try {

@@ -42,6 +42,7 @@ import {
 import { retentionCutoffMs } from "../util/retention";
 import { assertSecureServerUrl, InsecureServerUrlError } from "./serverUrl";
 import { renderRestorePointsView } from "./restore-points";
+import { platform } from "@platform";
 import {
   LANGUAGES,
   LANGUAGE_STORAGE_KEY,
@@ -54,13 +55,7 @@ import {
   tp,
 } from "../i18n";
 
-/** The https origin and its wss counterpart (for the WebSocket channel),
- * requested together so the user is prompted only once. */
-function hostPermissionOrigins(serverUrl: string): string[] {
-  const url = new URL(serverUrl);
-  const wsScheme = url.protocol === "https:" ? "wss:" : "ws:";
-  return [`${url.origin}/*`, `${wsScheme}//${url.host}/*`];
-}
+const hostPermissionOrigins = (serverUrl: string): string[] => platform.hostPermissionOrigins(serverUrl);
 
 const app = document.getElementById("app")!;
 const headerActions = document.getElementById("header-actions")!;
@@ -79,7 +74,12 @@ let connectInFlight = false;
 // input is saved to chrome.storage.local as the user types and restored on
 // the next open.
 const SETUP_DRAFT_KEY = "setupDraft";
-const SETTINGS_DRAFT_KEY = "settingsDraft";
+// Only the fields the user changed and hasn't saved: a draft of the whole
+// form would bring back, and then save, values another device or the
+// dashboard has changed since. Drafts under the old key held the whole form,
+// so they are dropped.
+const SETTINGS_DRAFT_KEY = "settingsDraftChanges";
+const LEGACY_SETTINGS_DRAFT_KEY = "settingsDraft";
 // SEC-12: the password goes to chrome.storage.session (memory-only, cleared
 // when the browser exits), never to chrome.storage.local on disk.
 const SETUP_PASSWORD_KEY = "setupDraftPassword";
@@ -1284,6 +1284,7 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
     await invalidateSettingsCache();
     await chrome.runtime.sendMessage({ type: "DEVICE_DISCONNECTED" }).catch(() => {});
     await clearDraft(SETTINGS_DRAFT_KEY);
+    await clearDraft(LEGACY_SETTINGS_DRAFT_KEY);
     await chrome.storage.local.remove(OLDER_HISTORY_OFFER_KEY);
     connectedView = "status";
     await render();
@@ -1294,8 +1295,14 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
   // What the form was filled from; Save sends only fields changed since. Save
   // stays disabled until then: the unfilled form reads as everything off.
   let loaded: SettingsForm | undefined;
+  // Bound before the settings load, so the language can change at once; the
+  // form is kept only once it holds the server's settings.
+  bindLanguageField(async () => {
+    if (loaded) await saveDraft<SettingsDraft>(SETTINGS_DRAFT_KEY, changedSettings(loaded, readSettingsForm()));
+  });
   try {
     const settings = await fetchSettings({ fresh: true });
+    void clearDraft(LEGACY_SETTINGS_DRAFT_KEY);
     const draft = (await loadDraft<SettingsDraft>(SETTINGS_DRAFT_KEY)) ?? {};
     fillSettingsForm(settings, draft);
     loaded = settings;
@@ -1310,15 +1317,11 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
   }
 
   const persistSettingsDraft = () => {
-    saveDraftDebounced<SettingsDraft>(SETTINGS_DRAFT_KEY, readSettingsForm());
+    if (loaded) saveDraftDebounced<SettingsDraft>(SETTINGS_DRAFT_KEY, changedSettings(loaded, readSettingsForm()));
   };
   for (const id of [...SYNC_TOGGLE_IDS, ...SETTINGS_SELECT_IDS, RESTORE_POINTS_TOGGLE_ID]) {
     document.getElementById(id)?.addEventListener("change", persistSettingsDraft);
   }
-  bindLanguageField(async () => {
-    if (loaded) await saveDraft<SettingsDraft>(SETTINGS_DRAFT_KEY, readSettingsForm());
-  });
-
   saveButton.addEventListener("click", async () => {
     if (!loaded) return;
     status.classList.remove("error");

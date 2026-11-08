@@ -12,7 +12,7 @@ yourself, with no Google, Microsoft, or other third-party account involved.
 
 It works with **Helium** and any other Chromium-based browser (Chrome, Brave,
 Edge, Vivaldi, ...) through a Manifest V3 extension (Chromium 116 or newer),
-and with **Firefox** desktop 115 or newer (see [`docs/firefox.md`](docs/firefox.md)).
+and with **Firefox** desktop 159 or newer (see [`docs/firefox.md`](docs/firefox.md)).
 
 - **You own the data.** Everything lives in a PostgreSQL database on your own
   server.

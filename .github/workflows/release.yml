@@ -124,17 +124,23 @@ jobs:
           git commit -m "chore: bump version to $new_version"
           git push origin HEAD:main
 
-      - name: Sync manifest version with VERSION
+      - name: Sync manifest versions with VERSION
         if: github.event_name == 'push'
         run: |
           version=$(tr -d '[:space:]' < VERSION)
-          current=$(jq -r '.version' extension/manifest.json)
-          if [ "$current" != "$version" ]; then
-            jq --arg v "$version" '.version = $v' extension/manifest.json > extension/manifest.json.tmp
-            mv extension/manifest.json.tmp extension/manifest.json
+          changed=false
+          for manifest in extension/chrome/manifest.json extension/firefox/manifest.json; do
+            current=$(jq -r '.version' "$manifest")
+            if [ "$current" != "$version" ]; then
+              jq --arg v "$version" '.version = $v' "$manifest" > "$manifest.tmp"
+              mv "$manifest.tmp" "$manifest"
+              git add "$manifest"
+              changed=true
+            fi
+          done
+          if [ "$changed" = true ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add extension/manifest.json
             git commit -m "chore: sync manifest version to $version"
             git push origin HEAD:main
           fi
@@ -249,10 +255,12 @@ jobs:
           cache: npm
           cache-dependency-path: extension/package-lock.json
 
-      - name: Stamp manifest version
+      - name: Stamp manifest versions
         run: |
-          jq --arg v "$VERSION" '.version = $v' manifest.json > manifest.json.tmp
-          mv manifest.json.tmp manifest.json
+          for manifest in chrome/manifest.json firefox/manifest.json; do
+            jq --arg v "$VERSION" '.version = $v' "$manifest" > "$manifest.tmp"
+            mv "$manifest.tmp" "$manifest"
+          done
 
       - run: npm ci
       - run: npm run build
@@ -279,12 +287,86 @@ jobs:
           path: extension/helixsync-extension-firefox-${{ needs.version.outputs.version }}.zip
           retention-days: 30
 
-  # Attaches the built zip to the GitHub release. Can write to the repository,
-  # so it only downloads the artifact and calls the preinstalled `gh`: no
-  # install step, no third-party action.
-  release-extension:
+  # Decides which browsers this run releases: a package is released only when
+  # it differs from the one in the last GitHub release that shipped it. Most
+  # changes are to shared code (extension/src/), so the paths a push touched
+  # can't tell which package changed; the built files can. Chrome and Firefox
+  # code is kept apart (extension/chrome/, extension/firefox/, `@platform`),
+  # so a Firefox-only change leaves the Chrome package byte-identical and
+  # nothing is published to the Chrome Web Store. The manifest's version is
+  # ignored, since every run stamps a new one. No install step, no
+  # third-party action: it only downloads zips and compares them.
+  extension-changes:
     needs: [ci, version, extension]
     if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      chrome: ${{ steps.compare.outputs.chrome }}
+      firefox: ${{ steps.compare.outputs.firefox }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helixsync-extension
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helixsync-extension-firefox
+
+      - name: Compare with the last released packages
+        id: compare
+        run: |
+          # A failure inside $(changed ...) fails the step rather than being
+          # read as an answer.
+          shopt -s inherit_errexit
+          # Prints "true" unless <zip> has the same files as the newest
+          # earlier release asset matching <pattern>.
+          changed() {
+            local zip="$1" pattern="$2" label="$3" tag asset=""
+            for tag in $(gh release list --limit 100 --json tagName,isDraft \
+              | jq -r '.[] | select(.isDraft | not) | .tagName'); do
+              [ "$tag" = "v$VERSION" ] && continue
+              asset=$(gh release view "$tag" --json assets \
+                | jq -r --arg p "$pattern" '[.assets[].name | select(test($p))][0] // empty')
+              [ -n "$asset" ] && break
+            done
+            if [ -z "$asset" ]; then
+              echo "$label: no earlier release has this package" >&2
+              echo true
+              return
+            fi
+            rm -rf "cmp-$label" && mkdir -p "cmp-$label/old" "cmp-$label/new"
+            gh release download "$tag" --pattern "$asset" --dir "cmp-$label"
+            unzip -q "cmp-$label/$asset" -d "cmp-$label/old"
+            unzip -q "$zip" -d "cmp-$label/new"
+            for side in old new; do
+              jq -S 'del(.version)' "cmp-$label/$side/manifest.json" > "cmp-$label/$side/manifest.norm"
+              rm "cmp-$label/$side/manifest.json"
+            done
+            if diff -r "cmp-$label/old" "cmp-$label/new" >&2; then
+              echo "$label: same as $asset ($tag), not releasing" >&2
+              echo false
+            else
+              echo "$label: differs from $asset ($tag)" >&2
+              echo true
+            fi
+          }
+          chrome=$(changed "helixsync-extension-${VERSION}.zip" '^helixsync-extension-[0-9]+\.[0-9]+\.[0-9]+\.zip$' chrome)
+          firefox=$(changed "helixsync-extension-firefox-${VERSION}.zip" '^helixsync-extension-firefox-[0-9]+\.[0-9]+\.[0-9]+\.zip$' firefox)
+          echo "chrome=$chrome" >> "$GITHUB_OUTPUT"
+          echo "firefox=$firefox" >> "$GITHUB_OUTPUT"
+
+  # Attaches the changed zips to the GitHub release. Can write to the
+  # repository, so it only downloads the artifacts and calls the preinstalled
+  # `gh`: no install step, no third-party action.
+  release-extension:
+    needs: [ci, version, extension, extension-changes]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' && needs.extension-changes.result == 'success' && (needs.extension-changes.outputs.chrome == 'true' || needs.extension-changes.outputs.firefox == 'true') }}
     runs-on: ubuntu-latest
     concurrency:
       group: release-extension
@@ -296,6 +378,8 @@ jobs:
       GH_REPO: ${{ github.repository }}
       VERSION: ${{ needs.version.outputs.version }}
       TARGET_SHA: ${{ github.sha }}
+      CHROME_CHANGED: ${{ needs.extension-changes.outputs.chrome }}
+      FIREFOX_CHANGED: ${{ needs.extension-changes.outputs.firefox }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -308,12 +392,13 @@ jobs:
       - name: Attach to GitHub Release
         run: |
           tag="v${VERSION}"
-          zip="helixsync-extension-${VERSION}.zip"
-          firefox_zip="helixsync-extension-firefox-${VERSION}.zip"
+          zips=()
+          [ "$CHROME_CHANGED" = true ] && zips+=("helixsync-extension-${VERSION}.zip")
+          [ "$FIREFOX_CHANGED" = true ] && zips+=("helixsync-extension-firefox-${VERSION}.zip")
           # The release normally exists already (the version job pushed the
           # tag); create it if not, and replace the assets on a re-run.
-          gh release create "$tag" "$zip" "$firefox_zip" --target "$TARGET_SHA" --title "$tag" --generate-notes \
-            || gh release upload "$tag" "$zip" "$firefox_zip" --clobber
+          gh release create "$tag" "${zips[@]}" --target "$TARGET_SHA" --title "$tag" --generate-notes \
+            || gh release upload "$tag" "${zips[@]}" --clobber
 
   # Pushes this version to the Chrome Web Store. Holds the CHROME_* secrets, so
   # it is deliberately tiny: read-only token, a protected `chrome-web-store`
@@ -330,9 +415,12 @@ jobs:
   # before the one-time OAuth setup. The item must already exist in the Web
   # Store dashboard from a prior manual submission; this API can only publish
   # updates to it, not create it the first time.
+  #
+  # Runs only when the Chrome package changed (`extension-changes`), so a
+  # Firefox-only change never reaches the Web Store.
   publish-chrome-web-store:
-    needs: [ci, version, extension]
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' }}
+    needs: [ci, version, extension, extension-changes]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' && needs.extension-changes.outputs.chrome == 'true' }}
     runs-on: ubuntu-latest
     environment: chrome-web-store
     concurrency:

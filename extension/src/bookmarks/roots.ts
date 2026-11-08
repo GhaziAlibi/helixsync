@@ -12,8 +12,8 @@
 // Firefox's Bookmarks menu has no Chromium counterpart. It is a "lazy" root:
 // on Chromium its stand-in is created only once something synced belongs in
 // it (ensureStandInRoot), so devices that never see Firefox get no folder.
+import { platform } from "@platform";
 import type { createSuppressionGuard } from "../sync/suppress";
-import { isFirefox } from "../util/browser";
 
 /** Logical root key -> fixed objectId. Logical keys "0"–"3" equal the
  * Chromium ids. */
@@ -25,24 +25,9 @@ export const ROOT_OBJECT_IDS: Record<string, string> = {
   "4": "00000000-0000-7000-8000-000000000004", // Bookmarks Menu (Firefox)
 };
 
-/** Logical root key -> the browser's id for it. A root missing here never
- * exists natively in that browser. */
-const CHROMIUM_ROOT_IDS: Record<string, string> = { "0": "0", "1": "1", "2": "2", "3": "3" };
-const FIREFOX_ROOT_IDS: Record<string, string> = {
-  "0": "root________",
-  "1": "toolbar_____",
-  "2": "unfiled_____",
-  "3": "mobile______",
-  "4": "menu________",
-};
-
-function nativeRootIds(): Record<string, string> {
-  return isFirefox() ? FIREFOX_ROOT_IDS : CHROMIUM_ROOT_IDS;
-}
-
 /** True when `id` is one of this browser's built-in root folders. */
 export function isNativeRootId(id: string): boolean {
-  return Object.values(nativeRootIds()).includes(id);
+  return Object.values(platform.nativeRootIds).includes(id);
 }
 
 // In the order stand-ins are placed at the top of their host.
@@ -161,7 +146,7 @@ async function mergeStandInIntoRoot(guard: SuppressionGuard, standInId: string, 
 }
 
 async function resolveRoots(guard: SuppressionGuard): Promise<BookmarkRoots> {
-  const native = nativeRootIds();
+  const native = platform.nativeRootIds;
   const shownRootIds = new Set((await chrome.bookmarks.getChildren(native["0"])).map((node) => node.id));
   const hostFor = (preference: string[]) =>
     preference.map((id) => native[id]).find((id) => id !== undefined && shownRootIds.has(id));

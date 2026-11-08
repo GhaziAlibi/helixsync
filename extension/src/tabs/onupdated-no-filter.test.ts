@@ -27,6 +27,8 @@ let onUpdatedCallback: ((tabId: number, changeInfo: never, tab: never) => void) 
 };
 
 vi.mock("../storage/db", () => ({
+  // A connected device: capture is skipped without one.
+  getDevice: vi.fn(async () => ({ deviceId: "device-1" })),
   getFieldState: vi.fn(async () => undefined),
   getFieldStatesForObjects: vi.fn(async () => new Map()),
   getMappingsByLocalIds: vi.fn(async () => new Map()),

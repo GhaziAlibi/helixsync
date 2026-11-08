@@ -30,6 +30,8 @@ vi.mock("../sync/mapping", () => ({
 }));
 
 vi.mock("../storage/db", () => ({
+  // A connected device: capture is skipped without one.
+  getDevice: vi.fn(async () => ({ deviceId: "device-1" })),
   getFieldState: (objectId: string, field: string) => getFieldStateMock(objectId, field),
   getMappingsByLocalIds: vi.fn(async () => new Map()),
   putRemoteObject: vi.fn(),

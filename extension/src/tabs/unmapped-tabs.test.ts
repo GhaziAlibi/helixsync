@@ -31,6 +31,8 @@ const mapped = new Map<string, string>();
 const recordedState = new Map<string, unknown>();
 
 vi.mock("../storage/db", () => ({
+  // A connected device: capture is skipped without one.
+  getDevice: vi.fn(async () => ({ deviceId: "device-1" })),
   getFieldState: vi.fn(async (objectId: string) => {
     const value = recordedState.get(objectId);
     return value === undefined ? undefined : { value };

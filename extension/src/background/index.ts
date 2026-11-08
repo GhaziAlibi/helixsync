@@ -83,7 +83,7 @@ import {
   setTabsCaptureEnabled,
 } from "../tabs";
 import { singleFlight } from "../util/single-flight";
-import { toolbarAction } from "../util/browser";
+import { platform } from "@platform";
 
 const SYNC_ALARM = "helixsync-periodic-sync";
 // A backstop only: WebSocket pushes and local nudges provide the low
@@ -165,12 +165,22 @@ export async function updateBadge(force = false): Promise<void> {
     if (!force && now - lastBadgeAt < BADGE_THROTTLE_MS) {
       return;
     }
+    // Not connected (a new install, or after Disconnect): nothing to show,
+    // and the settings the rest reads need a device.
+    if (!(await getDevice())) {
+      lastBadgeAt = now;
+      if (lastBadgeText !== "" || force) {
+        lastBadgeText = "";
+        await platform.toolbarAction().setBadgeText({ text: "" });
+      }
+      return;
+    }
     // A waiting sign-in request outranks the tab count: it expires soon.
     if (pendingAuthRequestCount > 0) {
       lastBadgeAt = now;
       if (lastBadgeText !== AUTH_REQUEST_BADGE || force) {
         lastBadgeText = AUTH_REQUEST_BADGE;
-        await toolbarAction().setBadgeText({ text: AUTH_REQUEST_BADGE });
+        await platform.toolbarAction().setBadgeText({ text: AUTH_REQUEST_BADGE });
       }
       return;
     }
@@ -178,7 +188,7 @@ export async function updateBadge(force = false): Promise<void> {
     if (tabRestorePolicy !== "ask") {
       if (lastBadgeText !== "") {
         lastBadgeText = "";
-        await toolbarAction().setBadgeText({ text: "" });
+        await platform.toolbarAction().setBadgeText({ text: "" });
       }
       lastBadgeAt = now;
       return;
@@ -188,7 +198,7 @@ export async function updateBadge(force = false): Promise<void> {
     const nextText = pendingCount > 0 ? String(pendingCount) : "";
     if (nextText !== lastBadgeText || force) {
       lastBadgeText = nextText;
-      await toolbarAction().setBadgeText({ text: nextText });
+      await platform.toolbarAction().setBadgeText({ text: nextText });
     }
   } catch (e) {
     console.warn("HelixSync: failed to update restore badge", e);

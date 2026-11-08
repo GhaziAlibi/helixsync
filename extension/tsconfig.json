@@ -10,7 +10,10 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "types": ["chrome", "vite/client"]
+    "types": ["chrome", "vite/client"],
+    // Shared code is type-checked against the Chrome implementation; both
+    // implement the same Platform interface (src/platform.ts).
+    "paths": { "@platform": ["./chrome/platform.ts"] }
   },
-  "include": ["src"]
+  "include": ["src", "chrome", "firefox"]
 }

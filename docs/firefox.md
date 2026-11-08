@@ -1,14 +1,12 @@
 # HelixSync on Firefox
 
-HelixSync runs on Firefox desktop, version 115 or newer, and syncs with
+HelixSync runs on Firefox desktop, version 159 or newer, and syncs with
 Chromium-based browsers on the same account.
 
 ## What's different from Chromium
 
 - **Desktop only.** Firefox for Android has no bookmarks or history API for
   extensions, so the extension can't run there.
-- **Tab groups** sync from Firefox 139 on, where Firefox added the API. On
-  older versions tab group sync stays off; tabs and windows still sync.
 - **Bookmarks Menu.** Firefox's Bookmarks Menu syncs like the other built-in
   folders. Chromium has no such folder, so a Chromium browser shows it as a
   **Bookmarks menu** folder in Other bookmarks. That folder appears only once
@@ -21,6 +19,10 @@ Chromium-based browsers on the same account.
 - **History.** Firefox reports redirects and downloads to extensions as
   ordinary visits, so they sync as normal visits.
 - **Private windows** are never visible to the extension, as on Chromium.
+- **Server permission.** Firefox ignores a site permission that names a
+  port, so for a server such as `http://nas.local:8080` the extension asks
+  for the whole host (`http://nas.local/*`, every port) instead of that one
+  port.
 
 ## Build it yourself
 
@@ -35,7 +37,8 @@ The extension is written to `extension/dist-firefox/`. To try it, open
 and pick `dist-firefox/manifest.json`. A temporary add-on is removed when
 Firefox closes.
 
-The Firefox build is Manifest V2 with a persistent background page, generated
-from `extension/manifest.json` by `src/firefox-manifest.ts`. Firefox
-doesn't suspend a persistent page, so the sync connection stays open, as the
-service worker's does on Chromium.
+The Firefox build is Manifest V2 with a persistent background page
+(`extension/firefox/manifest.json`). Firefox doesn't suspend a persistent
+page, so the sync connection stays open, as the service worker's does on
+Chromium. Everything Firefox-specific is in `extension/firefox/`; the rest is
+shared with Chrome (see "Extension" in `CONTRIBUTING.md`).

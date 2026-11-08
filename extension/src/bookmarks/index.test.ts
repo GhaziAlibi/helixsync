@@ -118,54 +118,8 @@ vi.mock("./roots", async (importOriginal) => {
   };
 });
 
-const {
-  positionOf,
-  computePosition,
-  flushBookmarkEvents,
-  backfillExisting,
-  sortedInsertIndex,
-  moveIndex,
-  SEPARATOR_URL,
-  SEPARATOR_TITLE,
-  isSeparatorUrl,
-  syncedUrl,
-  syncedTitle,
-} = await import("./index");
-
-describe("Firefox separators", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
-
-  it("sync as a bookmark with floccus's marker URL", () => {
-    const separator = { type: "separator", url: "data:", title: "" };
-    expect(syncedUrl(separator)).toBe(SEPARATOR_URL);
-    expect(syncedTitle(separator)).toBe(SEPARATOR_TITLE);
-    expect(syncedUrl({ url: "https://a.example/", title: "A" })).toBe("https://a.example/");
-    expect(syncedUrl({ title: "Folder" })).toBeUndefined();
-  });
-
-  it("recognise the marker by host only", () => {
-    expect(isSeparatorUrl("https://separator.floccus.org/?id=42")).toBe(true);
-    expect(isSeparatorUrl("https://separator.floccus.org/vertical.html")).toBe(true);
-    expect(isSeparatorUrl("https://floccus.org/")).toBe(false);
-    expect(isSeparatorUrl(null)).toBe(false);
-    expect(isSeparatorUrl("not a url")).toBe(false);
-  });
-
-  it("are captured as a create with the marker, not a data: bookmark", async () => {
-    getChildrenMock.mockResolvedValue([]);
-    getFieldStateMock.mockResolvedValue(undefined);
-    const node = { id: "sep-1", parentId: "1", index: 0, type: "separator", url: "data:", title: "" };
-
-    await flushBookmarkEvents([{ kind: "created", id: "sep-1", node: node as unknown as chrome.bookmarks.BookmarkTreeNode }]);
-
-    const [pending] = createLocalOperationsBatchMock.mock.calls[0] as unknown as [PendingLocalOperation[]];
-    expect(pending).toHaveLength(1);
-    expect(pending[0].objectType).toBe("bookmark");
-    expect(pending[0].payload).toMatchObject({ title: SEPARATOR_TITLE, url: SEPARATOR_URL });
-  });
-});
+const { positionOf, computePosition, flushBookmarkEvents, backfillExisting, sortedInsertIndex, moveIndex } =
+  await import("./index");
 
 describe("EXT-03: Sibling IPC and Transaction Amplification in bookmarks", () => {
   beforeEach(() => {
