@@ -13,10 +13,12 @@ const chromeTabsCreateMock = vi.fn(async (props: chrome.tabs.CreateProperties) =
   return { id: 101, ...props } as chrome.tabs.Tab;
 });
 
+const chromeTabsGetMock = vi.fn(async (tabId: number) => ({ id: tabId }) as chrome.tabs.Tab);
 (globalThis as unknown as { chrome: unknown }).chrome = {
   tabs: {
     update: chromeTabsUpdateMock,
     create: chromeTabsCreateMock,
+    get: chromeTabsGetMock,
   },
   tabGroups: undefined,
 };
@@ -38,10 +40,33 @@ vi.mock("../storage/db", () => ({
 }));
 
 const { restoreTab } = await import("./index");
+const { forgetMapping } = await import("../sync/mapping");
 
 describe("materializeTab via restoreTab (EXT-02)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  // A remote update for a tab closed here meanwhile threw "No tab with id"
+  // and failed the whole sync cycle (found end to end).
+  it("leaves a tab closed here meanwhile closed, dropping its link, without failing", async () => {
+    getFieldStateMock.mockResolvedValueOnce({ value: { url: "https://helixsync.test", pinned: false } });
+    lookupChromiumLocalIdMock.mockResolvedValueOnce("43");
+    chromeTabsUpdateMock.mockRejectedValueOnce(new Error("No tab with id: 43."));
+    chromeTabsGetMock.mockRejectedValueOnce(new Error("No tab with id: 43."));
+
+    await expect(restoreTab("remote-tab-43")).resolves.toBeUndefined();
+
+    expect(forgetMapping).toHaveBeenCalledWith("tab", "43");
+    expect(chromeTabsCreateMock).not.toHaveBeenCalled();
+  });
+
+  it("still reports an update failure for a tab that is open", async () => {
+    getFieldStateMock.mockResolvedValueOnce({ value: { url: "https://helixsync.test", pinned: false } });
+    lookupChromiumLocalIdMock.mockResolvedValueOnce("44");
+    chromeTabsUpdateMock.mockRejectedValueOnce(new Error("Tabs cannot be edited right now"));
+
+    await expect(restoreTab("remote-tab-44")).rejects.toThrow("Tabs cannot be edited right now");
   });
 
   it("converts existingChromiumId string to a number when updating an existing tab", async () => {

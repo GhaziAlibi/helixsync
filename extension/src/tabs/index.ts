@@ -1000,9 +1000,20 @@ async function materializeTab(objectId: string, p: TabPayload): Promise<void> {
     if (!Number.isSafeInteger(tabId) || tabId < 0) {
       throw new Error(`Invalid mapped Chromium tab ID: ${existingChromiumId}`);
     }
-    await guard.run(() =>
-      chrome.tabs.update(tabId, { url: p.url, pinned: p.pinned }),
-    );
+    try {
+      await guard.run(() => chrome.tabs.update(tabId, { url: p.url, pinned: p.pinned }));
+    } catch (err) {
+      const stillOpen = await chrome.tabs.get(tabId).then(
+        () => true,
+        () => false,
+      );
+      if (stillOpen) throw err;
+      // Closed here in the meantime: its close is captured on its own, so it
+      // stays closed. A failure here would stop the whole sync (found end to
+      // end); only the stale link is dropped.
+      await forgetMapping(TAB_TYPE, existingChromiumId);
+      return;
+    }
   } else {
     const created = await guard.run(() => chrome.tabs.create({ url: p.url, pinned: p.pinned, active: false }));
     if (created.id !== undefined) {

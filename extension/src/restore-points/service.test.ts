@@ -118,3 +118,23 @@ describe("the small calls", () => {
     expect(service.progress()).toMatchObject({ ok: true, progress: { phase: "idle" } });
   });
 });
+
+// A finished restore stayed reported forever: the popup's Restore points view
+// showed it on every open and its Done button led straight back to it (found
+// end to end). Done now dismisses it.
+describe("dismissProgress", () => {
+  it("forgets a finished or failed restore, so the list shows again", async () => {
+    const { service, state } = await load();
+    state.setRestoreProgress({ phase: "done", applied: 3, total: 3 });
+    expect(service.dismissProgress().progress.phase).toBe("idle");
+    state.setRestoreProgress({ phase: "error", applied: 0, total: 3 });
+    expect(service.dismissProgress().progress.phase).toBe("idle");
+    expect(service.progress().progress.phase).toBe("idle");
+  });
+
+  it("keeps a restore that is still running", async () => {
+    const { service, state } = await load();
+    state.setRestoreProgress({ phase: "applying", applied: 1, total: 3 });
+    expect(service.dismissProgress().progress.phase).toBe("applying");
+  });
+});

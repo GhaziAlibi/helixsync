@@ -48,6 +48,10 @@ All notable changes to HelixSync are documented here. The format follows
   generic sync error; it now shows "Needs re-authorization".
 - Before connecting, and after Disconnect, the extension no longer logs
   errors about having no device.
+- After a restore finished, the popup's Restore points view kept showing it,
+  and Done led back to it; Done now returns to the list.
+- A tab closed while another browser updated it stopped the whole sync; it
+  now stays closed and sync carries on.
 
 ## [1.0.10] - 2026-11-05
 

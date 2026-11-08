@@ -446,6 +446,7 @@ type PopupMessage =
   | { type: "PREVIEW_RESTORE"; pointId: string; mode: "merge" | "exact"; scope: string }
   | { type: "START_RESTORE"; pointId: string; mode: "merge" | "exact"; scope: string }
   | { type: "GET_RESTORE_PROGRESS" }
+  | { type: "DISMISS_RESTORE_PROGRESS" }
   | { type: "SET_RESTORE_POINT_PINNED"; pointId: string; pinned: boolean }
   | { type: "DELETE_RESTORE_POINT"; pointId: string };
 
@@ -500,6 +501,8 @@ async function handleMessage(message: PopupMessage | undefined): Promise<unknown
       return restorePointService.start({ pointId: message.pointId, mode: message.mode, scope: message.scope });
     case "GET_RESTORE_PROGRESS":
       return restorePointService.progress();
+    case "DISMISS_RESTORE_PROGRESS":
+      return restorePointService.dismissProgress();
     case "SET_RESTORE_POINT_PINNED":
       return restorePointService.pin(message.pointId, message.pinned);
     case "DELETE_RESTORE_POINT":

@@ -647,6 +647,103 @@ try {
   }, 120_000);
   check("sync: a page visited while A's worker was stopped reaches B's history", asleepVisit === true);
 
+  // The popup's Restore points screen, clicked through as a user does, in B:
+  // create, pin and unpin, restore one folder exactly (picker, preview,
+  // confirm, progress, Done), and delete.
+  {
+    const UI_FOLDER = `UI restore ${RUN}`;
+    const uiKids = [`https://example.com/ui-kid-1-${RUN}`, `https://example.com/ui-kid-2-${RUN}`];
+    const UI_EXTRA = `https://example.com/ui-kid-extra-${RUN}`;
+    const p = cb.popup;
+    const uiKidsIn = (dev) =>
+      dev.sw.evaluate(async (title) => {
+        const [folder] = (await chrome.bookmarks.search({ title })).filter((n) => !n.url);
+        return folder ? (await chrome.bookmarks.getChildren(folder.id)).map((n) => n.url).sort() : [];
+      }, UI_FOLDER);
+    await b.sw.evaluate(
+      async (args) => {
+        const folder = await chrome.bookmarks.create({ parentId: args.bar, title: args.title });
+        for (const [i, url] of args.urls.entries()) await chrome.bookmarks.create({ parentId: folder.id, title: `ui ${i + 1}`, url });
+      },
+      { bar: b.bar, title: UI_FOLDER, urls: uiKids },
+    );
+    await syncUntil([cb.popup, ca.popup], async () => (await uiKidsIn(a)).length === 2, 90_000);
+
+    const pointRows = () => p.locator("ul.restore-points li", { has: p.locator("button") });
+    const openScreen = async () => {
+      await p.reload();
+      await p.waitForSelector(".status-card");
+      await p.click("#open-restore-points");
+      await p.getByRole("button", { name: "Create restore point", exact: true }).waitFor({ timeout: 30_000 });
+    };
+    await openScreen();
+    const rowsBefore = await pointRows().count();
+    await p.getByRole("button", { name: "Create restore point", exact: true }).click();
+    const created = await waitFor(async () => ((await pointRows().count()) === rowsBefore + 1 ? true : null), { timeout: 30_000, interval: 500 });
+    check("restore points screen: Create restore point adds one to the list", created === true, `${rowsBefore} -> ${await pointRows().count()}`);
+
+    // The newest point is listed first.
+    const newest = () => pointRows().first();
+    await newest().getByRole("button", { name: "Pin", exact: true }).click();
+    const pinnedShown = await waitFor(async () => ((await newest().textContent())?.includes("Pinned") ? true : null), { timeout: 15_000, interval: 300 });
+    await newest().getByRole("button", { name: "Unpin", exact: true }).click();
+    const unpinned = await waitFor(async () => ((await newest().textContent())?.includes("Pinned") ? null : true), { timeout: 15_000, interval: 300 });
+    check("restore points screen: Pin marks the point pinned, Unpin clears it", pinnedShown === true && unpinned === true);
+
+    // Change the folder after the point: remove one bookmark, add another.
+    await b.sw.evaluate(
+      async (args) => {
+        const [folder] = (await chrome.bookmarks.search({ title: args.title })).filter((n) => !n.url);
+        const [first] = await chrome.bookmarks.search({ url: args.remove });
+        await chrome.bookmarks.remove(first.id);
+        await chrome.bookmarks.create({ parentId: folder.id, title: "ui extra", url: args.extra });
+      },
+      { title: UI_FOLDER, remove: uiKids[0], extra: UI_EXTRA },
+    );
+
+    await newest().getByRole("button", { name: "Restore…", exact: true }).click();
+    await p.getByRole("button", { name: "Preview", exact: true }).waitFor({ timeout: 30_000 });
+    await p.locator("label.row", { hasText: "One folder" }).click();
+    await p.getByRole("button", { name: UI_FOLDER, exact: true }).click();
+    await p.locator("label.row", { hasText: "Exact:" }).click();
+    await p.getByRole("button", { name: "Preview", exact: true }).click();
+    const previewReady = await waitFor(
+      async () =>
+        p.evaluate(() => {
+          const restore = [...document.querySelectorAll("button")].find((b) => b.textContent?.trim() === "Restore");
+          return restore && !restore.disabled ? document.querySelector(".status-message")?.textContent?.trim() || "ready" : null;
+        }),
+      { timeout: 30_000, interval: 300 },
+    );
+    check("restore points screen: picking one folder, Exact, and Preview lists the changes", !!previewReady, String(previewReady));
+    await p.getByRole("button", { name: "Restore", exact: true }).click();
+    await p.click("#modal-confirm");
+    const finished = await waitFor(
+      async () => ((await p.evaluate(() => document.querySelector(".view-subtitle")?.textContent?.trim())) === "Done." ? true : null),
+      { timeout: 60_000, interval: 500 },
+    );
+    check("restore points screen: Restore runs to Done.", finished === true);
+    check("restore points screen: the folder is back to exactly the point", (await uiKidsIn(b)).join() === [...uiKids].sort().join(), (await uiKidsIn(b)).join(", "));
+    await p.getByRole("button", { name: "Done", exact: true }).click();
+    const backToList = await p.getByRole("button", { name: "Create restore point", exact: true }).waitFor({ timeout: 15_000 }).then(() => true, () => false);
+    check("restore points screen: Done goes back to the list", backToList);
+    await openScreen().catch(() => {});
+    check("restore points screen: reopening it shows the list, not the finished restore", (await p.getByRole("button", { name: "Create restore point", exact: true }).count()) > 0);
+    check(
+      "restore points screen: A follows the restore",
+      (await syncUntil([cb.popup, ca.popup], async () => (await uiKidsIn(a)).join() === [...uiKids].sort().join(), 90_000)) === true,
+      (await uiKidsIn(a)).join(", "),
+    );
+
+    const rowsBeforeDelete = await pointRows().count();
+    await newest().getByRole("button", { name: "Delete", exact: true }).click();
+    await p.click("#modal-confirm");
+    const deleted = await waitFor(async () => ((await pointRows().count()) === rowsBeforeDelete - 1 ? true : null), { timeout: 30_000, interval: 500 });
+    check("restore points screen: Delete removes the point", deleted === true, `${rowsBeforeDelete} -> ${await pointRows().count()}`);
+    await p.reload();
+    await p.waitForSelector(".status-card");
+  }
+
   // History retention: widening it offers "Sync older history" once.
   {
     const saved = await saveSettings(ca.popup, { historyRetention: "unlimited" });
