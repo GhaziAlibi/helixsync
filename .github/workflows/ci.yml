@@ -146,6 +146,9 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: npm run build:firefox
+      # Mozilla's validator, the same checks AMO runs on upload.
+      - run: npx --yes web-ext@10.8.0 lint --source-dir dist-firefox
 
   web:
     name: Web (typecheck, tests, build)

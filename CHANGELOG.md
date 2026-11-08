@@ -8,6 +8,15 @@ All notable changes to HelixSync are documented here. The format follows
 
 ### Added
 
+- Firefox support (desktop, 115 or newer). `npm run build:firefox` builds a
+  Manifest V2 package with a persistent background page into
+  `extension/dist-firefox/`, and releases attach it as
+  `helixsync-extension-firefox-<version>.zip`. Firefox's built-in bookmark
+  folders map to the same synced roots as Chromium's; its Bookmarks Menu
+  shows on Chromium as a "Bookmarks menu" folder, made only once something
+  in it syncs; separators sync as `https://separator.floccus.org/` bookmarks
+  (floccus's convention). See `docs/firefox.md`.
+
 - Interface languages. The web dashboard and the extension popup now follow
   the browser's language and can be switched by hand (dashboard sidebar, popup
   settings): English, Hungarian, German, Spanish, French, Simplified Chinese

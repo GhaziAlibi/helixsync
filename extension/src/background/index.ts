@@ -83,6 +83,7 @@ import {
   setTabsCaptureEnabled,
 } from "../tabs";
 import { singleFlight } from "../util/single-flight";
+import { toolbarAction } from "../util/browser";
 
 const SYNC_ALARM = "helixsync-periodic-sync";
 // A backstop only: WebSocket pushes and local nudges provide the low
@@ -169,7 +170,7 @@ export async function updateBadge(force = false): Promise<void> {
       lastBadgeAt = now;
       if (lastBadgeText !== AUTH_REQUEST_BADGE || force) {
         lastBadgeText = AUTH_REQUEST_BADGE;
-        await chrome.action.setBadgeText({ text: AUTH_REQUEST_BADGE });
+        await toolbarAction().setBadgeText({ text: AUTH_REQUEST_BADGE });
       }
       return;
     }
@@ -177,7 +178,7 @@ export async function updateBadge(force = false): Promise<void> {
     if (tabRestorePolicy !== "ask") {
       if (lastBadgeText !== "") {
         lastBadgeText = "";
-        await chrome.action.setBadgeText({ text: "" });
+        await toolbarAction().setBadgeText({ text: "" });
       }
       lastBadgeAt = now;
       return;
@@ -187,7 +188,7 @@ export async function updateBadge(force = false): Promise<void> {
     const nextText = pendingCount > 0 ? String(pendingCount) : "";
     if (nextText !== lastBadgeText || force) {
       lastBadgeText = nextText;
-      await chrome.action.setBadgeText({ text: nextText });
+      await toolbarAction().setBadgeText({ text: nextText });
     }
   } catch (e) {
     console.warn("HelixSync: failed to update restore badge", e);

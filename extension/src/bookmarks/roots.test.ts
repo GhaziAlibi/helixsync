@@ -26,7 +26,16 @@ let stored: Record<string, unknown> = {};
   },
 };
 
-const { ROOT_OBJECT_IDS, bookmarkRoots, invalidateBookmarkRoots, standInRootObjectId } = await import("./roots");
+const {
+  ROOT_OBJECT_IDS,
+  bookmarkRoots,
+  ensureStandInRoot,
+  invalidateBookmarkRoots,
+  isNativeRootId,
+  standInRootObjectId,
+} = await import("./roots");
+
+const MENU = ROOT_OBJECT_IDS["4"];
 
 const guard = createSuppressionGuard();
 
@@ -35,6 +44,7 @@ describe("bookmarkRoots", () => {
     vi.clearAllMocks();
     stored = {};
     invalidateBookmarkRoots();
+    delete (globalThis as { location?: unknown }).location;
   });
 
   it("uses the built-in roots and creates nothing on desktop", async () => {
@@ -44,10 +54,15 @@ describe("bookmarkRoots", () => {
 
     expect(createMock).not.toHaveBeenCalled();
     expect(roots.standInIds.size).toBe(0);
-    for (const [chromiumId, objectId] of Object.entries(ROOT_OBJECT_IDS)) {
+    for (const chromiumId of ["0", "1", "2", "3"]) {
+      const objectId = ROOT_OBJECT_IDS[chromiumId];
       expect(roots.objectIdByChromiumId.get(chromiumId)).toBe(objectId);
       expect(roots.chromiumIdByObjectId.get(objectId)).toBe(chromiumId);
     }
+    // Firefox's Bookmarks menu gets no folder until something needs it.
+    expect(roots.chromiumIdByObjectId.has(MENU)).toBe(false);
+    expect(isNativeRootId("1")).toBe(true);
+    expect(isNativeRootId("4")).toBe(false);
   });
 
   it("creates suppressed stand-ins at the top of Mobile bookmarks when the bar and Other are missing", async () => {
@@ -154,5 +169,58 @@ describe("bookmarkRoots", () => {
     invalidateBookmarkRoots();
     await bookmarkRoots(guard);
     expect(getChildrenMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("creates the Bookmarks menu stand-in only on demand, then keeps it", async () => {
+    getChildrenMock.mockImplementation(async (parentId) =>
+      parentId === "0" ? [{ id: "1" }, { id: "2" }, { id: "3" }] : [{ id: "50" }],
+    );
+    getMock.mockImplementation(async (id) => [{ id }]);
+    createMock.mockResolvedValue({ id: "400" });
+
+    expect((await bookmarkRoots(guard)).chromiumIdByObjectId.has(MENU)).toBe(false);
+    const roots = await ensureStandInRoot(guard, MENU);
+
+    expect(createMock).toHaveBeenCalledTimes(1);
+    expect(createMock).toHaveBeenCalledWith({ parentId: "2", title: "Bookmarks menu", index: 0 });
+    expect(roots.chromiumIdByObjectId.get(MENU)).toBe("400");
+    expect([...roots.standInIds]).toEqual(["400"]);
+    expect(stored.bookmarkRootStandIns).toEqual({ "4": "400" });
+    expect(await standInRootObjectId("400")).toBe(MENU);
+
+    // A later worker keeps it without being asked again.
+    invalidateBookmarkRoots();
+    expect((await bookmarkRoots(guard)).chromiumIdByObjectId.get(MENU)).toBe("400");
+    expect(createMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("maps Firefox's built-in roots, Bookmarks menu included, and creates nothing", async () => {
+    (globalThis as { location?: unknown }).location = { protocol: "moz-extension:" };
+    getChildrenMock.mockImplementation(async (parentId) =>
+      parentId === "root________"
+        ? [{ id: "menu________" }, { id: "toolbar_____" }, { id: "unfiled_____" }, { id: "mobile______" }]
+        : [],
+    );
+
+    const roots = await bookmarkRoots(guard);
+
+    expect(createMock).not.toHaveBeenCalled();
+    expect(roots.standInIds.size).toBe(0);
+    const expected: Record<string, string> = {
+      root________: ROOT_OBJECT_IDS["0"],
+      toolbar_____: ROOT_OBJECT_IDS["1"],
+      unfiled_____: ROOT_OBJECT_IDS["2"],
+      mobile______: ROOT_OBJECT_IDS["3"],
+      menu________: MENU,
+    };
+    for (const [firefoxId, objectId] of Object.entries(expected)) {
+      expect(roots.objectIdByChromiumId.get(firefoxId)).toBe(objectId);
+      expect(roots.chromiumIdByObjectId.get(objectId)).toBe(firefoxId);
+      expect(isNativeRootId(firefoxId)).toBe(true);
+    }
+    expect(isNativeRootId("1")).toBe(false);
+    // Already there, so nothing to make.
+    expect((await ensureStandInRoot(guard, MENU)).chromiumIdByObjectId.get(MENU)).toBe("menu________");
+    expect(createMock).not.toHaveBeenCalled();
   });
 });

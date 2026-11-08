@@ -256,18 +256,27 @@ jobs:
 
       - run: npm ci
       - run: npm run build
+      - run: npm run build:firefox
       - run: npm test
 
       - name: Package extension
         run: |
-          cd dist
-          zip -r "../helixsync-extension-${VERSION}.zip" .
+          (cd dist && zip -r "../helixsync-extension-${VERSION}.zip" .)
+          (cd dist-firefox && zip -r "../helixsync-extension-firefox-${VERSION}.zip" .)
 
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: helixsync-extension
           path: extension/helixsync-extension-${{ needs.version.outputs.version }}.zip
+          retention-days: 30
+
+      # Unsigned: Firefox installs it only once AMO has signed it.
+      - name: Upload Firefox build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: helixsync-extension-firefox
+          path: extension/helixsync-extension-firefox-${{ needs.version.outputs.version }}.zip
           retention-days: 30
 
   # Attaches the built zip to the GitHub release. Can write to the repository,
@@ -292,14 +301,19 @@ jobs:
         with:
           name: helixsync-extension
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helixsync-extension-firefox
+
       - name: Attach to GitHub Release
         run: |
           tag="v${VERSION}"
           zip="helixsync-extension-${VERSION}.zip"
+          firefox_zip="helixsync-extension-firefox-${VERSION}.zip"
           # The release normally exists already (the version job pushed the
-          # tag); create it if not, and replace the asset on a re-run.
-          gh release create "$tag" "$zip" --target "$TARGET_SHA" --title "$tag" --generate-notes \
-            || gh release upload "$tag" "$zip" --clobber
+          # tag); create it if not, and replace the assets on a re-run.
+          gh release create "$tag" "$zip" "$firefox_zip" --target "$TARGET_SHA" --title "$tag" --generate-notes \
+            || gh release upload "$tag" "$zip" "$firefox_zip" --clobber
 
   # Pushes this version to the Chrome Web Store. Holds the CHROME_* secrets, so
   # it is deliberately tiny: read-only token, a protected `chrome-web-store`

@@ -22,7 +22,11 @@ Nothing is tagged, pushed or published until the CI workflow
    `ghcr.io/<owner>/helixsync-web`, tagged `latest` and with the release
    version. Deployments should pin the version rather than follow `latest`.
 3. **Extension.** The extension is built and tested, zipped as
-   `helixsync-extension-<version>.zip`, and attached to the GitHub release.
+   `helixsync-extension-<version>.zip` (Chromium) and
+   `helixsync-extension-firefox-<version>.zip` (Firefox, unsigned), and both
+   are attached to the GitHub release. Firefox installs the Firefox zip only
+   after Mozilla has signed it; uploading it to addons.mozilla.org is manual
+   for now.
 4. **Chrome Web Store.** The same zip is uploaded to the Web Store from a
    separate, protected job (below). The upload is staged: after the store
    approves it, releasing it to users is a manual click in the Web Store

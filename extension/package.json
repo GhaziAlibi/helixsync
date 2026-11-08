@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite build --watch",
+    "dev:firefox": "TARGET=firefox vite build --watch",
     "build": "tsc --noEmit && vite build",
+    "build:firefox": "tsc --noEmit && TARGET=firefox vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "node e2e/sync.e2e.mjs"

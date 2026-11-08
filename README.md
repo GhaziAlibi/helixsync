@@ -11,7 +11,8 @@ tab groups in sync across your own devices, through a server you run
 yourself, with no Google, Microsoft, or other third-party account involved.
 
 It works with **Helium** and any other Chromium-based browser (Chrome, Brave,
-Edge, Vivaldi, ...) through a Manifest V3 extension (Chromium 116 or newer).
+Edge, Vivaldi, ...) through a Manifest V3 extension (Chromium 116 or newer),
+and with **Firefox** desktop 115 or newer (see [`docs/firefox.md`](docs/firefox.md)).
 
 - **You own the data.** Everything lives in a PostgreSQL database on your own
   server.
@@ -318,6 +319,8 @@ Pick one:
   ```
 
   Then load `extension/dist/` as an unpacked extension, as above.
+- **Firefox:** build with `npm run build:firefox` and load it as described
+  in [`docs/firefox.md`](docs/firefox.md).
 
 ### 4. Connect your browser, and lock the server down
 
