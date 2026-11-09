@@ -33,6 +33,15 @@ All notable changes to HelixSync are documented here. The format follows
 
 ### Fixed
 
+- A tab closed on this browser while a change to it from another device was
+  being applied could stay open on the other devices.
+- Tabs already open were not uploaded after disconnecting and reconnecting in
+  Firefox until they changed.
+- Bookmarks received for the Bookmarks menu folder before it could be made
+  were not applied until another bookmark arrived for it; they now are when
+  the extension starts.
+- Releases attach a browser's package only after its store publish did not
+  fail, so a failed or rejected publish is retried by the next release.
 - The extension could treat a connected browser as disconnected when it
   started: reading the saved login fired a session-storage event that cleared
   it before it was returned. Firefox always hit this, so its first sync never

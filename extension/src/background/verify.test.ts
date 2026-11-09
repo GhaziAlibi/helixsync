@@ -54,6 +54,7 @@ vi.mock("../bookmarks", () => ({
     await new Promise((r) => setTimeout(r, 1000));
     events.push("bookmarks-end");
   }),
+  materializeWaitingLazyRoots: vi.fn(async () => {}),
   registerCapture: vi.fn(),
   setBookmarkCaptureEnabled: vi.fn(),
   setLinkExistingBookmarks: vi.fn(),
@@ -95,6 +96,7 @@ vi.mock("../restore-points/restore", () => ({
 vi.mock("../restore-points/service", () => ({}));
 
 vi.mock("../tabs", () => ({
+  captureOpenTabs: vi.fn(),
   flushPendingTitleDebounces: vi.fn(),
   registerCapture: vi.fn(),
   restoreTab: vi.fn(),

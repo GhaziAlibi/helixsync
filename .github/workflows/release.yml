@@ -375,8 +375,18 @@ jobs:
   # Attaches the changed zips to the GitHub release. Can write to the
   # repository, so it only downloads the artifacts and calls the preinstalled
   # `gh`: no install step, no third-party action.
+  #
+  # Runs after the publish jobs, because `extension-changes` compares with the
+  # zips attached to the last release: a zip attached although its publish
+  # failed or was rejected would make the next run see "unchanged" and never
+  # retry it. A browser's zip is therefore attached only when its publish job
+  # succeeded or did not run (nothing changed, or its secret is unset, which
+  # the job reports as a success). `!cancelled()` lets this job run when a
+  # publish job was skipped; a failed or cancelled one just leaves its zip off.
+  # The cost: the release appears only once any pending publish approval is
+  # given.
   release-extension:
-    needs: [ci, version, extension, extension-changes]
+    needs: [ci, version, extension, extension-changes, publish-chrome-web-store, publish-firefox-amo]
     if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' && needs.extension-changes.result == 'success' && (needs.extension-changes.outputs.chrome == 'true' || needs.extension-changes.outputs.firefox == 'true') }}
     runs-on: ubuntu-latest
     concurrency:
@@ -391,6 +401,8 @@ jobs:
       TARGET_SHA: ${{ github.sha }}
       CHROME_CHANGED: ${{ needs.extension-changes.outputs.chrome }}
       FIREFOX_CHANGED: ${{ needs.extension-changes.outputs.firefox }}
+      CHROME_PUBLISH: ${{ needs.publish-chrome-web-store.result }}
+      FIREFOX_PUBLISH: ${{ needs.publish-firefox-amo.result }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -404,8 +416,18 @@ jobs:
         run: |
           tag="v${VERSION}"
           zips=()
-          [ "$CHROME_CHANGED" = true ] && zips+=("helixsync-extension-${VERSION}.zip")
-          [ "$FIREFOX_CHANGED" = true ] && zips+=("helixsync-extension-firefox-${VERSION}.zip")
+          # Not a failed or cancelled publish: see the job comment.
+          published() { [ "$1" = success ] || [ "$1" = skipped ]; }
+          if [ "$CHROME_CHANGED" = true ] && published "$CHROME_PUBLISH"; then
+            zips+=("helixsync-extension-${VERSION}.zip")
+          fi
+          if [ "$FIREFOX_CHANGED" = true ] && published "$FIREFOX_PUBLISH"; then
+            zips+=("helixsync-extension-firefox-${VERSION}.zip")
+          fi
+          if [ "${#zips[@]}" -eq 0 ]; then
+            echo "No package to attach: every changed package failed to publish"
+            exit 0
+          fi
           # The release normally exists already (the version job pushed the
           # tag); create it if not, and replace the assets on a re-run.
           gh release create "$tag" "${zips[@]}" --target "$TARGET_SHA" --title "$tag" --generate-notes \

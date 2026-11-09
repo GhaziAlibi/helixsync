@@ -49,6 +49,7 @@ import {
   invalidateBookmarkRoots,
   isLazyRootObjectId,
   isNativeRootId,
+  lazyRootObjectIds,
   standInRootObjectId,
   type BookmarkRoots,
 } from "./roots";
@@ -1053,6 +1054,18 @@ async function materialize(
 async function materializeLazyRoot(rootObjectId: string): Promise<void> {
   const { chromiumIdByObjectId } = await ensureStandInRoot(guard, rootObjectId);
   if (chromiumIdByObjectId.has(rootObjectId)) await retryDeferredParent(rootObjectId);
+}
+
+/** Makes the folder of every lazy root that bookmarks are waiting on. Run at
+ * startup: those were parked by an apply path that never ran again, such as
+ * ones received before an upgrade that could make the folder, and nothing else
+ * retries them until another bookmark for that root arrives. */
+export async function materializeWaitingLazyRoots(): Promise<void> {
+  for (const rootObjectId of lazyRootObjectIds()) {
+    if ((await getDeferredMaterializationsWaitingOn(rootObjectId)).length > 0) {
+      await materializeLazyRoot(rootObjectId);
+    }
+  }
 }
 
 /** True when the node is a separator, whose title and URL can't be set. */

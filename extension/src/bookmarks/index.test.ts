@@ -100,6 +100,8 @@ vi.mock("../sync/engine", () => ({
   scheduleLocalSync: () => scheduleLocalSyncMock(),
 }));
 
+const ensureStandInRootMock = vi.fn();
+
 // Desktop roots: all four built-in folders present, no stand-ins.
 vi.mock("./roots", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./roots")>();
@@ -115,11 +117,17 @@ vi.mock("./roots", async (importOriginal) => {
     ...actual,
     bookmarkRoots: async () => roots,
     standInRootObjectId: async () => undefined,
+    ensureStandInRoot: async (...args: unknown[]) => {
+      ensureStandInRootMock(...args);
+      return roots;
+    },
   };
 });
 
-const { positionOf, computePosition, flushBookmarkEvents, backfillExisting, sortedInsertIndex, moveIndex } =
+const { positionOf, computePosition, flushBookmarkEvents, backfillExisting, sortedInsertIndex, moveIndex, materializeWaitingLazyRoots } =
   await import("./index");
+const { getDeferredMaterializationsWaitingOn } = await import("../storage/db");
+const { ROOT_OBJECT_IDS } = await import("./roots");
 
 describe("EXT-03: Sibling IPC and Transaction Amplification in bookmarks", () => {
   beforeEach(() => {
@@ -865,5 +873,32 @@ describe("capture toggle (perf audit: disabled-type gate)", () => {
     } finally {
       syncBookmarks = undefined;
     }
+  });
+});
+
+// Bookmarks parked on the lazily made Bookmarks-menu root (received before an
+// upgrade that could make it) were only retried by apply paths.
+describe("materializeWaitingLazyRoots", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("makes the lazy root that bookmarks are waiting on", async () => {
+    vi.mocked(getDeferredMaterializationsWaitingOn).mockImplementation(async (parent: string) =>
+      parent === ROOT_OBJECT_IDS["4"] ? [{ objectId: "bm-1" } as never] : [],
+    );
+
+    await materializeWaitingLazyRoots();
+
+    expect(ensureStandInRootMock).toHaveBeenCalledTimes(1);
+    expect(ensureStandInRootMock).toHaveBeenCalledWith(expect.anything(), ROOT_OBJECT_IDS["4"]);
+  });
+
+  it("makes no folder when nothing is waiting", async () => {
+    vi.mocked(getDeferredMaterializationsWaitingOn).mockResolvedValue([]);
+
+    await materializeWaitingLazyRoots();
+
+    expect(ensureStandInRootMock).not.toHaveBeenCalled();
   });
 });

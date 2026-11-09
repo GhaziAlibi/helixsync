@@ -26,7 +26,10 @@ Nothing is tagged, pushed or published until the CI workflow
    `helixsync-extension-firefox-<version>.zip` (Firefox, unsigned).
    Each zip is compared with the same browser's zip in the last release that
    has one, ignoring the manifest's version, and is attached to the GitHub
-   release only if its files differ. A change only in `extension/firefox/`
+   release only if its files differ and its store publish (steps 4 and 5)
+   did not fail, so a failed or rejected publish is retried by the next run.
+   The attach step therefore runs after the publish jobs, i.e. once any
+   pending approval is given. A change only in `extension/firefox/`
    therefore releases Firefox alone, one only in `extension/chrome/` Chrome
    alone, and one in shared code whichever packages it actually changed.
    Firefox installs the Firefox zip only after Mozilla has signed it.

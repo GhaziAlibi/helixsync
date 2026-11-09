@@ -43,6 +43,11 @@ const LAZY_ROOT_OBJECT_IDS: ReadonlySet<string> = new Set(
   STAND_IN_ROOTS.filter((r) => r.lazy).map((r) => ROOT_OBJECT_IDS[r.rootId]),
 );
 
+/** The objectIds of the roots whose stand-in is only made on demand. */
+export function lazyRootObjectIds(): string[] {
+  return [...LAZY_ROOT_OBJECT_IDS];
+}
+
 /** True for a root whose stand-in is only made on demand. */
 export function isLazyRootObjectId(objectId: string): boolean {
   return LAZY_ROOT_OBJECT_IDS.has(objectId);

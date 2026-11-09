@@ -52,6 +52,7 @@ import { flushAllMicroBatchQueues } from "../sync/micro-batch";
 import type { ObjectType } from "../sync/types";
 import {
   backfillExisting as backfillBookmarks,
+  materializeWaitingLazyRoots,
   registerCapture as registerBookmarkCapture,
   setBookmarkCaptureEnabled,
   setLinkExistingBookmarks,
@@ -75,6 +76,7 @@ import {
 import { resumeInterruptedRestore, clearLoadedRestorePoint } from "../restore-points/restore";
 import * as restorePointService from "../restore-points/service";
 import {
+  captureOpenTabs,
   flushPendingTitleDebounces,
   registerCapture as registerTabCapture,
   restoreTab,
@@ -323,6 +325,8 @@ async function initializeCaptureForSettings(): Promise<void> {
   // Tab sync defaults to off, so only it is gated on the setting.
   if (settings.syncTabs) {
     registerTabCapture();
+    // Every time, not only at first registration: see captureOpenTabs.
+    captureOpenTabs();
   }
 
   if (!device.initialImportCompletedAt) {
@@ -553,6 +557,7 @@ ensureCryptoReady()
     if (!device?.initialImportCompletedAt) return;
     // Once per browser: mappings of nodes a deleted folder took with it.
     await sweepStaleBookmarkMappingsOnce().catch((e) => console.error("HelixSync: bookmark mapping sweep failed", e));
+    await materializeWaitingLazyRoots().catch((e) => console.error("HelixSync: could not apply bookmarks waiting on a root", e));
     await resumeInterruptedRestore().catch((e) => console.error("HelixSync: could not resume the restore", e));
     await drainRestorePointOutbox();
   })

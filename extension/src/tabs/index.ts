@@ -886,10 +886,15 @@ export function registerCapture(): void {
   chrome.tabs.onRemoved.addListener((tabId) => {
     handleTabRemoved(tabId);
   });
+}
 
-  // Tabs already open when capture starts (tab sync just turned on, or
-  // changes made while the worker was stopped) go through the update path:
-  // a mapped, unchanged tab produces nothing; a tab without an object is created.
+/** Queues the tabs already open through the update path: a mapped, unchanged
+ * tab produces nothing; a tab without an object is created. Called each time
+ * capture is initialized with tab sync on, not from registerCapture: that
+ * returns early once registered, so after a Disconnect and reconnect in a
+ * persistent background (Firefox) the open tabs would otherwise wait for
+ * their next change. */
+export function captureOpenTabs(): void {
   void chrome.tabs
     .query({})
     .then((tabs) => {
@@ -1010,8 +1015,8 @@ async function materializeTab(objectId: string, p: TabPayload): Promise<void> {
       if (stillOpen) throw err;
       // Closed here in the meantime: its close is captured on its own, so it
       // stays closed. A failure here would stop the whole sync (found end to
-      // end); only the stale link is dropped.
-      await forgetMapping(TAB_TYPE, existingChromiumId);
+      // end). The mapping is kept: that close may still be queued, and
+      // uploading it looks the object up through this mapping; it removes it.
       return;
     }
   } else {
