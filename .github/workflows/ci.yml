@@ -5,8 +5,6 @@ name: CI
 # every job here has passed.
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_call:
 
 permissions:
