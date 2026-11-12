@@ -8,6 +8,7 @@ import {
   invalidateSettingsCache,
   revokeThisDevice,
   serverSupportsRestorePoints,
+  serverSupportsSendTab,
   createAuthRequest,
   pollAuthRequest,
   listAuthRequests,
@@ -42,6 +43,9 @@ import {
 import { retentionCutoffMs } from "../util/retention";
 import { assertSecureServerUrl, InsecureServerUrlError } from "./serverUrl";
 import { renderRestorePointsView } from "./restore-points";
+import { failureMessage } from "../send-tab/messages";
+import type { SendTabResult } from "../send-tab/send";
+import { isSyncableUrl } from "../util/url-scheme";
 import { platform } from "@platform";
 import {
   LANGUAGES,
@@ -141,6 +145,8 @@ const SYNC_TOGGLE_IDS = ["syncBookmarks", "syncHistory", "syncTabs", "syncTabGro
 const RESTORE_POINTS_TOGGLE_ID = "restorePointsAutomatic";
 // Optional in the manifest: asked for only when tab group sync is turned on.
 const TAB_GROUPS_PERMISSION: chrome.permissions.Permissions = { permissions: ["tabGroups"] };
+// Optional: lets the extension show a toast when a tab is sent or arrives.
+const NOTIFICATIONS_PERMISSION: chrome.permissions.Permissions = { permissions: ["notifications"] };
 type SyncToggleId = (typeof SYNC_TOGGLE_IDS)[number];
 const SETTINGS_SELECT_IDS = ["tabRestorePolicy", "historyRetention"] as const;
 
@@ -941,11 +947,12 @@ function renderHeaderButtons(buttons: Array<{ id: string; title: string; icon: s
 async function renderStatusView(device: DeviceRecord): Promise<void> {
   renderHeaderButton("open-settings", t("header_settings"), GEAR_ICON, "settings");
 
-  const [response, settings, authRequests, restorePointsSupported] = await Promise.all([
+  const [response, settings, authRequests, restorePointsSupported, sendTabSupported] = await Promise.all([
     chrome.runtime.sendMessage({ type: "GET_STATUS" }),
     fetchSettings().catch(() => undefined),
     listAuthRequests().catch((): PendingAuthRequest[] => []),
     serverSupportsRestorePoints().catch(() => false),
+    serverSupportsSendTab().catch(() => false),
   ]);
 
   // Restore points need bookmark sync, a finished first import and a server
@@ -1021,6 +1028,8 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
     }
   });
 
+  if (sendTabSupported) app.appendChild(renderSendTabSection());
+
   if (settings?.tabRestorePolicy === "ask") {
     const { items: initial, total: totalCount } = await getPendingTabRestoresPage(PENDING_RESTORE_PAGE_SIZE);
     const restoreSection = renderPendingTabRestores(
@@ -1048,6 +1057,86 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
   footer.style.textAlign = "center";
   footer.textContent = t("statusview_signedInAs", { email: device.email });
   app.appendChild(footer);
+}
+
+interface SendTarget {
+  id: string;
+  name: string;
+  online?: boolean;
+}
+
+/** "Send this tab to" picker (docs/protocol.md §12.5): the other devices with
+ * their live online state. Built with DOM APIs: device names are free text.
+ * Asking the worker for the list also refreshes its context menu. */
+function renderSendTabSection(): HTMLElement {
+  const section = document.createElement("div");
+  const label = document.createElement("div");
+  label.className = "section-label";
+  label.textContent = t("sendtab_label");
+  const list = document.createElement("div");
+  list.textContent = t("common_loading");
+  list.className = "item-meta";
+  const message = document.createElement("div");
+  message.className = "status-message";
+  section.append(label, list, message);
+
+  void (async () => {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      const response = await chrome.runtime.sendMessage({ type: "LIST_SEND_TARGETS" });
+      if (!response?.ok) throw new Error(response?.error ?? t("sendtab_listFailed"));
+      const devices = response.devices as SendTarget[];
+      list.textContent = "";
+      list.className = "";
+      if (devices.length === 0) {
+        list.className = "item-meta";
+        list.textContent = t("sendtab_noDevices");
+        return;
+      }
+      const sendable = !!tab?.url && isSyncableUrl(tab.url);
+      if (!sendable) {
+        message.textContent = t("sendtab_badUrl");
+      }
+      for (const device of devices) {
+        const button = document.createElement("button");
+        button.disabled = !sendable;
+        const name = document.createElement("span");
+        name.textContent = device.name;
+        const state = document.createElement("span");
+        state.className = "item-meta";
+        state.textContent = ` · ${device.online ? t("sendtab_online") : t("sendtab_offlineState")}`;
+        button.append(name, state);
+        button.addEventListener("click", async () => {
+          button.disabled = true;
+          message.classList.remove("error");
+          message.textContent = "";
+          try {
+            const result = (await chrome.runtime.sendMessage({
+              type: "SEND_TAB",
+              deviceId: device.id,
+              url: tab.url,
+              title: tab.title,
+            })) as SendTabResult | undefined;
+            if (result?.ok) message.textContent = t("sendtab_sent", { device: device.name });
+            else
+              showError(
+                message,
+                result ? failureMessage(t, result, device.name) : t("sendtab_failed", { message: t("statusview_restoreRequestFailed") }),
+              );
+          } catch (err) {
+            showError(message, t("sendtab_failed", { message: errorMessage(err) }));
+          } finally {
+            button.disabled = false;
+          }
+        });
+        list.appendChild(button);
+      }
+    } catch (err) {
+      list.textContent = "";
+      showError(message, t("sendtab_failed", { message: errorMessage(err) }));
+    }
+  })();
+  return section;
 }
 
 /** Sign-in requests waiting for this account's approval (login with device,
@@ -1192,6 +1281,33 @@ function fillSettingsForm(settings: UserSettingsDto, draft: SettingsDraft): void
   }
 }
 
+/** Not a server setting: the permission is per browser and applies at once,
+ * so the toggle asks the browser itself rather than waiting for Save. */
+async function bindSendTabNotifications(status: HTMLElement): Promise<void> {
+  const fieldset = document.getElementById("send-tab-settings");
+  const toggle = document.getElementById("sendTabNotifications") as HTMLInputElement | null;
+  if (!fieldset || !toggle) return;
+  if (!(await serverSupportsSendTab().catch(() => false)) || !chrome.notifications) return;
+  toggle.checked = await chrome.permissions.contains(NOTIFICATIONS_PERMISSION);
+  fieldset.hidden = false;
+  toggle.addEventListener("change", async () => {
+    try {
+      if (toggle.checked) {
+        // Must be the first await: the request needs the click's user gesture.
+        if (!(await chrome.permissions.request(NOTIFICATIONS_PERMISSION))) {
+          toggle.checked = false;
+          showError(status, t("settings_sendTabDenied"));
+        }
+      } else {
+        await chrome.permissions.remove(NOTIFICATIONS_PERMISSION);
+      }
+    } catch (err) {
+      toggle.checked = await chrome.permissions.contains(NOTIFICATIONS_PERMISSION).catch(() => false);
+      showError(status, errorMessage(err));
+    }
+  });
+}
+
 async function renderSettings(device: DeviceRecord): Promise<void> {
   renderHeaderButton("back-to-status", t("header_back"), BACK_ICON, "status");
 
@@ -1247,6 +1363,13 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
       </div>
       <div class="item-meta">${th("settings_restorePointsHelp")}</div>
     </fieldset>
+    <fieldset id="send-tab-settings" hidden>
+      <legend>${th("settings_sendTabLegend")}</legend>
+      <div class="row"><span class="row-label">${th("settings_sendTabNotifications")}</span>
+        <label class="switch"><input type="checkbox" id="sendTabNotifications" /><span class="track"></span></label>
+      </div>
+      <div class="item-meta">${th("settings_sendTabHelp")}</div>
+    </fieldset>
     <fieldset>
       <legend>${th("language_legend")}</legend>
       ${languageField}
@@ -1292,6 +1415,7 @@ async function renderSettings(device: DeviceRecord): Promise<void> {
 
   const status = document.getElementById("status")!;
   const saveButton = document.getElementById("save-settings") as HTMLButtonElement;
+  void bindSendTabNotifications(status);
   // What the form was filled from; Save sends only fields changed since. Save
   // stays disabled until then: the unfilled form reads as everything off.
   let loaded: SettingsForm | undefined;

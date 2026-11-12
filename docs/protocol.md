@@ -953,8 +953,10 @@ have elapsed. Revoked devices never block compaction.
 
 ## 12. WebSocket Protocol
 
-WebSocket is a low-latency **notification-only** channel; it never carries
-sync payloads itself.
+WebSocket is a low-latency push channel. Its sync frames are
+**notification-only** and never carry sync payloads. The one other frame,
+`tab_send` (§12.5), is an ephemeral "open this tab" message that is not sync
+data.
 
 ```json
 { "type": "changes_available", "cursor": 1847 }
@@ -975,6 +977,59 @@ delivery. Authentication uses the device access token (query-string tokens
 for long-lived secrets are disallowed; the token is sent as the first
 WebSocket message after connect, or via a short-lived one-time ticket
 fetched over HTTPS immediately before connecting).
+
+### 12.5 Send tab to device
+
+A device can push a URL to another device of the same account, which opens it
+at once. Nothing is stored: there is no queue, no database row and no audit
+event, so a target that is offline simply misses it.
+
+The send leg is HTTP, not the WebSocket (the server closes a socket on any
+client frame after authentication):
+
+```text
+POST /api/v1/devices/{targetDeviceId}/send-tab
+Authorization: Bearer <device access token>
+X-Protocol-Version: 1
+```
+
+```json
+{ "id": "<uuid, client generated>", "envelope": { "v": 2, "keyVersion": 1, "alg": "xchacha20poly1305", "nonce": "…", "ciphertext": "…" } }
+```
+
+The route accepts a device token only, never a web session. The server
+checks, in order: the rate limit (30 per minute per sending device, `429`);
+that the target is not the sender (`400`); that the target is a non-revoked
+device of the same account (`404`, the same answer for another account's device
+and an unknown id); that the body is a JSON object with an `id` and an
+`envelope` object of at most 8 KiB (`400`; a body far past that is `413`). It
+then pushes one frame to the target's open socket only:
+
+```json
+{ "type": "tab_send", "id": "<uuid>", "fromDeviceId": "<uuid>", "envelope": { … } }
+```
+
+`fromDeviceId` comes from the sender's token, never from the body. The
+response is `200 { "delivered": true | false }`. `delivered` means the frame
+was queued on the target's open socket: `false` when the target has no open
+socket or its send queue is full. It does not mean the tab was opened. A
+target running an extension that predates this frame ignores it, silently.
+
+The envelope's plaintext is `{ "url": string, "title"?: string, "sentAt": <ms> }`,
+encrypted under the account's SDEK with its own AAD
+(`docs/encryption.md` §6.4). A receiving extension must:
+
+1. decrypt with the AAD naming the frame's `id`, `fromDeviceId` and its own
+   device id, dropping the frame on any failure, including an envelope version
+   it does not support (it is ephemeral, so there is nothing to retry);
+2. drop it if the `id` was seen before, or `sentAt` is older than 10 minutes
+   (a server replaying the ciphertext);
+3. open it only if the URL is `http:` or `https:`;
+4. open at most 10 tabs per minute, whatever the senders do.
+
+`GET /api/v1/devices` adds `"online": true | false` to each device: whether it
+has an open socket. A server without send tab omits it, and advertises
+`"sendTab": true` in `/version` (§13); clients hide the feature without it.
 
 ---
 
@@ -997,7 +1052,8 @@ extensionVersion: "<semver>"
   "protocolVersion": 1,
   "minimumSupportedProtocolVersion": 1,
   "registrationEnabled": true,
-  "restorePoints": true
+  "restorePoints": true,
+  "sendTab": true
 }
 ```
 
@@ -1005,7 +1061,8 @@ extensionVersion: "<semver>"
 (§7.2). It was added without changing the protocol version: clients must
 treat a missing value as `true`. `restorePoints` is `true` on a server that
 has the bookmark restore points of §16; clients must treat a missing value as
-`false` and hide the feature.
+`false` and hide the feature. `sendTab` is `true` on a server with the
+send-tab push of §12.5; clients treat a missing value as `false` and hide it.
 
 Rules:
 

@@ -109,6 +109,27 @@ impl ConnectionRegistry {
         }
     }
 
+    /// Pushes `msg` to one connected device of the user (send-tab,
+    /// docs/protocol.md §12.5). Returns `false` if the device has no open
+    /// socket or its channel is full: nothing is held for later.
+    pub fn send_to_device(&self, user_id: Uuid, device_id: Uuid, msg: String) -> bool {
+        let Some(conns) = self.connections.get(&user_id) else {
+            return false;
+        };
+        conns
+            .iter()
+            .find(|c| c.device_id == device_id)
+            .is_some_and(|c| c.sender.try_send(msg).is_ok())
+    }
+
+    /// Devices of the user that currently have an open socket.
+    pub fn online_device_ids(&self, user_id: Uuid) -> Vec<Uuid> {
+        self.connections
+            .get(&user_id)
+            .map(|conns| conns.iter().map(|c| c.device_id).collect())
+            .unwrap_or_default()
+    }
+
     /// Tells every connected device of the user that a login-with-device
     /// request is waiting (docs/protocol.md §7.4). Only a hint, like
     /// `changes_available`: extensions also check on their periodic sync.
@@ -469,5 +490,66 @@ mod tests {
             rx.recv().await.as_deref(),
             Some(r#"{"type":"changes_available","cursor":7}"#)
         );
+    }
+
+    // Goes to the target only; absent devices and full channels return false.
+    #[tokio::test]
+    async fn send_to_device_reaches_only_the_target() {
+        let registry = ConnectionRegistry::new();
+        let user_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let other_device_id = Uuid::new_v4();
+
+        let (tx, mut rx) = mpsc::channel::<String>(32);
+        registry.register(user_id, device_id, tx);
+        let (other_tx, mut other_rx) = mpsc::channel::<String>(32);
+        registry.register(user_id, other_device_id, other_tx);
+
+        assert!(registry.send_to_device(user_id, device_id, "hello".into()));
+        assert_eq!(rx.recv().await.as_deref(), Some("hello"));
+        assert!(other_rx.try_recv().is_err());
+
+        // Unknown device, and a device of another user, are not reachable.
+        assert!(!registry.send_to_device(user_id, Uuid::new_v4(), "x".into()));
+        assert!(!registry.send_to_device(Uuid::new_v4(), device_id, "x".into()));
+    }
+
+    #[tokio::test]
+    async fn send_to_device_returns_false_when_channel_is_full() {
+        let registry = ConnectionRegistry::new();
+        let user_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+
+        let (tx, _rx) = mpsc::channel::<String>(1);
+        registry.register(user_id, device_id, tx);
+
+        assert!(registry.send_to_device(user_id, device_id, "one".into()));
+        assert!(!registry.send_to_device(user_id, device_id, "two".into()));
+    }
+
+    #[tokio::test]
+    async fn online_device_ids_lists_connected_devices_of_the_user() {
+        let registry = ConnectionRegistry::new();
+        let user_id = Uuid::new_v4();
+        let device_id = Uuid::new_v4();
+        let other_device_id = Uuid::new_v4();
+
+        assert!(registry.online_device_ids(user_id).is_empty());
+
+        let (tx, _rx) = mpsc::channel::<String>(32);
+        registry.register(user_id, device_id, tx);
+        let (other_tx, _other_rx) = mpsc::channel::<String>(32);
+        registry.register(user_id, other_device_id, other_tx);
+        let (stranger_tx, _stranger_rx) = mpsc::channel::<String>(32);
+        registry.register(Uuid::new_v4(), Uuid::new_v4(), stranger_tx);
+
+        let mut online = registry.online_device_ids(user_id);
+        online.sort();
+        let mut expected = vec![device_id, other_device_id];
+        expected.sort();
+        assert_eq!(online, expected);
+
+        registry.disconnect_device(user_id, device_id);
+        assert_eq!(registry.online_device_ids(user_id), vec![other_device_id]);
     }
 }

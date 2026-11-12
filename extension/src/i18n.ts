@@ -134,16 +134,23 @@ export function applyDocumentLanguage(): void {
   document.documentElement.dir = currentDir();
 }
 
-/** Loads the catalogs for the resolved language. A missing or broken catalog
- * leaves English in place rather than a blank popup. */
-export async function initI18n(): Promise<void> {
+/** A translator for the resolved language, without touching module state or
+ * the DOM, so the service worker can use it too. A missing or broken catalog
+ * leaves English in place. */
+export async function loadTranslator(): Promise<Translator> {
   const language = await resolveLanguage();
   const english = loadCatalog("en").catch((): Catalog => ({}));
   const [en, messages] = await Promise.all([
     english,
     language === "en" ? english : loadCatalog(language).catch((): Catalog => ({})),
   ]);
-  translator = createTranslator(language, messages, en);
+  return createTranslator(language, messages, en);
+}
+
+/** Loads the catalogs for the resolved language. A missing or broken catalog
+ * leaves English in place rather than a blank popup. */
+export async function initI18n(): Promise<void> {
+  translator = await loadTranslator();
   applyDocumentLanguage();
 }
 

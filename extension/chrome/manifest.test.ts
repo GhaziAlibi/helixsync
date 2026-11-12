@@ -10,3 +10,11 @@ describe("[SEC-16] manifest blocks incognito", () => {
     expect(manifest.incognito).toBe("not_allowed");
   });
 });
+
+describe("send-tab permissions", () => {
+  it("requires contextMenus and only offers notifications as optional", () => {
+    expect(manifest.permissions).toContain("contextMenus");
+    expect(manifest.permissions).not.toContain("notifications");
+    expect(manifest.optional_permissions).toContain("notifications");
+  });
+});

@@ -55,7 +55,7 @@ class FakeSocket {
 }
 vi.stubGlobal("WebSocket", FakeSocket as never);
 
-const { ensureConnected, disconnect, onAuthRequest, onChangesAvailable } = await import("./websocket");
+const { ensureConnected, disconnect, onAuthRequest, onChangesAvailable, onTabSend } = await import("./websocket");
 
 describe("push messages", () => {
   beforeEach(async () => {
@@ -82,6 +82,37 @@ describe("push messages", () => {
     emit({ type: "changes_available", cursor: 1 });
     expect(changes).toHaveBeenCalledTimes(1);
     expect(authRequests).toHaveBeenCalledTimes(1);
+  }, 30000);
+});
+
+describe("tab_send frames", () => {
+  beforeEach(async () => {
+    await disconnect();
+    sessionStore.clear();
+  });
+
+  it("hands a well-formed frame to its own handler and nothing else", async () => {
+    const changes = vi.fn();
+    const tabs = vi.fn();
+    onChangesAvailable(changes);
+    onTabSend(tabs);
+    await ensureConnected();
+    const emit = (message: unknown) => {
+      for (const listener of FakeSocket.last!.listeners.get("message") ?? []) {
+        (listener as (event: { data: string }) => void)({ data: JSON.stringify(message) });
+      }
+    };
+
+    const envelope = { v: 2, keyVersion: 1, alg: "xchacha20poly1305", nonce: "n", ciphertext: "c" };
+    emit({ type: "tab_send", id: "t1", fromDeviceId: "d1", envelope });
+    expect(tabs).toHaveBeenCalledWith({ id: "t1", fromDeviceId: "d1", envelope });
+    expect(changes).not.toHaveBeenCalled();
+
+    // Malformed frames are ignored.
+    emit({ type: "tab_send", id: 1, fromDeviceId: "d1", envelope });
+    emit({ type: "tab_send", id: "t2", fromDeviceId: "d1" });
+    emit({ type: "tab_send", id: "t3", fromDeviceId: "d1", envelope: null });
+    expect(tabs).toHaveBeenCalledTimes(1);
   }, 30000);
 });
 

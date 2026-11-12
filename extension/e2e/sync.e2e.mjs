@@ -64,7 +64,9 @@ const manifest = JSON.parse(readFileSync(join(EXT, "manifest.json"), "utf8"));
 const origin = new URL(BASE);
 manifest.host_permissions = [`${origin.origin}/*`, `ws://${origin.host}/*`];
 manifest.permissions = [...manifest.permissions, "tabGroups"];
-manifest.optional_permissions = (manifest.optional_permissions ?? []).filter((p) => p !== "tabGroups");
+// Likewise "notifications" (send tab's optional toast), so the toast path runs.
+manifest.permissions = [...manifest.permissions, "notifications"];
+manifest.optional_permissions = (manifest.optional_permissions ?? []).filter((p) => p !== "tabGroups" && p !== "notifications");
 writeFileSync(join(EXT, "manifest.json"), JSON.stringify(manifest, null, 2));
 const EXT_FIREFOX = join(WORK, "extension-firefox");
 const stopFirefoxLog = isFirefox(BROWSER_B) ? await prepareFirefoxExtension(DIST_FIREFOX, EXT_FIREFOX, LOG, "B") : () => {};
@@ -79,6 +81,8 @@ const ASLEEP_HISTORY_URL = `${BASE}/helixsync-e2e-asleep-history-${RUN}`;
 const TAB_URL = `${BASE}/helixsync-e2e-tab-${RUN}`;
 const CLOSED_TAB_URL = `${BASE}/helixsync-e2e-closed-tab-${RUN}`;
 const GROUPED_TAB_URL = `${BASE}/helixsync-e2e-grouped-tab-${RUN}`;
+const SEND_URL = `${BASE}/helixsync-e2e-send-${RUN}`;
+const SEND_URL_B = `${BASE}/helixsync-e2e-send-b-${RUN}`;
 const HISTORY_URL_B = `${BASE}/helixsync-e2e-history-b-${RUN}`;
 const TAB_URL_B = `${BASE}/helixsync-e2e-tab-b-${RUN}`;
 
@@ -329,6 +333,106 @@ try {
   check("extension B: connects with email and password", cb.connected === true, cb.connected === true ? "" : cb.connected);
   const active = (await listDevices(dash)).filter((d) => !d.revokedAt).map((d) => d.name).sort();
   check("dashboard: lists both devices", JSON.stringify(active) === JSON.stringify(["E2E device A", "E2E device B"]), active.join(", "));
+
+  // Send tab to device (docs/protocol.md §12.5), before tab sync is on so the
+  // tabs opened here are not captured. Both devices are connected now.
+  {
+    const bId = (await listDevices(dash)).find((d) => d.name === "E2E device B")?.id;
+    const aId = (await listDevices(dash)).find((d) => d.name === "E2E device A")?.id;
+    const sendTab = (popup, deviceId, url) => popup.evaluate((args) => chrome.runtime.sendMessage({ type: "SEND_TAB", ...args }), { deviceId, url });
+    const closeTabsAt = (dev, url) =>
+      dev.sw.evaluate(async (url) => {
+        for (const t of await chrome.tabs.query({})) if (t.url === url) await chrome.tabs.remove(t.id);
+      }, url);
+    const isOnline = async (name) => (await listDevices(dash)).find((d) => d.name === name)?.online;
+
+    check("send tab: both devices report online once connected", (await waitFor(async () => (await isOnline("E2E device A")) && (await isOnline("E2E device B")), { timeout: 60_000, interval: 1_000 })) === true);
+
+    // The picker, as a user sees it: the popup lists B as online and a click sends.
+    const picker = await a.ctx.newPage();
+    picker.on("console", (m) => appendFileSync(LOG, `[A popup ${m.type()}] ${m.text()}\n`));
+    picker.on("pageerror", (e) => appendFileSync(LOG, `[A popup pageerror] ${e.message}\n`));
+    // The popup is opened as a tab here, so give it a web page as "this tab".
+    await picker.addInitScript((url) => {
+      if (globalThis.chrome?.tabs) chrome.tabs.query = async () => [{ id: 1, url, title: "Sent from A" }];
+    }, SEND_URL);
+    await picker.goto(`${a.extensionOrigin}/popup.html`);
+    const bButton = picker.locator("button", { hasText: "E2E device B" });
+    const listed = await bButton.waitFor({ timeout: 30_000 }).then(() => true, () => false);
+    check("send tab: the popup lists the other device", listed);
+    check("send tab: the popup shows its online state", listed && /online/.test(await bButton.innerText()) && !/offline/.test(await bButton.innerText()), listed ? (await bButton.innerText()).replace(/\s+/g, " ") : "");
+    check("send tab: the popup does not list this device", (await picker.locator("button", { hasText: "E2E device A" }).count()) === 0);
+    await b.sw.evaluate(() => {
+      globalThis.__sendTabCreated = [];
+      chrome.tabs.onCreated.addListener((t) => globalThis.__sendTabCreated.push({ url: t.url || t.pendingUrl, active: t.active }));
+    });
+    if (listed) await bButton.click();
+    const sentMessage = await picker.locator(".status-message", { hasText: "Sent to E2E device B" }).waitFor({ timeout: 20_000 }).then(() => true, () => false);
+    check("send tab: the popup reports the tab as sent", sentMessage, sentMessage ? "" : await picker.locator(".status-message").allInnerTexts().then((t) => t.join(" | ")));
+    const openedInB = await waitFor(async () => (await tabsAt(b, SEND_URL)).length > 0, { timeout: 30_000, interval: 500 });
+    check("send tab: the tab sent from A opens in B", openedInB === true);
+    // As created (the harness's own pages may take focus afterwards).
+    const createdInB = await b.sw.evaluate((url) => globalThis.__sendTabCreated ?? [], SEND_URL).catch(() => []);
+    check("send tab: it opens as the active tab", createdInB.length > 0 && createdInB.every((t) => t.active), JSON.stringify(createdInB));
+    // Every tab created while the tab was sent is the one it opened.
+    await closeTabsAt(b, SEND_URL);
+
+    // The context menu was rebuilt when the popup listed devices: B's entry and
+    // the parent exist, this device's own does not.
+    const probe = (id) =>
+      a.sw.evaluate(
+        (id) => new Promise((resolve) => chrome.contextMenus.create({ id, title: "probe", contexts: ["page"] }, () => resolve(chrome.runtime.lastError?.message ?? "created"))),
+        id,
+      );
+    check("send tab: the context menu has an entry for the other device", /duplicate/i.test(await probe(`helixsync-send-tab:${bId}`)));
+    check("send tab: the context menu has its parent entry", /duplicate/i.test(await probe("helixsync-send-tab")));
+    check("send tab: the context menu has no entry for this device", (await probe(`helixsync-send-tab:${aId}`)) === "created");
+    await a.sw.evaluate((id) => chrome.contextMenus.remove(id), `helixsync-send-tab:${aId}`).catch(() => {});
+    await picker.close();
+
+    // The optional notifications toggle in the settings is offered.
+    const settingsPage = await openPage(a, `${a.extensionOrigin}/popup.html`, "popup");
+    await settingsPage.click("#open-settings");
+    const toggleShown = await settingsPage.waitForSelector("#send-tab-settings:not([hidden])", { timeout: 30_000 }).then(() => true, () => false);
+    check("send tab: the settings offer the notifications toggle", toggleShown);
+    check("send tab: the toggle reflects the granted permission", toggleShown && (await settingsPage.isChecked("#sendTabNotifications")));
+    await settingsPage.close();
+
+    // The other way: B sends to A, which opens it and shows a notification.
+    await a.sw.evaluate(() => {
+      globalThis.__notes = [];
+      const create = chrome.notifications.create.bind(chrome.notifications);
+      chrome.notifications.create = (...args) => {
+        globalThis.__notes.push(args.find((x) => typeof x === "object"));
+        return create(...args);
+      };
+    });
+    const sentBA = await sendTab(cb.popup, aId, SEND_URL_B);
+    check("send tab: B's send is reported as delivered", sentBA?.ok === true, JSON.stringify(sentBA));
+    check("send tab: the tab sent from B opens in A", (await waitFor(async () => (await tabsAt(a, SEND_URL_B)).length > 0, { timeout: 30_000, interval: 500 })) === true);
+    const note = await waitFor(async () => (await a.sw.evaluate(() => globalThis.__notes))?.[0], { timeout: 15_000, interval: 500 });
+    check("send tab: the receiving device shows a notification naming the sender", note?.title === "Tab from E2E device B", JSON.stringify(note));
+    await closeTabsAt(a, SEND_URL_B);
+
+    // Refused before anything is sent.
+    const bad = await sendTab(ca.popup, bId, "javascript:alert(1)");
+    check("send tab: a non-web address is refused", bad?.ok === false && bad.reason === "bad_url", JSON.stringify(bad));
+
+    // A device that isn't connected is reported, and nothing is kept for it.
+    if (b.kind === "chromium") {
+      const stopped = await stopWorker(b);
+      const wentOffline = stopped && (await waitFor(async () => (await isOnline("E2E device B")) === false, { timeout: 30_000, interval: 1_000 }));
+      check("send tab: a device whose worker stopped is listed offline", wentOffline === true);
+      const offline = await sendTab(ca.popup, bId, SEND_URL);
+      check("send tab: sending to an offline device says so", offline?.ok === false && offline.reason === "offline", JSON.stringify(offline));
+      // Waking B reconnects it, and the missed tab is not delivered later.
+      await syncNow(cb.popup).catch(() => {});
+      const back = await waitFor(async () => (await isOnline("E2E device B")) === true, { timeout: 60_000, interval: 1_000 });
+      check("send tab: the device is online again after its worker restarts", back === true);
+      await new Promise((r) => setTimeout(r, 3_000));
+      check("send tab: nothing was queued for the offline device", (await tabsAt(b, SEND_URL)).length === 0);
+    }
+  }
 
   // A bookmark created in A reaches B.
   await a.sw.evaluate((url) => chrome.bookmarks.create({ parentId: "1", title: "HelixSync E2E", url }), BOOKMARK_URL);

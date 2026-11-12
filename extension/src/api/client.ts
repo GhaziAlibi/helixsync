@@ -707,3 +707,72 @@ export async function reportRestoreApplied(id: string, mode: "merge" | "exact", 
     throw await buildApiError(res, `reporting the restore failed (${res.status})`);
   }
 }
+
+// --- Send tab (docs/protocol.md §12.5) ---------------------------------------
+
+/** A row of `GET /devices`. `online` is missing on a server that predates
+ * send-tab. */
+export interface DeviceListEntry {
+  id: string;
+  name: string;
+  browser?: string | null;
+  platform?: string | null;
+  lastSeenAt?: string | null;
+  revokedAt?: string | null;
+  online?: boolean;
+}
+
+export async function listDevices(): Promise<DeviceListEntry[]> {
+  const res = await authedFetch("/api/v1/devices");
+  if (!res.ok) {
+    throw await buildApiError(res, `listing devices failed (${res.status})`);
+  }
+  return res.json();
+}
+
+/** `delivered` means the server queued it on the target's open socket, not
+ * that the target opened it. */
+export async function sendTabToServer(
+  targetDeviceId: string,
+  body: { id: string; envelope: unknown },
+): Promise<{ delivered: boolean }> {
+  const res = await authedFetch(`/api/v1/devices/${encodeURIComponent(targetDeviceId)}/send-tab`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw await buildApiError(res, `sending the tab failed (${res.status})`);
+  }
+  const result = (await res.json()) as { delivered?: unknown };
+  return { delivered: result.delivered === true };
+}
+
+let sendTabSupportCache: { serverUrl: string; supported: boolean; at: number } | undefined;
+const SEND_TAB_SUPPORT_TTL_MS = 10 * 60_000;
+
+/** Whether the server reports `sendTab` in `/version`; an older server omits
+ * it. Cached for a few minutes; a failed lookup reads as unsupported without
+ * being cached. */
+export async function serverSupportsSendTab(): Promise<boolean> {
+  const device = await getDevice();
+  if (!device) return false;
+  const cached = sendTabSupportCache;
+  if (cached && cached.serverUrl === device.serverUrl && Date.now() - cached.at < SEND_TAB_SUPPORT_TTL_MS) {
+    return cached.supported;
+  }
+  try {
+    const res = await fetchWithTimeout(`${device.serverUrl}/api/v1/version`);
+    if (!res.ok) return false;
+    const body = (await res.json()) as { sendTab?: unknown };
+    const supported = body.sendTab === true;
+    sendTabSupportCache = { serverUrl: device.serverUrl, supported, at: Date.now() };
+    return supported;
+  } catch {
+    return false;
+  }
+}
+
+export function resetSendTabSupportCache(): void {
+  sendTabSupportCache = undefined;
+}

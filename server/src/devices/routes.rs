@@ -1,4 +1,5 @@
-use axum::extract::{ConnectInfo, Path, State};
+use axum::body::Bytes;
+use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
@@ -19,12 +20,12 @@ use crate::crypto::{
 use crate::error::{AppError, AppResult};
 use crate::middleware::client_ip::{client_ip, rate_limit_ip_key};
 use crate::middleware::rate_limit::{
-    enforce, DEVICE_REGISTER_EMAIL_LIMIT, DEVICE_REGISTER_LIMIT, TOKEN_REFRESH_AUTHENTICATED_LIMIT,
-    TOKEN_REFRESH_IP_LIMIT, TOKEN_REFRESH_LIMIT,
+    enforce, DEVICE_REGISTER_EMAIL_LIMIT, DEVICE_REGISTER_LIMIT, TAB_SEND_LIMIT,
+    TOKEN_REFRESH_AUTHENTICATED_LIMIT, TOKEN_REFRESH_IP_LIMIT, TOKEN_REFRESH_LIMIT,
 };
 use crate::state::AppState;
 
-use super::model::DevicePublic;
+use super::model::{DeviceListEntry, DevicePublic};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -33,6 +34,12 @@ pub fn router() -> Router<AppState> {
         .route("/", get(list_devices))
         .route("/{id}", patch(rename_device))
         .route("/{id}/revoke", post(revoke_device))
+        // Read in full before the handler runs; the envelope cap is checked
+        // there, after the cheaper checks.
+        .route(
+            "/{id}/send-tab",
+            post(send_tab).layer(DefaultBodyLimit::max(SEND_TAB_MAX_BODY_BYTES)),
+        )
         // Static segments win over `/:id/...` in the router, so "self" is
         // never parsed as a device id.
         .route("/self/revoke", post(revoke_self))
@@ -489,7 +496,7 @@ async fn refresh_credentials(
 async fn list_devices(
     user: crate::auth::extractors::AnyAuthenticatedUser,
     State(state): State<AppState>,
-) -> AppResult<Json<Vec<DevicePublic>>> {
+) -> AppResult<Json<Vec<DeviceListEntry>>> {
     let devices = sqlx::query_as!(
         DevicePublic,
         r#"
@@ -503,7 +510,97 @@ async fn list_devices(
     .fetch_all(&state.db)
     .await?;
 
+    let online = state.ws_registry.online_device_ids(user.user_id);
+    let devices = devices
+        .into_iter()
+        .map(|device| DeviceListEntry {
+            online: device.revoked_at.is_none() && online.contains(&device.id),
+            device,
+        })
+        .collect();
+
     Ok(Json(devices))
+}
+
+/// Largest accepted `envelope`, in bytes of its JSON.
+const SEND_TAB_MAX_ENVELOPE_BYTES: usize = 8 * 1024;
+/// Raw body cap: the envelope plus the `id` and JSON overhead.
+const SEND_TAB_MAX_BODY_BYTES: usize = SEND_TAB_MAX_ENVELOPE_BYTES + 1024;
+
+#[derive(Deserialize)]
+struct SendTabRequest {
+    id: Uuid,
+    envelope: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct SendTabResponse {
+    delivered: bool,
+}
+
+/// Pushes an encrypted envelope to one of the caller's other devices over
+/// its open websocket (docs/protocol.md §12.5). Nothing is stored: an offline
+/// target gets `delivered: false`. The server can't read the envelope.
+async fn send_tab(
+    device: AuthenticatedDevice,
+    Path(target_id): Path<Uuid>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<Json<SendTabResponse>> {
+    crate::sync::routes::reject_if_protocol_too_old(&headers, &state)?;
+
+    enforce(
+        &state.rate_limiter,
+        TAB_SEND_LIMIT,
+        &device.device_id.to_string(),
+    )?;
+
+    if target_id == device.device_id {
+        return Err(AppError::Validation(
+            "cannot send a tab to this device".into(),
+        ));
+    }
+
+    // Same answer for another user's device and an unknown one.
+    let target_active = sqlx::query_scalar::<_, bool>(
+        "SELECT revoked_at IS NULL FROM devices WHERE id = $1 AND user_id = $2",
+    )
+    .bind(target_id)
+    .bind(device.user_id)
+    .fetch_optional(&state.db)
+    .await?
+    .unwrap_or(false);
+    if !target_active {
+        return Err(AppError::NotFound);
+    }
+
+    let req: SendTabRequest = serde_json::from_slice(&body)
+        .map_err(|_| AppError::Validation("invalid send-tab body".into()))?;
+    if !req.envelope.is_object() {
+        return Err(AppError::Validation("envelope must be an object".into()));
+    }
+    let envelope_len = serde_json::to_vec(&req.envelope)
+        .map(|v| v.len())
+        .unwrap_or(usize::MAX);
+    if envelope_len > SEND_TAB_MAX_ENVELOPE_BYTES {
+        return Err(AppError::Validation("envelope is too large".into()));
+    }
+
+    // `fromDeviceId` comes from the token, never from the body.
+    let frame = serde_json::json!({
+        "type": "tab_send",
+        "id": req.id,
+        "fromDeviceId": device.device_id,
+        "envelope": req.envelope,
+    })
+    .to_string();
+
+    let delivered = state
+        .ws_registry
+        .send_to_device(device.user_id, target_id, frame);
+
+    Ok(Json(SendTabResponse { delivered }))
 }
 
 #[derive(Deserialize)]

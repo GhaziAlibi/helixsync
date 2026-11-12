@@ -610,5 +610,68 @@
   },
   "rp_err_generic": {
     "message": "Un problème est survenu."
+  },
+  "sendtab_menuTitle": {
+    "message": "Envoyer à un appareil"
+  },
+  "sendtab_label": {
+    "message": "Envoyer cet onglet à"
+  },
+  "sendtab_noDevices": {
+    "message": "Aucun autre appareil pour l'instant."
+  },
+  "sendtab_online": {
+    "message": "en ligne"
+  },
+  "sendtab_offlineState": {
+    "message": "hors ligne"
+  },
+  "sendtab_listFailed": {
+    "message": "Impossible de charger vos appareils."
+  },
+  "sendtab_sent": {
+    "message": "Envoyé à {device}."
+  },
+  "sendtab_offline": {
+    "message": "{device} est hors ligne. Rien n'a été envoyé."
+  },
+  "sendtab_failed": {
+    "message": "Impossible d'envoyer l'onglet : {message}"
+  },
+  "sendtab_notConnected": {
+    "message": "Connectez d'abord ce navigateur à votre compte."
+  },
+  "sendtab_unsupported": {
+    "message": "Ce serveur ne prend pas en charge l'envoi d'onglets."
+  },
+  "sendtab_badUrl": {
+    "message": "Seules les pages web (http ou https) peuvent être envoyées."
+  },
+  "sendtab_tooLarge": {
+    "message": "Cette adresse est trop longue pour être envoyée."
+  },
+  "sendtab_deviceGone": {
+    "message": "Cet appareil n'est plus disponible."
+  },
+  "sendtab_rateLimited": {
+    "message": "Trop d'onglets envoyés. Réessayez dans une minute."
+  },
+  "sendtab_unknownDevice": {
+    "message": "un autre appareil"
+  },
+  "sendtab_notifReceived": {
+    "message": "Onglet de {device}"
+  },
+  "settings_sendTabLegend": {
+    "message": "Envoi d'onglet"
+  },
+  "settings_sendTabNotifications": {
+    "message": "Notifications"
+  },
+  "settings_sendTabHelp": {
+    "message": "Affiche une notification lorsqu'un onglet est envoyé ou arrive. Nécessite l'autorisation de notifications du navigateur."
+  },
+  "settings_sendTabDenied": {
+    "message": "L'autorisation de notifications n'a pas été accordée."
   }
 }
