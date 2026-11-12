@@ -31,6 +31,8 @@ const mapped = new Map<string, string>();
 const recordedState = new Map<string, unknown>();
 
 vi.mock("../storage/db", () => ({
+  // A connected device: capture is skipped without one.
+  getDevice: vi.fn(async () => ({ deviceId: "device-1" })),
   getFieldState: vi.fn(async (objectId: string) => {
     const value = recordedState.get(objectId);
     return value === undefined ? undefined : { value };
@@ -85,7 +87,7 @@ vi.mock("../api/client", () => ({
   fetchTabRestorePolicy: vi.fn(async () => "ask"),
 }));
 
-const { flushTabEvents, registerCapture, resetCaptureStateForTesting, restoreTab } = await import("./index");
+const { captureOpenTabs, flushTabEvents, registerCapture, resetCaptureStateForTesting, restoreTab } = await import("./index");
 
 function tab(id: number, url: string): chrome.tabs.Tab {
   return { id, windowId: 1, url, title: url, pinned: false, index: 0, active: false } as chrome.tabs.Tab;
@@ -117,11 +119,28 @@ describe("capturing tabs that have no object yet", () => {
     chromeTabsQueryMock.mockResolvedValue([known, tab(2, "https://new.test/")]);
 
     registerCapture();
+    expect(chromeTabsQueryMock).not.toHaveBeenCalled();
+    captureOpenTabs();
     await vi.waitFor(() => expect(createLocalOperationsBatchMock).toHaveBeenCalled(), { timeout: 2_000 });
 
     expect(stagedOps()).toEqual([
       expect.objectContaining({ objectId: "tab-2", operationType: "create" }),
     ]);
+  });
+
+  // After Disconnect + reconnect the listeners are still registered, so the
+  // open tabs must be enumerated again by the capture initialization.
+  it("enumerates the open tabs again after capture is already registered", async () => {
+    chromeTabsQueryMock.mockResolvedValue([tab(3, "https://again.test/")]);
+
+    registerCapture();
+    captureOpenTabs();
+    await vi.waitFor(() => expect(createLocalOperationsBatchMock).toHaveBeenCalledTimes(1), { timeout: 2_000 });
+
+    registerCapture();
+    captureOpenTabs();
+    await vi.waitFor(() => expect(chromeTabsQueryMock).toHaveBeenCalledTimes(2), { timeout: 2_000 });
+    await vi.waitFor(() => expect(createLocalOperationsBatchMock).toHaveBeenCalledTimes(2), { timeout: 2_000 });
   });
 
   it("does not take a tab it is opening for a remote tab for a new local one", async () => {

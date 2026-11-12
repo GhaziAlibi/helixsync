@@ -124,17 +124,23 @@ jobs:
           git commit -m "chore: bump version to $new_version"
           git push origin HEAD:main
 
-      - name: Sync manifest version with VERSION
+      - name: Sync manifest versions with VERSION
         if: github.event_name == 'push'
         run: |
           version=$(tr -d '[:space:]' < VERSION)
-          current=$(jq -r '.version' extension/manifest.json)
-          if [ "$current" != "$version" ]; then
-            jq --arg v "$version" '.version = $v' extension/manifest.json > extension/manifest.json.tmp
-            mv extension/manifest.json.tmp extension/manifest.json
+          changed=false
+          for manifest in extension/chrome/manifest.json extension/firefox/manifest.json; do
+            current=$(jq -r '.version' "$manifest")
+            if [ "$current" != "$version" ]; then
+              jq --arg v "$version" '.version = $v' "$manifest" > "$manifest.tmp"
+              mv "$manifest.tmp" "$manifest"
+              git add "$manifest"
+              changed=true
+            fi
+          done
+          if [ "$changed" = true ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add extension/manifest.json
             git commit -m "chore: sync manifest version to $version"
             git push origin HEAD:main
           fi
@@ -249,19 +255,26 @@ jobs:
           cache: npm
           cache-dependency-path: extension/package-lock.json
 
-      - name: Stamp manifest version
+      - name: Stamp manifest versions
         run: |
-          jq --arg v "$VERSION" '.version = $v' manifest.json > manifest.json.tmp
-          mv manifest.json.tmp manifest.json
+          for manifest in chrome/manifest.json firefox/manifest.json; do
+            jq --arg v "$VERSION" '.version = $v' "$manifest" > "$manifest.tmp"
+            mv "$manifest.tmp" "$manifest"
+          done
 
       - run: npm ci
       - run: npm run build
+      - run: npm run build:firefox
       - run: npm test
 
       - name: Package extension
         run: |
-          cd dist
-          zip -r "../helixsync-extension-${VERSION}.zip" .
+          (cd dist && zip -r "../helixsync-extension-${VERSION}.zip" .)
+          (cd dist-firefox && zip -r "../helixsync-extension-firefox-${VERSION}.zip" .)
+          # Source for AMO's reviewers: the commit plus the stamped manifest
+          # versions, so their build matches the package exactly.
+          ref=$(git -c user.name=ci -c user.email=ci@localhost stash create)
+          git -C .. archive --format=zip -o "extension/helixsync-extension-firefox-source-${VERSION}.zip" "${ref:-HEAD}"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -270,12 +283,111 @@ jobs:
           path: extension/helixsync-extension-${{ needs.version.outputs.version }}.zip
           retention-days: 30
 
-  # Attaches the built zip to the GitHub release. Can write to the repository,
-  # so it only downloads the artifact and calls the preinstalled `gh`: no
-  # install step, no third-party action.
-  release-extension:
+      # Unsigned: Firefox installs it only once AMO has signed it.
+      - name: Upload Firefox build artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: helixsync-extension-firefox
+          path: extension/helixsync-extension-firefox-${{ needs.version.outputs.version }}.zip
+          retention-days: 30
+
+      - name: Upload Firefox source artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: helixsync-extension-firefox-source
+          path: extension/helixsync-extension-firefox-source-${{ needs.version.outputs.version }}.zip
+          retention-days: 30
+
+  # Decides which browsers this run releases: a package is released only when
+  # it differs from the one in the last GitHub release that shipped it. Most
+  # changes are to shared code (extension/src/), so the paths a push touched
+  # can't tell which package changed; the built files can. Chrome and Firefox
+  # code is kept apart (extension/chrome/, extension/firefox/, `@platform`),
+  # so a Firefox-only change leaves the Chrome package byte-identical and
+  # nothing is published to the Chrome Web Store. The manifest's version is
+  # ignored, since every run stamps a new one. No install step, no
+  # third-party action: it only downloads zips and compares them.
+  extension-changes:
     needs: [ci, version, extension]
     if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      chrome: ${{ steps.compare.outputs.chrome }}
+      firefox: ${{ steps.compare.outputs.firefox }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helixsync-extension
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helixsync-extension-firefox
+
+      - name: Compare with the last released packages
+        id: compare
+        run: |
+          # A failure inside $(changed ...) fails the step rather than being
+          # read as an answer.
+          shopt -s inherit_errexit
+          # Prints "true" unless <zip> has the same files as the newest
+          # earlier release asset matching <pattern>.
+          changed() {
+            local zip="$1" pattern="$2" label="$3" tag asset=""
+            for tag in $(gh release list --limit 100 --json tagName,isDraft \
+              | jq -r '.[] | select(.isDraft | not) | .tagName'); do
+              [ "$tag" = "v$VERSION" ] && continue
+              asset=$(gh release view "$tag" --json assets \
+                | jq -r --arg p "$pattern" '[.assets[].name | select(test($p))][0] // empty')
+              [ -n "$asset" ] && break
+            done
+            if [ -z "$asset" ]; then
+              echo "$label: no earlier release has this package" >&2
+              echo true
+              return
+            fi
+            rm -rf "cmp-$label" && mkdir -p "cmp-$label/old" "cmp-$label/new"
+            gh release download "$tag" --pattern "$asset" --dir "cmp-$label"
+            unzip -q "cmp-$label/$asset" -d "cmp-$label/old"
+            unzip -q "$zip" -d "cmp-$label/new"
+            for side in old new; do
+              jq -S 'del(.version)' "cmp-$label/$side/manifest.json" > "cmp-$label/$side/manifest.norm"
+              rm "cmp-$label/$side/manifest.json"
+            done
+            if diff -r "cmp-$label/old" "cmp-$label/new" >&2; then
+              echo "$label: same as $asset ($tag), not releasing" >&2
+              echo false
+            else
+              echo "$label: differs from $asset ($tag)" >&2
+              echo true
+            fi
+          }
+          chrome=$(changed "helixsync-extension-${VERSION}.zip" '^helixsync-extension-[0-9]+\.[0-9]+\.[0-9]+\.zip$' chrome)
+          firefox=$(changed "helixsync-extension-firefox-${VERSION}.zip" '^helixsync-extension-firefox-[0-9]+\.[0-9]+\.[0-9]+\.zip$' firefox)
+          echo "chrome=$chrome" >> "$GITHUB_OUTPUT"
+          echo "firefox=$firefox" >> "$GITHUB_OUTPUT"
+
+  # Attaches the changed zips to the GitHub release. Can write to the
+  # repository, so it only downloads the artifacts and calls the preinstalled
+  # `gh`: no install step, no third-party action.
+  #
+  # Runs after the publish jobs, because `extension-changes` compares with the
+  # zips attached to the last release: a zip attached although its publish
+  # failed or was rejected would make the next run see "unchanged" and never
+  # retry it. A browser's zip is therefore attached only when its publish job
+  # succeeded or did not run (nothing changed, or its secret is unset, which
+  # the job reports as a success). `!cancelled()` lets this job run when a
+  # publish job was skipped; a failed or cancelled one just leaves its zip off.
+  # The cost: the release appears only once any pending publish approval is
+  # given.
+  release-extension:
+    needs: [ci, version, extension, extension-changes, publish-chrome-web-store, publish-firefox-amo]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' && needs.extension-changes.result == 'success' && (needs.extension-changes.outputs.chrome == 'true' || needs.extension-changes.outputs.firefox == 'true') }}
     runs-on: ubuntu-latest
     concurrency:
       group: release-extension
@@ -287,19 +399,39 @@ jobs:
       GH_REPO: ${{ github.repository }}
       VERSION: ${{ needs.version.outputs.version }}
       TARGET_SHA: ${{ github.sha }}
+      CHROME_CHANGED: ${{ needs.extension-changes.outputs.chrome }}
+      FIREFOX_CHANGED: ${{ needs.extension-changes.outputs.firefox }}
+      CHROME_PUBLISH: ${{ needs.publish-chrome-web-store.result }}
+      FIREFOX_PUBLISH: ${{ needs.publish-firefox-amo.result }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: helixsync-extension
 
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helixsync-extension-firefox
+
       - name: Attach to GitHub Release
         run: |
           tag="v${VERSION}"
-          zip="helixsync-extension-${VERSION}.zip"
+          zips=()
+          # Not a failed or cancelled publish: see the job comment.
+          published() { [ "$1" = success ] || [ "$1" = skipped ]; }
+          if [ "$CHROME_CHANGED" = true ] && published "$CHROME_PUBLISH"; then
+            zips+=("helixsync-extension-${VERSION}.zip")
+          fi
+          if [ "$FIREFOX_CHANGED" = true ] && published "$FIREFOX_PUBLISH"; then
+            zips+=("helixsync-extension-firefox-${VERSION}.zip")
+          fi
+          if [ "${#zips[@]}" -eq 0 ]; then
+            echo "No package to attach: every changed package failed to publish"
+            exit 0
+          fi
           # The release normally exists already (the version job pushed the
-          # tag); create it if not, and replace the asset on a re-run.
-          gh release create "$tag" "$zip" --target "$TARGET_SHA" --title "$tag" --generate-notes \
-            || gh release upload "$tag" "$zip" --clobber
+          # tag); create it if not, and replace the assets on a re-run.
+          gh release create "$tag" "${zips[@]}" --target "$TARGET_SHA" --title "$tag" --generate-notes \
+            || gh release upload "$tag" "${zips[@]}" --clobber
 
   # Pushes this version to the Chrome Web Store. Holds the CHROME_* secrets, so
   # it is deliberately tiny: read-only token, a protected `chrome-web-store`
@@ -316,9 +448,12 @@ jobs:
   # before the one-time OAuth setup. The item must already exist in the Web
   # Store dashboard from a prior manual submission; this API can only publish
   # updates to it, not create it the first time.
+  #
+  # Runs only when the Chrome package changed (`extension-changes`), so a
+  # Firefox-only change never reaches the Web Store.
   publish-chrome-web-store:
-    needs: [ci, version, extension]
-    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' }}
+    needs: [ci, version, extension, extension-changes]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' && needs.extension-changes.outputs.chrome == 'true' }}
     runs-on: ubuntu-latest
     environment: chrome-web-store
     concurrency:
@@ -388,3 +523,102 @@ jobs:
             -H "Authorization: Bearer $access_token" \
             -H "Content-Type: application/json" \
             -d '{"publishType":"STAGED_PUBLISH"}' > /dev/null
+
+  # Submits this version to addons.mozilla.org, which reviews, signs and
+  # publishes it. Built like publish-chrome-web-store: the AMO_* secrets live
+  # in a protected `firefox-amo` environment, and the job only downloads the
+  # already-built zips and calls AMO's API with curl and openssl, so no
+  # package install script ever runs next to them. The add-on must already
+  # exist on AMO (first version uploaded by hand) under the manifest's
+  # gecko.id. Skips itself while AMO_JWT_ISSUER is unset.
+  #
+  # Runs only when the Firefox package changed (`extension-changes`).
+  publish-firefox-amo:
+    needs: [ci, version, extension, extension-changes]
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && needs.ci.result == 'success' && needs.extension.result == 'success' && needs.extension-changes.outputs.firefox == 'true' }}
+    runs-on: ubuntu-latest
+    environment: firefox-amo
+    concurrency:
+      group: release-publish-firefox
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helixsync-extension-firefox
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: helixsync-extension-firefox-source
+
+      - name: Submit to addons.mozilla.org
+        env:
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+        run: |
+          if [ -z "$AMO_JWT_ISSUER" ]; then
+            echo "AMO_JWT_ISSUER not set, skipping AMO submission"
+            exit 0
+          fi
+          api=https://addons.mozilla.org/api/v5/addons
+          zip="helixsync-extension-firefox-${VERSION}.zip"
+          source="helixsync-extension-firefox-source-${VERSION}.zip"
+          guid=$(unzip -p "$zip" manifest.json | jq -er '.browser_specific_settings.gecko.id')
+
+          b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          # A fresh token per call: AMO wants a unique jti and exp <= iat + 5 min.
+          token() {
+            local now header payload sig
+            now=$(date +%s)
+            header=$(printf '%s' '{"alg":"HS256","typ":"JWT"}' | b64url)
+            payload=$(jq -nc --arg iss "$AMO_JWT_ISSUER" --arg jti "$(openssl rand -hex 16)" \
+              --argjson iat "$now" --argjson exp "$((now + 240))" \
+              '{iss: $iss, jti: $jti, iat: $iat, exp: $exp}' | b64url)
+            sig=$(printf '%s' "$header.$payload" | openssl dgst -sha256 -hmac "$AMO_JWT_SECRET" -binary | b64url)
+            printf '%s' "$header.$payload.$sig"
+          }
+          # Prints the body; on a non-2xx status prints it to stderr and fails.
+          call() {
+            local method="$1" url="$2" status
+            shift 2
+            status=$(curl -s -o /tmp/amo_response.json -w '%{http_code}' -X "$method" \
+              -H "Authorization: JWT $(token)" "$@" "$url")
+            if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+              echo "AMO API call failed: $method $url (HTTP $status)" >&2
+              cat /tmp/amo_response.json >&2
+              exit 1
+            fi
+            cat /tmp/amo_response.json
+          }
+
+          uuid=$(call POST "$api/upload/" -F "upload=@$zip" -F channel=listed | jq -er '.uuid')
+
+          # Wait for AMO's validator (usually under a minute).
+          for _ in $(seq 60); do
+            upload=$(call GET "$api/upload/$uuid/")
+            [ "$(echo "$upload" | jq -r '.processed')" = true ] && break
+            sleep 10
+          done
+          if [ "$(echo "$upload" | jq -r '.processed')" != true ]; then
+            echo "AMO did not finish validating upload $uuid in time" >&2
+            exit 1
+          fi
+          if [ "$(echo "$upload" | jq -r '.valid')" != true ]; then
+            echo "AMO rejected the package:" >&2
+            echo "$upload" | jq '.validation' >&2
+            exit 1
+          fi
+
+          # The license is inherited from the previous version.
+          version_id=$(call POST "$api/addon/$guid/versions/" \
+            -F "upload=$uuid" -F "source=@$source" | jq -er '.id')
+
+          notes='Build: Node.js 22, npm 10. From the source root: cd extension && npm ci && npm run build:firefox. Output: extension/dist-firefox/, identical to the package. Testing needs a HelixSync server: docker compose up (see README.md). innerHTML values in the popup are escaped (src/popup/main.ts, th/esc helpers).'
+          call PATCH "$api/addon/$guid/versions/$version_id/" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -nc --arg n "$notes" '{approval_notes: $n}')" > /dev/null
+
+          echo "Submitted $VERSION to AMO for review (version $version_id)"

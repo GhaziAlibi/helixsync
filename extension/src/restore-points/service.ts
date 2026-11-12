@@ -17,7 +17,7 @@ import { createQueuedRestorePoint } from "./create";
 import { drainOutbox, listOutbox, type OutboxItem } from "./outbox";
 import { loadRestorePoint, previewRestore, startRestore, clearLoadedRestorePoint, type RestoreRequest } from "./restore";
 import { BookmarksNotReadyError } from "./snapshot";
-import { getRestoreProgress, RestoreError } from "./state";
+import { getRestoreProgress, isRestoreRunning, resetRestoreProgress, RestoreError } from "./state";
 import { restorePointsAvailable } from "./triggers";
 
 export interface ServiceError {
@@ -119,6 +119,14 @@ export function start(request: RestoreRequest): Promise<ServiceResult<{ started:
 }
 
 export function progress() {
+  return { ok: true as const, progress: getRestoreProgress() };
+}
+
+/** The user has seen how a finished restore ended (the popup's Done): forget
+ * it, so the Restore points view shows the list again. A running restore is
+ * kept. */
+export function dismissProgress() {
+  if (!isRestoreRunning()) resetRestoreProgress();
   return { ok: true as const, progress: getRestoreProgress() };
 }
 

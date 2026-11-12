@@ -52,6 +52,7 @@ import { flushAllMicroBatchQueues } from "../sync/micro-batch";
 import type { ObjectType } from "../sync/types";
 import {
   backfillExisting as backfillBookmarks,
+  materializeWaitingLazyRoots,
   registerCapture as registerBookmarkCapture,
   setBookmarkCaptureEnabled,
   setLinkExistingBookmarks,
@@ -75,6 +76,7 @@ import {
 import { resumeInterruptedRestore, clearLoadedRestorePoint } from "../restore-points/restore";
 import * as restorePointService from "../restore-points/service";
 import {
+  captureOpenTabs,
   flushPendingTitleDebounces,
   registerCapture as registerTabCapture,
   restoreTab,
@@ -83,6 +85,7 @@ import {
   setTabsCaptureEnabled,
 } from "../tabs";
 import { singleFlight } from "../util/single-flight";
+import { platform } from "@platform";
 
 const SYNC_ALARM = "helixsync-periodic-sync";
 // A backstop only: WebSocket pushes and local nudges provide the low
@@ -164,12 +167,22 @@ export async function updateBadge(force = false): Promise<void> {
     if (!force && now - lastBadgeAt < BADGE_THROTTLE_MS) {
       return;
     }
+    // Not connected (a new install, or after Disconnect): nothing to show,
+    // and the settings the rest reads need a device.
+    if (!(await getDevice())) {
+      lastBadgeAt = now;
+      if (lastBadgeText !== "" || force) {
+        lastBadgeText = "";
+        await platform.toolbarAction().setBadgeText({ text: "" });
+      }
+      return;
+    }
     // A waiting sign-in request outranks the tab count: it expires soon.
     if (pendingAuthRequestCount > 0) {
       lastBadgeAt = now;
       if (lastBadgeText !== AUTH_REQUEST_BADGE || force) {
         lastBadgeText = AUTH_REQUEST_BADGE;
-        await chrome.action.setBadgeText({ text: AUTH_REQUEST_BADGE });
+        await platform.toolbarAction().setBadgeText({ text: AUTH_REQUEST_BADGE });
       }
       return;
     }
@@ -177,7 +190,7 @@ export async function updateBadge(force = false): Promise<void> {
     if (tabRestorePolicy !== "ask") {
       if (lastBadgeText !== "") {
         lastBadgeText = "";
-        await chrome.action.setBadgeText({ text: "" });
+        await platform.toolbarAction().setBadgeText({ text: "" });
       }
       lastBadgeAt = now;
       return;
@@ -187,7 +200,7 @@ export async function updateBadge(force = false): Promise<void> {
     const nextText = pendingCount > 0 ? String(pendingCount) : "";
     if (nextText !== lastBadgeText || force) {
       lastBadgeText = nextText;
-      await chrome.action.setBadgeText({ text: nextText });
+      await platform.toolbarAction().setBadgeText({ text: nextText });
     }
   } catch (e) {
     console.warn("HelixSync: failed to update restore badge", e);
@@ -312,6 +325,8 @@ async function initializeCaptureForSettings(): Promise<void> {
   // Tab sync defaults to off, so only it is gated on the setting.
   if (settings.syncTabs) {
     registerTabCapture();
+    // Every time, not only at first registration: see captureOpenTabs.
+    captureOpenTabs();
   }
 
   if (!device.initialImportCompletedAt) {
@@ -435,6 +450,7 @@ type PopupMessage =
   | { type: "PREVIEW_RESTORE"; pointId: string; mode: "merge" | "exact"; scope: string }
   | { type: "START_RESTORE"; pointId: string; mode: "merge" | "exact"; scope: string }
   | { type: "GET_RESTORE_PROGRESS" }
+  | { type: "DISMISS_RESTORE_PROGRESS" }
   | { type: "SET_RESTORE_POINT_PINNED"; pointId: string; pinned: boolean }
   | { type: "DELETE_RESTORE_POINT"; pointId: string };
 
@@ -489,6 +505,8 @@ async function handleMessage(message: PopupMessage | undefined): Promise<unknown
       return restorePointService.start({ pointId: message.pointId, mode: message.mode, scope: message.scope });
     case "GET_RESTORE_PROGRESS":
       return restorePointService.progress();
+    case "DISMISS_RESTORE_PROGRESS":
+      return restorePointService.dismissProgress();
     case "SET_RESTORE_POINT_PINNED":
       return restorePointService.pin(message.pointId, message.pinned);
     case "DELETE_RESTORE_POINT":
@@ -539,6 +557,7 @@ ensureCryptoReady()
     if (!device?.initialImportCompletedAt) return;
     // Once per browser: mappings of nodes a deleted folder took with it.
     await sweepStaleBookmarkMappingsOnce().catch((e) => console.error("HelixSync: bookmark mapping sweep failed", e));
+    await materializeWaitingLazyRoots().catch((e) => console.error("HelixSync: could not apply bookmarks waiting on a root", e));
     await resumeInterruptedRestore().catch((e) => console.error("HelixSync: could not resume the restore", e));
     await drainRestorePointOutbox();
   })

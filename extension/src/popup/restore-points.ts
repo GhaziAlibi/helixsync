@@ -528,7 +528,12 @@ function renderProgress(app: HTMLElement, ctx: ViewContext): void {
   const result = el("div", { className: "status-message" });
   const done = button(t("rp_doneButton"), "primary");
   done.hidden = true;
-  done.addEventListener("click", () => void ctx.rerender());
+  // A finished restore stays reported until dismissed here; without this the
+  // view would show it again on every open, and Done would loop back to it.
+  done.addEventListener("click", async () => {
+    await ask({ type: "DISMISS_RESTORE_PROGRESS" });
+    await ctx.rerender();
+  });
   root.append(message, bar, result, done);
 
   let stopped = false;

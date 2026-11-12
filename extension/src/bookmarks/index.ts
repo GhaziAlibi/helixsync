@@ -44,12 +44,17 @@ import { fetchSettings } from "../api/client";
 import { createMicroBatchQueue, flushAllMicroBatchQueuesAndWait } from "../sync/micro-batch";
 import { createSuppressionGuard } from "../sync/suppress";
 import {
-  ROOT_OBJECT_IDS,
   bookmarkRoots,
+  ensureStandInRoot,
   invalidateBookmarkRoots,
+  isLazyRootObjectId,
+  isNativeRootId,
+  lazyRootObjectIds,
   standInRootObjectId,
   type BookmarkRoots,
 } from "./roots";
+import { platform } from "@platform";
+import type { BookmarkNodeLike } from "../platform";
 import { chunk } from "../util/chunk";
 import { keyBetween } from "../util/fractional-index";
 import { uuidv7 } from "../util/uuid";
@@ -70,8 +75,13 @@ const roots = (): Promise<BookmarkRoots> => bookmarkRoots(guard);
 type BookmarkMove = { parent: string; position: string };
 type RecordedMove = { parent?: string | null; position?: string };
 
-function bookmarkObjectType(node: { url?: string }): ObjectType {
-  return node.url ? "bookmark" : "bookmarkFolder";
+// What a native node syncs as. Differs per browser: Firefox's separators
+// sync as marker bookmarks (firefox/platform.ts).
+const syncedUrl = (node: BookmarkNodeLike): string | undefined => platform.syncedUrl(node);
+const syncedTitle = (node: BookmarkNodeLike): string => platform.syncedTitle(node);
+
+function bookmarkObjectType(node: BookmarkNodeLike): ObjectType {
+  return syncedUrl(node) ? "bookmark" : "bookmarkFolder";
 }
 
 function byPosition(a: { position: string }, b: { position: string }): number {
@@ -248,8 +258,8 @@ async function stageCreated(
     : keyBetween(null, null);
 
   const payload: BookmarkPayload = {
-    title: node.title,
-    url: node.url ?? null,
+    title: syncedTitle(node),
+    url: syncedUrl(node) ?? null,
     parent: parentObjectId,
     position,
   };
@@ -322,6 +332,8 @@ async function stageChanged(
   const objectId = await cachedObjectId(id, mappingCache);
   if (!objectId) return null;
   const node = nodeCache?.get(id) ?? (await chrome.bookmarks.get(id))[0];
+  // A separator has nothing to change; its title and URL are fixed.
+  if (platform.isSeparatorNode(node)) return null;
   const objectType = bookmarkObjectType(node);
 
   const payload: Partial<BookmarkPayload> = {};
@@ -694,7 +706,7 @@ async function flattenForBackfill(
           {
             objectType: bookmarkObjectType(child),
             objectId: ownObjectId,
-            payload: { title: child.title, url: child.url ?? null, parent: parentObjectId, position },
+            payload: { title: syncedTitle(child), url: syncedUrl(child) ?? null, parent: parentObjectId, position },
           },
         );
       }
@@ -826,7 +838,7 @@ export function registerCapture(): void {
     // A built-in root fires onCreated when it's shown and onRemoved when
     // it's hidden. Re-resolved before the queued events that follow, which
     // may be the root's first child.
-    if (id in ROOT_OBJECT_IDS) {
+    if (isNativeRootId(id)) {
       invalidateBookmarkRoots();
       return;
     }
@@ -836,7 +848,7 @@ export function registerCapture(): void {
     enqueueBookmarkEvent({ kind: "created", id, node });
   });
   chrome.bookmarks.onRemoved.addListener((id, info) => {
-    if (id in ROOT_OBJECT_IDS) {
+    if (isNativeRootId(id)) {
       invalidateBookmarkRoots();
       return;
     }
@@ -921,7 +933,7 @@ export function setLinkExistingBookmarks(enabled: boolean): void {
 async function findUnlinkedMatch(parentChromiumId: string, p: BookmarkPayload): Promise<string | undefined> {
   const { standInIds } = await roots();
   const candidates = (await chrome.bookmarks.getChildren(parentChromiumId)).filter(
-    (node) => !standInIds.has(node.id) && node.title === p.title && (node.url ?? null) === (p.url ?? null),
+    (node) => !standInIds.has(node.id) && syncedTitle(node) === p.title && (syncedUrl(node) ?? null) === (p.url ?? null),
   );
   if (candidates.length === 0) return undefined;
   const linked = await getMappingsByLocalIds(
@@ -976,6 +988,13 @@ async function materialize(
   }
 
   const parentChromiumId = p.parent ? chromiumIds.get(p.parent) : undefined;
+  if (!parentChromiumId && p.parent && isLazyRootObjectId(p.parent)) {
+    // A root this device makes a folder for only on demand: wait on it like
+    // on any parent, then make it, which applies everything waiting.
+    await deferUntilParentMaterializes(objectId, objectType, p.parent);
+    await materializeLazyRoot(p.parent);
+    return;
+  }
   if (!parentChromiumId) {
     // Operations for different objects arrive in any order. This must stay
     // recoverable (docs/protocol.md §8.7), so it's retried once the parent
@@ -1018,7 +1037,7 @@ async function materialize(
   }
 
   const created = await guard.run(() =>
-    chrome.bookmarks.create({
+    platform.createBookmark({
       parentId: parentChromiumId,
       title: p.title,
       url: p.url ?? undefined,
@@ -1029,6 +1048,28 @@ async function materialize(
   await deleteDeferredMaterialization(objectId);
   await retryDeferredParent(objectId);
 }
+
+/** Creates the on-demand folder for a lazy root and applies everything
+ * waiting on it. */
+async function materializeLazyRoot(rootObjectId: string): Promise<void> {
+  const { chromiumIdByObjectId } = await ensureStandInRoot(guard, rootObjectId);
+  if (chromiumIdByObjectId.has(rootObjectId)) await retryDeferredParent(rootObjectId);
+}
+
+/** Makes the folder of every lazy root that bookmarks are waiting on. Run at
+ * startup: those were parked by an apply path that never ran again, such as
+ * ones received before an upgrade that could make the folder, and nothing else
+ * retries them until another bookmark for that root arrives. */
+export async function materializeWaitingLazyRoots(): Promise<void> {
+  for (const rootObjectId of lazyRootObjectIds()) {
+    if ((await getDeferredMaterializationsWaitingOn(rootObjectId)).length > 0) {
+      await materializeLazyRoot(rootObjectId);
+    }
+  }
+}
+
+/** True when the node is a separator, whose title and URL can't be set. */
+const isLocalSeparator = (chromiumId: string): Promise<boolean> => platform.isLocalSeparator(chromiumId);
 
 // IPC-heavy iterations (each may create a bookmark and recurse), so this
 // yields more often than the crypto loops do.
@@ -1097,13 +1138,17 @@ async function retryDeferredParent(parentObjectId: string): Promise<void> {
 
 async function applyTitle(objectId: string, title: string, prefetched?: ReadonlyMap<string, string>): Promise<void> {
   const chromiumId = prefetched?.get(objectId) ?? (await chromiumIdFor(objectId));
-  if (chromiumId) await guard.run(() => chrome.bookmarks.update(chromiumId, { title }));
+  if (chromiumId && !(await isLocalSeparator(chromiumId))) {
+    await guard.run(() => chrome.bookmarks.update(chromiumId, { title }));
+  }
 }
 
 async function applyUrl(objectId: string, url: string, prefetched?: ReadonlyMap<string, string>): Promise<void> {
   if (!isSyncableUrl(url)) return;
   const chromiumId = prefetched?.get(objectId) ?? (await chromiumIdFor(objectId));
-  if (chromiumId) await guard.run(() => chrome.bookmarks.update(chromiumId, { url }));
+  if (chromiumId && !(await isLocalSeparator(chromiumId))) {
+    await guard.run(() => chrome.bookmarks.update(chromiumId, { url }));
+  }
 }
 
 async function applyMove(
@@ -1123,6 +1168,7 @@ async function applyMove(
   const parentChromiumId = chromiumIds.get(p.parent);
   if (!parentChromiumId) {
     await deferUntilParentMaterializes(objectId, objectType, p.parent);
+    if (isLazyRootObjectId(p.parent)) await materializeLazyRoot(p.parent);
     return;
   }
   await deleteDeferredMaterialization(objectId);
@@ -1213,6 +1259,8 @@ async function applyMovesBatch(moves: RemoteMove[]): Promise<void> {
 
   const chromiumIds = await chromiumIdsFor([...new Set(moves.flatMap((move) => [move.objectId, move.parent]))]);
   const cacheByParent = new Map<string, CachedParentOrder>();
+  // Made after the loop, so creating them can't stale the cached orders.
+  const lazyRootsWanted = new Set<string>();
   const incomingPositionByObjectId = new Map(moves.map((move) => [move.objectId, move.position]));
 
   const getParentOrder = async (parentChromiumId: string): Promise<CachedParentOrder> => {
@@ -1264,6 +1312,7 @@ async function applyMovesBatch(moves: RemoteMove[]): Promise<void> {
     const parentChromiumId = chromiumIds.get(move.parent);
     if (!parentChromiumId) {
       await deferUntilParentMaterializes(move.objectId, move.objectType, move.parent);
+      if (isLazyRootObjectId(move.parent)) lazyRootsWanted.add(move.parent);
       continue;
     }
     await deleteDeferredMaterialization(move.objectId);
@@ -1291,6 +1340,7 @@ async function applyMovesBatch(moves: RemoteMove[]): Promise<void> {
     order.positionByObjectId.set(move.objectId, move.position);
     order.sorted.splice(index, 0, { chromiumId, position: move.position });
   }
+  for (const rootObjectId of lazyRootsWanted) await materializeLazyRoot(rootObjectId);
 }
 
 async function applyDelete(objectId: string, prefetched?: Map<string, string>): Promise<void> {
@@ -1654,9 +1704,9 @@ async function detectLocalMassDelete(
     removed.push({
       chromiumId: node.id,
       objectId,
-      kind: node.url ? "b" : "f",
-      title: node.title,
-      ...(node.url ? { url: node.url } : {}),
+      kind: syncedUrl(node) ? "b" : "f",
+      title: syncedTitle(node),
+      ...(syncedUrl(node) ? { url: syncedUrl(node) } : {}),
       parentObjectId,
       position: (moveStates.get(objectId)?.value as { position?: string } | undefined)?.position,
       unmodifiable: false,
@@ -1759,9 +1809,9 @@ export async function readLiveBookmarks(): Promise<LiveBookmarkTree> {
     nodes.push({
       chromiumId: node.id,
       objectId,
-      kind: node.url ? "b" : "f",
-      title: node.title,
-      ...(node.url ? { url: node.url } : {}),
+      kind: syncedUrl(node) ? "b" : "f",
+      title: syncedTitle(node),
+      ...(syncedUrl(node) ? { url: syncedUrl(node) } : {}),
       parentObjectId,
       position: (moveStates.get(objectId)?.value as { position?: string } | undefined)?.position,
       unmodifiable: (node as { unmodifiable?: string }).unmodifiable === "managed",

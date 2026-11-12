@@ -32,6 +32,8 @@ const getFieldStateMock = vi.fn<(objectId: string, field: string) => Promise<{ v
 const getMappingsByLocalIdsMock = vi.fn(async (_t: unknown, _i: unknown) => new Map());
 
 vi.mock("../storage/db", () => ({
+  // A connected device: capture is skipped without one.
+  getDevice: vi.fn(async () => ({ deviceId: "device-1" })),
   getFieldState: (objectId: string, field: string) => getFieldStateMock(objectId, field),
   getFieldStatesForObjects: vi.fn(async () => new Map()),
   getMappingsByLocalIds: (t: unknown, i: unknown) => getMappingsByLocalIdsMock(t, i),

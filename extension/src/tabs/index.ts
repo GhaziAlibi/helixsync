@@ -29,6 +29,7 @@ import {
 } from "../sync/mapping";
 import {
   deleteMappingsBatch,
+  getDevice,
   getFieldState,
   getFieldStatesForObjects,
   getMappingsByLocalIds,
@@ -686,6 +687,13 @@ function stageEvent(event: QueuedTabEvent, overlay: Map<string, unknown>, caches
 }
 
 export async function flushTabEvents(events: QueuedTabEvent[]): Promise<void> {
+  // Capture stays registered after Disconnect (and runs before a device is
+  // known); with no device there is nothing to sync, as for bookmarks and
+  // history. A later connect captures the open tabs again (registerCapture).
+  if (!(await getDevice())) {
+    clearAllTitleDebounce();
+    return;
+  }
   // Backstop for the listener flags: with Tabs off the whole batch (and any
   // pending titles) is dropped; with only Tab groups off, group events are.
   const { tabsOn, groupsOn } = await readCaptureToggles();
@@ -878,10 +886,15 @@ export function registerCapture(): void {
   chrome.tabs.onRemoved.addListener((tabId) => {
     handleTabRemoved(tabId);
   });
+}
 
-  // Tabs already open when capture starts (tab sync just turned on, or
-  // changes made while the worker was stopped) go through the update path:
-  // a mapped, unchanged tab produces nothing; a tab without an object is created.
+/** Queues the tabs already open through the update path: a mapped, unchanged
+ * tab produces nothing; a tab without an object is created. Called each time
+ * capture is initialized with tab sync on, not from registerCapture: that
+ * returns early once registered, so after a Disconnect and reconnect in a
+ * persistent background (Firefox) the open tabs would otherwise wait for
+ * their next change. */
+export function captureOpenTabs(): void {
   void chrome.tabs
     .query({})
     .then((tabs) => {
@@ -975,7 +988,7 @@ async function applyTabRemote(
   const policy = cachedPolicy ?? (await restorePolicy());
   if (policy !== "automatic") return;
 
-  await materializeTab(op.objectId, stateResult.value as TabPayload);
+  await materializeTabOnce(op.objectId, stateResult.value as TabPayload);
 }
 
 /** Creates the local tab for a remote tab (or updates the one already
@@ -992,9 +1005,20 @@ async function materializeTab(objectId: string, p: TabPayload): Promise<void> {
     if (!Number.isSafeInteger(tabId) || tabId < 0) {
       throw new Error(`Invalid mapped Chromium tab ID: ${existingChromiumId}`);
     }
-    await guard.run(() =>
-      chrome.tabs.update(tabId, { url: p.url, pinned: p.pinned }),
-    );
+    try {
+      await guard.run(() => chrome.tabs.update(tabId, { url: p.url, pinned: p.pinned }));
+    } catch (err) {
+      const stillOpen = await chrome.tabs.get(tabId).then(
+        () => true,
+        () => false,
+      );
+      if (stillOpen) throw err;
+      // Closed here in the meantime: its close is captured on its own, so it
+      // stays closed. A failure here would stop the whole sync (found end to
+      // end). The mapping is kept: that close may still be queued, and
+      // uploading it looks the object up through this mapping; it removes it.
+      return;
+    }
   } else {
     const created = await guard.run(() => chrome.tabs.create({ url: p.url, pinned: p.pinned, active: false }));
     if (created.id !== undefined) {
@@ -1018,7 +1042,7 @@ async function materializeTab(objectId: string, p: TabPayload): Promise<void> {
 export async function restoreTab(objectId: string): Promise<void> {
   const stored = await getFieldState(objectId, "state");
   if (!stored?.value) return;
-  await materializeTab(objectId, stored.value as TabPayload);
+  await materializeTabOnce(objectId, stored.value as TabPayload);
 }
 
 // Each item pays browser IPC, so remote applies run a few at a time.
@@ -1038,10 +1062,27 @@ export async function restoreTabs(objectIds: string[]): Promise<void> {
 }
 
 async function materializeAll(targets: Array<{ objectId: string; payload: TabPayload }>): Promise<void> {
-  for (const batch of chunk(targets, REMOTE_APPLY_CONCURRENCY)) {
-    await Promise.all(batch.map(({ objectId, payload }) => materializeTab(objectId, payload)));
+  // A page often carries a tab's create and its first update. Materializing
+  // both at once opened the tab twice (neither had a mapping yet), so each
+  // tab is materialized once, with its newest state.
+  const newest = new Map<string, TabPayload>();
+  for (const { objectId, payload } of targets) {
+    newest.delete(objectId);
+    newest.set(objectId, payload);
+  }
+  const unique = [...newest].map(([objectId, payload]) => ({ objectId, payload }));
+  for (const batch of chunk(unique, REMOTE_APPLY_CONCURRENCY)) {
+    await Promise.all(batch.map(({ objectId, payload }) => materializeTabOnce(objectId, payload)));
     await yieldToEventLoop();
   }
+}
+
+// Calls for one tab run one after another: two overlapping applies (a sync
+// and a Restore click, say) would otherwise both find no mapping and each
+// open the tab.
+const materializeLock = createKeyedLock();
+function materializeTabOnce(objectId: string, p: TabPayload): Promise<void> {
+  return materializeLock.run(objectId, () => materializeTab(objectId, p));
 }
 
 async function applyGroupRemote(op: OperationOut, payload: unknown): Promise<void> {

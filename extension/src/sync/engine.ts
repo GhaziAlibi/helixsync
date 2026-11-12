@@ -26,7 +26,7 @@ import {
   type PendingOperationRecord,
 } from "../storage/db";
 import { recordLocalFieldStatesBatch } from "./conflict";
-import { ApiError, NetworkError, downloadChanges, fetchSnapshot, uploadOperations } from "../api/client";
+import { ApiError, NetworkError, ReauthRequiredError, downloadChanges, fetchSnapshot, uploadOperations } from "../api/client";
 import { isConnected as isWebSocketConnected } from "../api/websocket";
 import { isBulkContainer } from "./bulk-container";
 import type {
@@ -933,6 +933,16 @@ export async function runSyncCycle(): Promise<void> {
           }
         }
       } catch (err) {
+        if (err instanceof ReauthRequiredError) {
+          // Not a fault: the server no longer accepts this device (revoked,
+          // account deleted, session expired). The popup says so and offers
+          // Disconnect; nothing here can fix it, so no error is logged.
+          console.info("HelixSync: sync needs re-authorization", err.message);
+          emitStatus("needs_reauth", err.message);
+          emptyCycleStreak++;
+          rerunRequested = false;
+          break;
+        }
         console.error("HelixSync: sync cycle failed", err);
         if (err instanceof ApiError && err.status === 429) {
           const cooldownSeconds = err.retryAfterSeconds ?? DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS;

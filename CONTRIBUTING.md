@@ -102,20 +102,33 @@ cd extension
 npm ci
 npm run typecheck
 npm test
-npm run build          # output in extension/dist/
+npm run build          # Chrome, output in extension/dist/
+npm run build:firefox  # Firefox, output in extension/dist-firefox/
 ```
+
+Shared code lives in `src/`. What differs per browser lives in `chrome/` and
+`firefox/` (each has its `manifest.json` and a `platform.ts`); shared code
+reaches it only through `import { platform } from "@platform"`, which each
+build points at its own folder. Keep browser-specific code there, not behind
+runtime checks in `src/`: then a change for one browser leaves the other's
+package byte-identical, and the release publishes only the one that changed.
 
 To try it, open `chrome://extensions`, enable Developer mode and load
 `extension/dist/` as an unpacked extension. The popup is the whole UI; set its
 Server URL to your dashboard's origin (HTTPS, except `localhost`).
 
 **End-to-end test.** `npm run test:e2e` drives the built extension in two
-throwaway browser profiles against a local stack: it registers on the
-dashboard, connects both popups, checks that bookmark create, rename and delete
-and a history visit sync between them, that open tabs sync under both "ask"
-and "automatic" restore and tab groups keep their title, color and collapsed
-state, and that a bookmark or visit made while the extension's service worker
-is stopped is still captured, then tests Disconnect and login with device. It needs a Chromium-based browser (Chromium, Helium, Brave, ...;
+throwaway browser profiles against a local stack and checks every feature
+from a user's side: connecting (password, and approval from the other
+browser), bookmark create, rename, move and delete, live updates, history,
+tabs under "ask" (including Restore all) and "automatic", tab groups, new
+windows, restore points (merge, exact one-folder, pinning, the automatic point
+before a large deletion), history retention and "Sync older history",
+languages (Arabic right to left), restarting the browser, a stopped service
+worker, Disconnect, and on the dashboard: passkey, password reset with two
+browsers and with the recovery code, password change, devices, sync settings,
+restore points, web sessions and account deletion. It fails if the
+extension logs any error or warning during the run. It needs a Chromium-based browser (Chromium, Helium, Brave, ...;
 branded Google Chrome ignores `--load-extension`). It creates accounts, so it
 only accepts a local server; give it a stack of its own. CI doesn't run it.
 
@@ -128,6 +141,11 @@ cd .. && docker compose -p helixsync-e2e down -v
 ```
 
 `HELIXSYNC_E2E_BROWSER_B` runs the second device in a different browser.
+Set it to Firefox (`/usr/bin/firefox`, after `npm run build:firefox`) to test
+Chromium and Firefox syncing with each other: the test drives Firefox over its
+built-in WebDriver BiDi, so no geckodriver is needed, and adds Firefox-only
+checks (separators and the Bookmarks Menu in both directions). The first
+device must be Chromium-based.
 
 ### Web dashboard
 
@@ -194,16 +212,17 @@ published until they pass on `main`.
 ### Versions and releases
 
 [`VERSION`](VERSION) is the single source of truth for the release version.
-**Don't change it, or the version in `extension/manifest.json`, in an ordinary
-pull request.** On every push to `main`, the release workflow:
+**Don't change it, or the version in `extension/chrome/manifest.json` or
+`extension/firefox/manifest.json`, in an ordinary pull request.** On every push to `main`, the release workflow:
 
 1. runs CI;
 2. bumps the patch number in `VERSION` automatically, unless that push itself
    changed `VERSION` (a maintainer making a deliberate minor or major bump), in
    which case that value is used as-is;
-3. copies the version into `extension/manifest.json`;
-4. tags `vX.Y.Z`, builds and pushes the server and web images, and attaches the
-   extension zip to the GitHub release.
+3. copies the version into both extension manifests;
+4. tags `vX.Y.Z`, builds and pushes the server and web images, and attaches to
+   the GitHub release each extension zip (Chrome, Firefox) that differs from
+   the last one released.
 
 `extension/package.json`, `web/package.json` and `server/Cargo.toml` carry the
 version too, but nothing depends on them matching exactly between releases; a

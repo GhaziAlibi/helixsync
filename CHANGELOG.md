@@ -8,12 +8,61 @@ All notable changes to HelixSync are documented here. The format follows
 
 ### Added
 
+- Firefox support (desktop, 159 or newer). `npm run build:firefox` builds a
+  Manifest V2 package with a persistent background page into
+  `extension/dist-firefox/`, and releases attach it as
+  `helixsync-extension-firefox-<version>.zip`. Firefox's built-in bookmark
+  folders map to the same synced roots as Chromium's; its Bookmarks Menu
+  shows on Chromium as a "Bookmarks menu" folder, made only once something
+  in it syncs; separators sync as `https://separator.floccus.org/` bookmarks
+  (floccus's convention). See `docs/firefox.md`. It is published on
+  addons.mozilla.org as `helixsync@ghazialibi.github.io`; releases submit
+  each changed version there automatically.
+
+- Per-browser releases. Browser-specific extension code moved to
+  `extension/chrome/` and `extension/firefox/`; releases attach, and publish
+  to the Chrome Web Store, only the packages that changed since the last
+  release.
+
 - Interface languages. The web dashboard and the extension popup now follow
   the browser's language and can be switched by hand (dashboard sidebar, popup
   settings): English, Hungarian, German, Spanish, French, Simplified Chinese
   and Arabic (shown right to left). The recovery kit is written in the chosen
   language. The server is unchanged; it still sends English messages, which
   the clients replace with translated ones.
+
+### Fixed
+
+- A tab closed on this browser while a change to it from another device was
+  being applied could stay open on the other devices.
+- Tabs already open were not uploaded after disconnecting and reconnecting in
+  Firefox until they changed.
+- Bookmarks received for the Bookmarks menu folder before it could be made
+  were not applied until another bookmark arrived for it; they now are when
+  the extension starts.
+- Releases attach a browser's package only after its store publish did not
+  fail, so a failed or rejected publish is retried by the next release.
+- The extension could treat a connected browser as disconnected when it
+  started: reading the saved login fired a session-storage event that cleared
+  it before it was returned. Firefox always hit this, so its first sync never
+  finished after a restart and its own bookmarks were never uploaded.
+- A tab opened on one browser could open twice on the others under
+  "Restore automatically": a new tab's create and first update arrived
+  together and were each opened. Overlapping captures of one new tab could
+  also send it twice.
+- Changing the language in the extension's settings and leaving without
+  saving kept a copy of the whole form, so a later Save could undo settings
+  changed meanwhile on another browser or the dashboard. Only the fields you
+  changed are kept now. The language selector there also works before the
+  settings finish loading.
+- A browser whose device was revoked, or whose account was deleted, showed a
+  generic sync error; it now shows "Needs re-authorization".
+- Before connecting, and after Disconnect, the extension no longer logs
+  errors about having no device.
+- After a restore finished, the popup's Restore points view kept showing it,
+  and Done led back to it; Done now returns to the list.
+- A tab closed while another browser updated it stopped the whole sync; it
+  now stays closed and sync carries on.
 
 ## [1.0.10] - 2026-11-05
 

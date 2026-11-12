@@ -15,18 +15,33 @@ Nothing is tagged, pushed or published until the CI workflow
 1. **Version.** [`VERSION`](../VERSION) is the single source of truth. If the
    push itself changed `VERSION` (a deliberate minor or major bump), that value
    is used as-is. Otherwise the workflow bumps the patch number and commits it
-   to `main`. It then copies the version into `extension/manifest.json` and
-   tags `vX.Y.Z`.
+   to `main`. It then copies the version into `extension/chrome/manifest.json`
+   and `extension/firefox/manifest.json` and tags `vX.Y.Z`.
 2. **Images.** The `server` and `web` images are built and pushed to GitHub
    Container Registry as `ghcr.io/<owner>/helixsync-server` and
    `ghcr.io/<owner>/helixsync-web`, tagged `latest` and with the release
    version. Deployments should pin the version rather than follow `latest`.
 3. **Extension.** The extension is built and tested, zipped as
-   `helixsync-extension-<version>.zip`, and attached to the GitHub release.
-4. **Chrome Web Store.** The same zip is uploaded to the Web Store from a
-   separate, protected job (below). The upload is staged: after the store
-   approves it, releasing it to users is a manual click in the Web Store
-   developer dashboard.
+   `helixsync-extension-<version>.zip` (Chromium) and
+   `helixsync-extension-firefox-<version>.zip` (Firefox, unsigned).
+   Each zip is compared with the same browser's zip in the last release that
+   has one, ignoring the manifest's version, and is attached to the GitHub
+   release only if its files differ and its store publish (steps 4 and 5)
+   did not fail, so a failed or rejected publish is retried by the next run.
+   The attach step therefore runs after the publish jobs, i.e. once any
+   pending approval is given. A change only in `extension/firefox/`
+   therefore releases Firefox alone, one only in `extension/chrome/` Chrome
+   alone, and one in shared code whichever packages it actually changed.
+   Firefox installs the Firefox zip only after Mozilla has signed it.
+4. **Chrome Web Store.** When the Chrome zip changed, it is uploaded to the
+   Web Store from a separate, protected job (below). The upload is staged:
+   after the store approves it, releasing it to users is a manual click in
+   the Web Store developer dashboard.
+5. **addons.mozilla.org.** When the Firefox zip changed, it is submitted to
+   AMO as a new listed version of `helixsync@ghazialibi.github.io`, with the
+   source code (the commit, with the stamped manifest versions) and build
+   notes for the reviewers, from a separate, protected job (below). Mozilla
+   reviews, signs and publishes it; nothing else is clicked.
 
 Pull requests run the same builds but push, tag and publish nothing.
 
@@ -34,7 +49,7 @@ Pull requests run the same builds but push, tag and publish nothing.
 version too, but nothing depends on them matching exactly between releases. A
 maintainer updates them when bumping a minor or major version.
 
-Contributors never change `VERSION` or the version in `extension/manifest.json`
+Contributors never change `VERSION` or the version in either extension manifest
 in an ordinary pull request.
 
 ## One-time repository setup
@@ -53,9 +68,14 @@ credentials, so it should be protected:
    skips itself while `CHROME_EXTENSION_ID` is unset, so releases keep working
    before this is set up. The store item must already exist from a manual first
    submission; the API can only publish updates to it.
-3. In Settings → Code security, enable **private vulnerability reporting**
+3. **Create the `firefox-amo` environment** the same way, with the AMO API
+   keys (addons.mozilla.org Developer Hub → Tools → Manage API Keys) as
+   environment secrets `AMO_JWT_ISSUER` and `AMO_JWT_SECRET`. The publish job
+   skips itself while `AMO_JWT_ISSUER` is unset. The add-on must already exist
+   on AMO from a manual first upload; the job only adds versions to it.
+4. In Settings → Code security, enable **private vulnerability reporting**
    (the link in [`SECURITY.md`](../SECURITY.md) depends on it).
-4. In Settings → Branches, add a **protection rule for `main`** that requires
+5. In Settings → Branches, add a **protection rule for `main`** that requires
    pull requests and the status checks from `ci.yml` (`Server (fmt, clippy,
    tests)`, `Extension (typecheck, tests, build)`, `Web (typecheck, tests,
    build)`, `Audit (npm, cargo)`). The release workflow commits the version

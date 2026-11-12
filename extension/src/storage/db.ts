@@ -441,16 +441,21 @@ export async function getDevice(): Promise<DeviceRecord | undefined> {
   }
 
   const storedRecord = await (await getDb()).get("device", "self");
-  deviceCache = storedRecord && {
+  const record = storedRecord && {
     ...storedRecord,
     accountKey: await decryptDeviceSecret(storedRecord.accountKey),
     refreshToken: await decryptDeviceSecret(storedRecord.refreshToken),
   };
+  deviceCache = record;
   deviceCacheLoaded = true;
-  if (deviceCache) {
-    await chrome.storage.session.set({ [DEVICE_CACHE_STORAGE_KEY]: deviceCache });
+  if (record) {
+    await chrome.storage.session.set({ [DEVICE_CACHE_STORAGE_KEY]: record });
   }
-  return deviceCache;
+  // The local, not `deviceCache`: this very write fires the session change
+  // listener above, which clears the memory mirror. Firefox runs it before
+  // this await resumes, so returning `deviceCache` returned undefined there,
+  // and startup treated a connected device as not connected.
+  return record;
 }
 
 export async function putDevice(record: DeviceRecord): Promise<void> {
@@ -812,6 +817,19 @@ export async function getMappedChromiumIdsByType(objectType: ObjectType): Promis
 
 export async function putMapping(record: ObjectMappingRecord): Promise<void> {
   await (await getDb()).put("object_mappings", record);
+}
+
+/** Stores `record` unless its key is already mapped, and returns the mapping
+ * that is stored. The read and the write share one readwrite transaction,
+ * which IndexedDB runs one at a time, so two callers racing on one Chromium
+ * id both get the same objectId instead of each minting its own. */
+export async function getOrPutMapping(record: ObjectMappingRecord): Promise<ObjectMappingRecord> {
+  const db = await getDb();
+  const tx = db.transaction("object_mappings", "readwrite");
+  const existing = await tx.store.get(record.key);
+  if (!existing) await tx.store.put(record);
+  await tx.done;
+  return existing ?? record;
 }
 
 export async function putMappingsBatch(records: ObjectMappingRecord[]): Promise<void> {

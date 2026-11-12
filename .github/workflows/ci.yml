@@ -23,8 +23,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Decides which of the jobs below run. Plain git, no third-party action. A
-  # change to this file, or an event with no usable base, runs everything.
+  # Decides which of the jobs below run: an area's checks run only when its
+  # code changed. Plain git, no third-party action. An event with no usable
+  # base runs everything.
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
@@ -51,13 +52,13 @@ jobs:
           esac
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
             || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            files=".github/workflows/ci.yml"
+            files=$'server/\nweb/\nextension/'
           else
             files="$(git diff --name-only "$base" HEAD)"
           fi
           touched() { echo "$files" | grep -qE "$1"; }
           for area in server web extension; do
-            if touched '^\.github/workflows/ci\.yml$' || touched "^$area/"; then
+            if touched "^$area/"; then
               echo "$area=true" >> "$GITHUB_OUTPUT"
             else
               echo "$area=false" >> "$GITHUB_OUTPUT"
@@ -146,6 +147,9 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - run: npm run build:firefox
+      # Mozilla's validator, the same checks AMO runs on upload.
+      - run: npx --yes web-ext@10.8.0 lint --source-dir dist-firefox
 
   web:
     name: Web (typecheck, tests, build)

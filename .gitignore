@@ -12,6 +12,7 @@ node_modules/
 dist/
 web/dist/
 extension/dist/
+extension/dist-firefox/
 extension/*.zip
 *.local
 

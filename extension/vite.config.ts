@@ -1,31 +1,34 @@
-import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync } from "fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync } from "fs";
 import { join, resolve } from "path";
 import { defineConfig, type Plugin } from "vite";
+import { chromeTarget } from "./chrome/target";
+import { firefoxTarget } from "./firefox/target";
 
-/// Copies static extension assets (manifest.json, icons, _locales) into dist/ after
-/// the JS/HTML build, since Vite only processes files reachable from a
-/// declared rollup input.
+/// TARGET=firefox builds the Firefox package (firefox/) into dist-firefox/;
+/// anything else builds the Chrome one (chrome/) into dist/. Shared code in
+/// src/ reaches the browser-specific code only through `@platform`.
+const target = process.env.TARGET === "firefox" ? firefoxTarget : chromeTarget;
+const OUT_DIR = target.outDir;
+
+/// Copies static extension assets (manifest.json, icons, _locales) into the
+/// output after the JS/HTML build, since Vite only processes files reachable
+/// from a declared rollup input.
 function copyStaticAssets(): Plugin {
   return {
     name: "helixsync-copy-static-assets",
     closeBundle() {
-      mkdirSync(resolve(__dirname, "dist"), { recursive: true });
-      const files = ["manifest.json"];
-      for (const file of files) {
-        const src = resolve(__dirname, file);
-        if (existsSync(src)) {
-          copyFileSync(src, resolve(__dirname, "dist", file));
-        }
-      }
+      const out = resolve(__dirname, OUT_DIR);
+      mkdirSync(out, { recursive: true });
+      cpSync(resolve(__dirname, target.manifest), resolve(out, "manifest.json"));
       // Interface strings: the manifest's __MSG_*__ names and the popup's own
       // loader (src/i18n.ts) both read these.
       const localesDir = resolve(__dirname, "_locales");
       if (existsSync(localesDir)) {
-        cpSync(localesDir, resolve(__dirname, "dist", "_locales"), { recursive: true });
+        cpSync(localesDir, resolve(out, "_locales"), { recursive: true });
       }
       const iconsDir = resolve(__dirname, "icons");
       if (existsSync(iconsDir)) {
-        cpSync(iconsDir, resolve(__dirname, "dist", "icons"), { recursive: true });
+        cpSync(iconsDir, resolve(out, "icons"), { recursive: true });
       }
     },
   };
@@ -77,8 +80,11 @@ function thirdPartyLicenses(product: string): Plugin {
 
 export default defineConfig({
   plugins: [copyStaticAssets(), thirdPartyLicenses("The HelixSync extension")],
+  resolve: {
+    alias: { "@platform": resolve(__dirname, target.platform) },
+  },
   build: {
-    outDir: "dist",
+    outDir: OUT_DIR,
     emptyOutDir: true,
     target: "es2022",
     rollupOptions: {
@@ -87,6 +93,7 @@ export default defineConfig({
         background: resolve(__dirname, "src/background/index.ts"),
       },
       output: {
+        banner: target.banner,
         entryFileNames: (chunk) =>
           chunk.name === "background" ? "background.js" : "assets/[name]-[hash].js",
         chunkFileNames: "assets/[name]-[hash].js",

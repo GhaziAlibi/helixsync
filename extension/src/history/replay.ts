@@ -17,6 +17,7 @@
 //     (consumeReplayEcho), and the write is never uploaded as a new visit.
 import { paceForWork } from "../util/pace";
 import { isSyncableUrl } from "../util/url-scheme";
+import { platform } from "@platform";
 import { yieldToEventLoop } from "../util/yield";
 
 /** Each synced URL's newest visit time (epoch ms). A replay needs nothing
@@ -124,7 +125,7 @@ export async function replayVisitsIntoBrowserHistory(
   // and "https://x.test/" are one.
   const merged = new Map<string, { url: string; time: number }>();
   for (const [url, time] of newestByUrl) {
-    if (!isSyncableUrl(url)) continue;
+    if (!isSyncableUrl(url) || !platform.canStoreHistoryUrl(url)) continue;
     const key = canonicalUrl(url);
     const previous = merged.get(key);
     if (!previous || time > previous.time) merged.set(key, { url, time });
