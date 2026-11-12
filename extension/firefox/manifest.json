@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "__MSG_extName__",
   "default_locale": "en",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "description": "__MSG_extDescription__",
   "incognito": "not_allowed",
   "icons": {
