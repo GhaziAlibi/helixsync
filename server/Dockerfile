@@ -3,7 +3,7 @@
 # cannot change what we ship. The tag is kept for readability (Docker ignores
 # it when a digest is present). Refresh with:
 #   docker buildx imagetools inspect <tag>
-FROM rust:1-slim-bookworm@sha256:a24e292b4af7bdee351a31d3a6379972a5652f0ea22a1b6d6883324ac4f5097c AS builder
+FROM rust:1-slim-bookworm@sha256:f2c004e3d2d8b547e8cf7ffbc29205385f4e71d23e53e4e383065db5e9f822cd AS builder
 
 WORKDIR /build
 
