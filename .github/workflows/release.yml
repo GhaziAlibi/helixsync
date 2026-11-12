@@ -271,6 +271,7 @@ jobs:
 
       - name: Package extension
         run: |
+          set -x
           (cd dist && zip -r "../helixsync-extension-${VERSION}.zip" .)
           (cd dist-firefox && zip -r "../helixsync-extension-firefox-${VERSION}.zip" .)
           # Source for AMO's reviewers: the commit plus the stamped manifest
