@@ -3,7 +3,8 @@
 [![CI](https://github.com/GhaziAlibi/helixsync/actions/workflows/ci.yml/badge.svg)](https://github.com/GhaziAlibi/helixsync/actions/workflows/ci.yml)
 [![Release](https://github.com/GhaziAlibi/helixsync/actions/workflows/release.yml/badge.svg)](https://github.com/GhaziAlibi/helixsync/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Chrome Web Store](https://img.shields.io/badge/Chrome_Web_Store-HelixSync-blue)](https://chromewebstore.google.com/detail/helixsync/pkklkldoippchkhpokglpolepbcbjdfk)
+[![Chrome Web Store](https://img.shields.io/badge/Chrome_Web_Store-HelixSync-4285F4?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/helixsync/pkklkldoippchkhpokglpolepbcbjdfk)
+[![Firefox Add-ons](https://img.shields.io/badge/Firefox_Add--ons-HelixSync-FF7139?logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/en-US/firefox/addon/helixsync/)
 
 **HelixSync** is a self-hosted, end-to-end encrypted sync server for your
 browser. It keeps bookmarks, history, and (optionally) open tabs, windows and
@@ -306,6 +307,8 @@ Pick one:
 
 - **Chrome Web Store:**
   [HelixSync](https://chromewebstore.google.com/detail/helixsync/pkklkldoippchkhpokglpolepbcbjdfk).
+- **Firefox Add-ons:**
+  [HelixSync](https://addons.mozilla.org/en-US/firefox/addon/helixsync/).
 - **Prebuilt zip:** download `helixsync-extension-<version>.zip` from the
   [Releases](https://github.com/GhaziAlibi/helixsync/releases) page, unzip it,
   open `chrome://extensions` (or your browser's equivalent), enable
@@ -319,7 +322,7 @@ Pick one:
   ```
 
   Then load `extension/dist/` as an unpacked extension, as above.
-- **Firefox:** build with `npm run build:firefox` and load it as described
+- **Firefox (from source):** build with `npm run build:firefox` and load it as described
   in [`docs/firefox.md`](docs/firefox.md).
 
 ### 4. Connect your browser, and lock the server down
