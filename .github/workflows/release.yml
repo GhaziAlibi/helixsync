@@ -49,6 +49,8 @@ jobs:
     outputs:
       version: ${{ steps.final.outputs.version }}
       owner: ${{ steps.owner.outputs.lc }}
+      server_changed: ${{ steps.changes.outputs.server }}
+      web_changed: ${{ steps.changes.outputs.web }}
       extension_changed: ${{ steps.changes.outputs.extension }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -62,37 +64,37 @@ jobs:
 
       # Plain git instead of a path-filter action: this job can write to the
       # repository, so it runs no third-party code.
-      - name: Detect extension changes
+      - name: Detect changes
         id: changes
         env:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE: ${{ github.event.before }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          extension_changed() {
-            git diff --name-only "$1" HEAD | grep -q '^extension/'
+          area_changed() {
+            git diff --name-only "$base" HEAD | grep -q "^$1/"
           }
           case "$EVENT_NAME" in
-            push)
-              # A new branch or a force push leaves no usable "before"; build.
-              if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
-                || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-                changed=true
-              elif extension_changed "$BEFORE"; then
-                changed=true
-              else
-                changed=false
-              fi
-              ;;
-            pull_request)
-              if extension_changed "$BASE_SHA"; then changed=true; else changed=false; fi
-              ;;
-            *)
-              # A manual run is a deliberate request to build everything.
-              changed=true
-              ;;
+            push) base="$BEFORE" ;;
+            pull_request) base="$BASE_SHA" ;;
+            *) base="" ;;
           esac
-          echo "extension=$changed" >> "$GITHUB_OUTPUT"
+          # A new branch, a force push or a manual run leaves no usable base
+          # (a manual run is a deliberate request to build everything).
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            for area in server web extension; do
+              echo "$area=true" >> "$GITHUB_OUTPUT"
+            done
+          else
+            for area in server web extension; do
+              if area_changed "$area"; then
+                echo "$area=true" >> "$GITHUB_OUTPUT"
+              else
+                echo "$area=false" >> "$GITHUB_OUTPUT"
+              fi
+            done
+          fi
 
       - name: Check whether VERSION was manually bumped in this push
         id: diff
@@ -166,7 +168,7 @@ jobs:
   server:
     needs: [ci, version]
     # Pushed images require a green `ci`; a PR build pushes nothing.
-    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.ci.result == 'success' || github.event_name == 'pull_request') }}
+    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.ci.result == 'success' || github.event_name == 'pull_request') && needs.version.outputs.server_changed == 'true' }}
     runs-on: ubuntu-latest
     concurrency:
       group: release-server
@@ -200,7 +202,7 @@ jobs:
 
   web:
     needs: [ci, version]
-    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.ci.result == 'success' || github.event_name == 'pull_request') }}
+    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.ci.result == 'success' || github.event_name == 'pull_request') && needs.version.outputs.web_changed == 'true' }}
     runs-on: ubuntu-latest
     concurrency:
       group: release-web
