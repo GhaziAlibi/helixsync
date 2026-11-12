@@ -28,6 +28,9 @@ jobs:
   # base runs everything.
   changes:
     name: Detect changes
+    # Dependabot pull requests skip CI: every other job needs this one, so
+    # skipping it skips them all.
+    if: github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
