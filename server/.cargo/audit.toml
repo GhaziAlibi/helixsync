@@ -15,4 +15,11 @@ ignore = [
     # reachable. The fix is in crypto-bigint 0.7, which elliptic-curve 0.13
     # cannot use. Re-check when jsonwebtoken moves to a newer elliptic-curve.
     "RUSTSEC-2026-0387",
+    # `libsqlite3-sys` 0.30 (bundled C SQLite CVE) is in Cargo.lock only
+    # through `sqlx-sqlite`, an optional sqlx driver that is not enabled
+    # (`cargo tree -i libsqlite3-sys` prints nothing): it is never compiled
+    # or linked, and the server uses Postgres only. The fix needs >=0.39,
+    # which sqlx 0.8 cannot use. Re-check when sqlx moves to a newer
+    # libsqlite3-sys, or if the sqlite feature is ever enabled.
+    "RUSTSEC-2026-0459",
 ]
