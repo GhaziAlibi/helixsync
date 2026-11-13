@@ -589,5 +589,68 @@
   },
   "rp_err_generic": {
     "message": "出了点问题。"
+  },
+  "sendtab_menuTitle": {
+    "message": "发送到设备"
+  },
+  "sendtab_label": {
+    "message": "将此标签页发送到"
+  },
+  "sendtab_noDevices": {
+    "message": "暂无其他设备。"
+  },
+  "sendtab_online": {
+    "message": "在线"
+  },
+  "sendtab_offlineState": {
+    "message": "离线"
+  },
+  "sendtab_listFailed": {
+    "message": "无法加载你的设备。"
+  },
+  "sendtab_sent": {
+    "message": "已发送到 {device}。"
+  },
+  "sendtab_offline": {
+    "message": "{device} 已离线，未发送任何内容。"
+  },
+  "sendtab_failed": {
+    "message": "无法发送标签页：{message}"
+  },
+  "sendtab_notConnected": {
+    "message": "请先将此浏览器连接到你的账户。"
+  },
+  "sendtab_unsupported": {
+    "message": "此服务器不支持发送标签页。"
+  },
+  "sendtab_badUrl": {
+    "message": "只能发送网页（http 或 https）。"
+  },
+  "sendtab_tooLarge": {
+    "message": "此地址过长，无法发送。"
+  },
+  "sendtab_deviceGone": {
+    "message": "该设备已不可用。"
+  },
+  "sendtab_rateLimited": {
+    "message": "发送的标签页过多，请一分钟后再试。"
+  },
+  "sendtab_unknownDevice": {
+    "message": "另一台设备"
+  },
+  "sendtab_notifReceived": {
+    "message": "来自 {device} 的标签页"
+  },
+  "settings_sendTabLegend": {
+    "message": "发送标签页"
+  },
+  "settings_sendTabNotifications": {
+    "message": "通知"
+  },
+  "settings_sendTabHelp": {
+    "message": "标签页发送或到达时显示通知。需要浏览器的通知权限。"
+  },
+  "settings_sendTabDenied": {
+    "message": "未授予通知权限。"
   }
 }

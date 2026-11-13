@@ -133,6 +133,7 @@ vi.mock("../api/websocket", () => ({
     changesListener = cb;
   }),
   onAuthRequest: vi.fn(),
+  onTabSend: vi.fn(),
 }));
 
 // Stateful device mirror (rather than a fixed object `getDevice` always

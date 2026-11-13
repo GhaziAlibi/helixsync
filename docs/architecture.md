@@ -61,7 +61,8 @@ Rust + Axum + Tokio + SQLx + PostgreSQL. Modules:
   snapshots, tombstone/compaction policy, statistics and per-account settings.
 - `restore_points/` — storage, listing, pinning and eviction of encrypted
   bookmark restore points (opaque blobs; the server never reads them).
-- `websocket/` — notification-only change-available broadcast.
+- `websocket/` — change-available broadcast, plus per-device push of
+  send-tab frames (nothing stored).
 - `crypto/` — server-side primitives only (Argon2id hashing, HMAC/token
   signing); never handles E2E payload plaintext.
 - `middleware/` — client IP resolution and rate limiting.
@@ -81,7 +82,8 @@ request timeouts and response compression are layered in `lib.rs`.
 TypeScript + Manifest V3 + Vite. Modules mirror the protocol's domains:
 `background/` (service worker orchestration, alarms-based sync scheduling),
 `sync/` (queue, cursor, conflict application), `bookmarks/`, `history/`,
-`tabs/` (tabs, windows and tab groups), `restore-points/` (building,
+`tabs/` (tabs, windows and tab groups), `send-tab/` (sending a tab to another
+device and opening one received), `restore-points/` (building,
 encrypting, planning and applying bookmark restore points), `storage/`
 (IndexedDB access layer),
 `crypto/` (key derivation and XChaCha20-Poly1305 E2E encryption), `api/` (typed

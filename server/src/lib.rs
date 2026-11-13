@@ -131,5 +131,6 @@ async fn version(State(state): State<AppState>) -> Json<serde_json::Value> {
         "minimumSupportedProtocolVersion": state.config.minimum_supported_protocol_version,
         "registrationEnabled": state.config.allow_registration,
         "restorePoints": true,
+        "sendTab": true,
     }))
 }

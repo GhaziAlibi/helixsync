@@ -316,6 +316,15 @@ export function buildOperationAad(objectType: string, objectId: string, operatio
   return sharedTextEncoder.encode(JSON.stringify([objectType, objectId, operationType]));
 }
 
+/** AAD of a send-tab envelope (docs/encryption.md §6.4). The "tabSend" tag
+ * keeps it apart from `buildOperationAad` (whose first element is an object
+ * type), so the server can't replay a send-tab ciphertext as a sync operation
+ * or the reverse; the ids stop it redirecting one to another device or
+ * relabelling its sender. */
+export function buildTabSendAad(id: string, fromDeviceId: string, toDeviceId: string): Uint8Array {
+  return sharedTextEncoder.encode(JSON.stringify(["tabSend", id, fromDeviceId, toDeviceId]));
+}
+
 /** Encrypts already-serialized bytes; the bulk history path uses this
  * directly for compressed segments. `aad` must be the same bytes passed to
  * the matching `decryptBytesWithSdek` call, or decryption fails. */

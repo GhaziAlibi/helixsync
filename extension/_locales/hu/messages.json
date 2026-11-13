@@ -610,5 +610,68 @@
   },
   "rp_err_generic": {
     "message": "Valami hiba történt."
+  },
+  "sendtab_menuTitle": {
+    "message": "Küldés eszközre"
+  },
+  "sendtab_label": {
+    "message": "Ennek a lapnak a küldése ide:"
+  },
+  "sendtab_noDevices": {
+    "message": "Még nincs másik eszköz."
+  },
+  "sendtab_online": {
+    "message": "online"
+  },
+  "sendtab_offlineState": {
+    "message": "offline"
+  },
+  "sendtab_listFailed": {
+    "message": "Az eszközeid nem tölthetők be."
+  },
+  "sendtab_sent": {
+    "message": "Elküldve ide: {device}."
+  },
+  "sendtab_offline": {
+    "message": "{device} offline. Nem lett elküldve semmi."
+  },
+  "sendtab_failed": {
+    "message": "A lap nem küldhető el: {message}"
+  },
+  "sendtab_notConnected": {
+    "message": "Előbb csatlakoztasd ezt a böngészőt a fiókodhoz."
+  },
+  "sendtab_unsupported": {
+    "message": "Ez a szerver nem támogatja a lapok küldését."
+  },
+  "sendtab_badUrl": {
+    "message": "Csak weboldalak (http vagy https) küldhetők."
+  },
+  "sendtab_tooLarge": {
+    "message": "Ez a cím túl hosszú a küldéshez."
+  },
+  "sendtab_deviceGone": {
+    "message": "Ez az eszköz már nem érhető el."
+  },
+  "sendtab_rateLimited": {
+    "message": "Túl sok lap lett elküldve. Próbáld újra egy perc múlva."
+  },
+  "sendtab_unknownDevice": {
+    "message": "másik eszköz"
+  },
+  "sendtab_notifReceived": {
+    "message": "Lap innen: {device}"
+  },
+  "settings_sendTabLegend": {
+    "message": "Lap küldése"
+  },
+  "settings_sendTabNotifications": {
+    "message": "Értesítések"
+  },
+  "settings_sendTabHelp": {
+    "message": "Értesítést jelenít meg, ha egy lap érkezik vagy elküldésre kerül. A böngésző értesítési engedélyét igényli."
+  },
+  "settings_sendTabDenied": {
+    "message": "Az értesítési engedély nem lett megadva."
   }
 }

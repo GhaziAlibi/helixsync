@@ -30,10 +30,12 @@
     "bookmarks",
     "history",
     "tabs",
-    "alarms"
+    "alarms",
+    "contextMenus"
   ],
   "optional_permissions": [
-    "tabGroups"
+    "tabGroups",
+    "notifications"
   ],
   "optional_host_permissions": [
     "*://*/*",

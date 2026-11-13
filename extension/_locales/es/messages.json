@@ -610,5 +610,68 @@
   },
   "rp_err_generic": {
     "message": "Algo salió mal."
+  },
+  "sendtab_menuTitle": {
+    "message": "Enviar a dispositivo"
+  },
+  "sendtab_label": {
+    "message": "Enviar esta pestaña a"
+  },
+  "sendtab_noDevices": {
+    "message": "Aún no hay otros dispositivos."
+  },
+  "sendtab_online": {
+    "message": "en línea"
+  },
+  "sendtab_offlineState": {
+    "message": "sin conexión"
+  },
+  "sendtab_listFailed": {
+    "message": "No se pudieron cargar tus dispositivos."
+  },
+  "sendtab_sent": {
+    "message": "Enviada a {device}."
+  },
+  "sendtab_offline": {
+    "message": "{device} está sin conexión. No se envió nada."
+  },
+  "sendtab_failed": {
+    "message": "No se pudo enviar la pestaña: {message}"
+  },
+  "sendtab_notConnected": {
+    "message": "Conecta primero este navegador a tu cuenta."
+  },
+  "sendtab_unsupported": {
+    "message": "Este servidor no admite el envío de pestañas."
+  },
+  "sendtab_badUrl": {
+    "message": "Solo se pueden enviar páginas web (http o https)."
+  },
+  "sendtab_tooLarge": {
+    "message": "Esta dirección es demasiado larga para enviarla."
+  },
+  "sendtab_deviceGone": {
+    "message": "Ese dispositivo ya no está disponible."
+  },
+  "sendtab_rateLimited": {
+    "message": "Demasiadas pestañas enviadas. Inténtalo de nuevo en un minuto."
+  },
+  "sendtab_unknownDevice": {
+    "message": "otro dispositivo"
+  },
+  "sendtab_notifReceived": {
+    "message": "Pestaña de {device}"
+  },
+  "settings_sendTabLegend": {
+    "message": "Enviar pestaña"
+  },
+  "settings_sendTabNotifications": {
+    "message": "Notificaciones"
+  },
+  "settings_sendTabHelp": {
+    "message": "Muestra una notificación cuando se envía o llega una pestaña. Requiere el permiso de notificaciones del navegador."
+  },
+  "settings_sendTabDenied": {
+    "message": "No se concedió el permiso de notificaciones."
   }
 }

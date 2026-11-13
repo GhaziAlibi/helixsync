@@ -15,3 +15,12 @@ pub struct DevicePublic {
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
 }
+
+/// `DevicePublic` plus live connection state, for `GET /devices`.
+#[derive(Debug, Serialize)]
+pub struct DeviceListEntry {
+    #[serde(flatten)]
+    pub device: DevicePublic,
+    /// True while the device has an open websocket.
+    pub online: bool,
+}

@@ -16,7 +16,8 @@
     "bookmarks",
     "history",
     "tabs",
-    "alarms"
+    "alarms",
+    "contextMenus"
   ],
   "browser_specific_settings": {
     "gecko": {
@@ -48,6 +49,7 @@
   },
   "optional_permissions": [
     "tabGroups",
+    "notifications",
     "*://*/*",
     "ws://*/*",
     "wss://*/*"

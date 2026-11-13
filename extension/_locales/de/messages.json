@@ -610,5 +610,68 @@
   },
   "rp_err_generic": {
     "message": "Etwas ist schiefgelaufen."
+  },
+  "sendtab_menuTitle": {
+    "message": "An Gerät senden"
+  },
+  "sendtab_label": {
+    "message": "Diesen Tab senden an"
+  },
+  "sendtab_noDevices": {
+    "message": "Noch keine anderen Geräte."
+  },
+  "sendtab_online": {
+    "message": "online"
+  },
+  "sendtab_offlineState": {
+    "message": "offline"
+  },
+  "sendtab_listFailed": {
+    "message": "Deine Geräte konnten nicht geladen werden."
+  },
+  "sendtab_sent": {
+    "message": "An {device} gesendet."
+  },
+  "sendtab_offline": {
+    "message": "{device} ist offline. Es wurde nichts gesendet."
+  },
+  "sendtab_failed": {
+    "message": "Der Tab konnte nicht gesendet werden: {message}"
+  },
+  "sendtab_notConnected": {
+    "message": "Verbinde diesen Browser zuerst mit deinem Konto."
+  },
+  "sendtab_unsupported": {
+    "message": "Dieser Server unterstützt das Senden von Tabs nicht."
+  },
+  "sendtab_badUrl": {
+    "message": "Nur Webseiten (http oder https) können gesendet werden."
+  },
+  "sendtab_tooLarge": {
+    "message": "Diese Adresse ist zu lang zum Senden."
+  },
+  "sendtab_deviceGone": {
+    "message": "Dieses Gerät ist nicht mehr verfügbar."
+  },
+  "sendtab_rateLimited": {
+    "message": "Zu viele Tabs gesendet. Versuche es in einer Minute erneut."
+  },
+  "sendtab_unknownDevice": {
+    "message": "einem anderen Gerät"
+  },
+  "sendtab_notifReceived": {
+    "message": "Tab von {device}"
+  },
+  "settings_sendTabLegend": {
+    "message": "Tab senden"
+  },
+  "settings_sendTabNotifications": {
+    "message": "Benachrichtigungen"
+  },
+  "settings_sendTabHelp": {
+    "message": "Zeigt eine Benachrichtigung, wenn ein Tab gesendet wird oder ankommt. Benötigt die Benachrichtigungsberechtigung des Browsers."
+  },
+  "settings_sendTabDenied": {
+    "message": "Die Benachrichtigungsberechtigung wurde nicht erteilt."
   }
 }

@@ -694,5 +694,68 @@
   },
   "rp_err_generic": {
     "message": "حدث خطأ ما."
+  },
+  "sendtab_menuTitle": {
+    "message": "إرسال إلى جهاز"
+  },
+  "sendtab_label": {
+    "message": "إرسال هذا التبويب إلى"
+  },
+  "sendtab_noDevices": {
+    "message": "لا توجد أجهزة أخرى بعد."
+  },
+  "sendtab_online": {
+    "message": "متصل"
+  },
+  "sendtab_offlineState": {
+    "message": "غير متصل"
+  },
+  "sendtab_listFailed": {
+    "message": "تعذّر تحميل أجهزتك."
+  },
+  "sendtab_sent": {
+    "message": "تم الإرسال إلى {device}."
+  },
+  "sendtab_offline": {
+    "message": "{device} غير متصل. لم يتم إرسال أي شيء."
+  },
+  "sendtab_failed": {
+    "message": "تعذّر إرسال التبويب: {message}"
+  },
+  "sendtab_notConnected": {
+    "message": "اربط هذا المتصفح بحسابك أولاً."
+  },
+  "sendtab_unsupported": {
+    "message": "هذا الخادم لا يدعم إرسال التبويبات."
+  },
+  "sendtab_badUrl": {
+    "message": "يمكن إرسال صفحات الويب فقط (http أو https)."
+  },
+  "sendtab_tooLarge": {
+    "message": "هذا العنوان أطول من أن يُرسل."
+  },
+  "sendtab_deviceGone": {
+    "message": "هذا الجهاز لم يعد متاحاً."
+  },
+  "sendtab_rateLimited": {
+    "message": "تم إرسال عدد كبير من التبويبات. حاول مرة أخرى بعد دقيقة."
+  },
+  "sendtab_unknownDevice": {
+    "message": "جهاز آخر"
+  },
+  "sendtab_notifReceived": {
+    "message": "تبويب من {device}"
+  },
+  "settings_sendTabLegend": {
+    "message": "إرسال التبويبات"
+  },
+  "settings_sendTabNotifications": {
+    "message": "الإشعارات"
+  },
+  "settings_sendTabHelp": {
+    "message": "يعرض إشعاراً عند إرسال تبويب أو وصوله. يتطلب إذن الإشعارات في المتصفح."
+  },
+  "settings_sendTabDenied": {
+    "message": "لم يتم منح إذن الإشعارات."
   }
 }

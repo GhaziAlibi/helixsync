@@ -173,6 +173,7 @@ account deletion, password change, password recovery,
 recovery-code regeneration,
 login-with-device requests and polling, sync upload, sync download,
 restore point upload, download, listing and changes,
+sending a tab to a device,
 WebSocket connection attempts
 ```
 
@@ -186,6 +187,11 @@ failed deletes can't lock the owner out of signing in. Password recovery
 Creating a login-with-device request is limited to 3 per 10 minutes per
 email, which also caps how many approval prompts anyone can push to an
 account's extensions.
+
+Sending a tab to another device (`docs/protocol.md` §12.5) is limited to 30 a
+minute per sending device, and the receiving extension opens at most 10 a
+minute whatever arrives, so one compromised device cannot flood another's
+browser with tabs.
 
 Sync upload/download limits are set high enough to accommodate normal
 bursty browser activity (e.g. importing many bookmarks) without making
@@ -441,6 +447,8 @@ its attack surface is kept small.
 | `bookmarks`, `history`, `tabs` | Reading and applying the data that is synced |
 | `storage`, `unlimitedStorage` | Settings, the sync queue and the local cache (IndexedDB, `chrome.storage`) |
 | `alarms` | Periodic background sync |
+| `contextMenus` | The "Send to device" right-click menu (`docs/protocol.md` §12.5) |
+| `notifications` (optional) | A toast when a tab is sent or arrives, only if you turn it on |
 | `tabGroups` (optional) | Tab group sync, requested only if you enable it |
 | Host access (optional) | Requested at connect time for the exact server origin and its `wss://` counterpart, never for all sites |
 
@@ -466,6 +474,11 @@ Controls in the code:
 - **Synced URLs.** Tab and bookmark URLs received from other devices are applied
   only if they use `http:` or `https:`, so a peer or a hostile server cannot
   plant a `javascript:` bookmarklet or another script-running scheme.
+- **Sent tabs.** A tab pushed by another device is opened only if its envelope
+  decrypts under an AAD naming this device and the sender (so the server cannot
+  redirect, relabel or replay it as a sync operation), its id is new, it is less
+  than 10 minutes old and its URL is `http:` or `https:`. The server relays
+  ciphertext, stores nothing and cannot read the URL.
 - **Server-supplied parameters.** The client rejects out-of-range key-derivation
   parameters and salts before deriving anything (`docs/encryption.md` §2), and
   halts rather than skips data in an envelope version it does not understand

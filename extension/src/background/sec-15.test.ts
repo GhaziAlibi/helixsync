@@ -90,6 +90,7 @@ vi.mock("../api/websocket", () => ({
   ensureConnected: vi.fn(),
   onChangesAvailable: vi.fn(),
   onAuthRequest: vi.fn(),
+  onTabSend: vi.fn(),
 }));
 
 const initialDevice: Record<string, unknown> = {

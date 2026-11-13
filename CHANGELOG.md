@@ -8,6 +8,17 @@ All notable changes to HelixSync are documented here. The format follows
 
 ### Added
 
+- Send tab to device. Right-click a page or a link (or use the popup) and pick
+  another of your devices: the page opens there at once, in the focused window.
+  The address is encrypted on your device and the server only relays it to the
+  target's open connection; nothing is stored, so an offline device is reported
+  as offline and misses it. Needs the new server (`/version` advertises
+  `sendTab`; the feature stays hidden otherwise) and adds the `contextMenus`
+  permission, plus an optional `notifications` one behind a popup toggle. The
+  receiving extension opens only `http:`/`https:` addresses, ignores replays
+  and stale tabs, and opens at most 10 a minute. See `docs/protocol.md` §12.5.
+  `GET /api/v1/devices` also reports which devices are `online`.
+
 - Firefox support (desktop, 159 or newer). `npm run build:firefox` builds a
   Manifest V2 package with a persistent background page into
   `extension/dist-firefox/`, and releases attach it as

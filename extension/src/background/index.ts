@@ -20,6 +20,7 @@ import {
   ensureConnected as ensureWebSocketConnected,
   onAuthRequest,
   onChangesAvailable,
+  onTabSend,
 } from "../api/websocket";
 import {
   clearAllLocalData,
@@ -84,6 +85,9 @@ import {
   setTabGroupsCaptureEnabled,
   setTabsCaptureEnabled,
 } from "../tabs";
+import { handleTabSend } from "../send-tab/receive";
+import { sendTabToDevice } from "../send-tab/send";
+import { refreshSendTabMenu, registerSendTabMenu } from "../send-tab/menu";
 import { singleFlight } from "../util/single-flight";
 import { platform } from "@platform";
 
@@ -122,6 +126,11 @@ onAuthRequest(() => {
     .catch((e) => console.error("HelixSync: sign-in request badge update failed", e));
 });
 
+// A tab another device sent to this one (docs/protocol.md §12.5).
+onTabSend((frame) => {
+  void handleTabSend(frame);
+});
+
 // Recounting walks every live remote tab and this runs on every tick and
 // push, so a fresh count is reused for one alarm interval. Must stay >= the
 // alarm interval or every tick recounts.
@@ -138,6 +147,28 @@ export function resetBadgeStateForTesting(): void {
   lastBadgeAt = 0;
   lastBadgeText = "";
   pendingAuthRequestCount = 0;
+}
+
+const SEND_FEEDBACK_BADGE_MS = 3_000;
+
+/** Brief send-tab feedback on the toolbar button, then back to the usual
+ * badge. Sets the badge mirror so `updateBadge` clears it afterwards. */
+function flashSendBadge(text: string): void {
+  lastBadgeText = text;
+  void (async () => {
+    try {
+      await platform.toolbarAction().setBadgeText({ text });
+    } catch {
+      // Feedback only.
+    }
+  })();
+  setTimeout(() => void updateBadge(true), SEND_FEEDBACK_BADGE_MS);
+}
+
+registerSendTabMenu({ flashBadge: flashSendBadge });
+
+function refreshSendTabMenuQuietly(): void {
+  void refreshSendTabMenu().catch((e) => console.warn("HelixSync: send-tab menu refresh failed", e));
 }
 
 /** Re-checks the account's waiting sign-in requests. Runs on the WebSocket
@@ -380,6 +411,7 @@ async function runPeriodicSync(): Promise<void> {
   const device = await getDevice();
   if (!device) return;
   void ensureWebSocketConnected();
+  refreshSendTabMenuQuietly();
   try {
     await runSyncCycle();
     await updateBadge(await refreshPendingAuthRequests());
@@ -404,11 +436,13 @@ registerHistoryCapture();
 chrome.runtime.onInstalled.addListener(() => {
   ensureSyncAlarm();
   ensureRestorePointAlarm();
+  refreshSendTabMenuQuietly();
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureSyncAlarm();
   ensureRestorePointAlarm();
+  refreshSendTabMenuQuietly();
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -452,7 +486,9 @@ type PopupMessage =
   | { type: "GET_RESTORE_PROGRESS" }
   | { type: "DISMISS_RESTORE_PROGRESS" }
   | { type: "SET_RESTORE_POINT_PINNED"; pointId: string; pinned: boolean }
-  | { type: "DELETE_RESTORE_POINT"; pointId: string };
+  | { type: "DELETE_RESTORE_POINT"; pointId: string }
+  | { type: "LIST_SEND_TARGETS" }
+  | { type: "SEND_TAB"; deviceId: string; url: string; title?: string };
 
 async function handleMessage(message: PopupMessage | undefined): Promise<unknown> {
   switch (message?.type) {
@@ -486,8 +522,19 @@ async function handleMessage(message: PopupMessage | undefined): Promise<unknown
     case "REFRESH_CAPTURE_CONFIG": {
       invalidateMemoryCaches();
       await initializeCaptureForSettings();
+      refreshSendTabMenuQuietly();
       return { ok: true };
     }
+    case "LIST_SEND_TARGETS": {
+      // Also rebuilds the context menu, so opening the popup keeps it fresh.
+      try {
+        return { ok: true, devices: await refreshSendTabMenu() };
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    }
+    case "SEND_TAB":
+      return sendTabToDevice(message.deviceId, message.url, message.title);
     case "IMPORT_OLDER_HISTORY": {
       // Detached: the popup closes long before a large import finishes.
       void runOlderHistoryImport();
@@ -520,6 +567,8 @@ async function handleMessage(message: PopupMessage | undefined): Promise<unknown
       // here too keeps disconnect complete even if that raced or failed.
       await clearAllLocalData();
       invalidateMemoryCaches();
+      // No device any more: this removes the menu.
+      refreshSendTabMenuQuietly();
       return { ok: true };
     }
     default:

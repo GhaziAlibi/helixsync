@@ -1,7 +1,8 @@
-// docs/protocol.md §12: a notification-only push channel. It never carries
-// sync data, only "something changed, download now", so losing it costs
-// latency, never correctness: the periodic alarm's sync cycle still runs
-// either way.
+// docs/protocol.md §12: a push channel. Sync frames never carry sync data,
+// only "something changed, download now", so losing the socket costs latency,
+// never correctness: the periodic alarm's sync cycle still runs either way.
+// The one exception is `tab_send` (§12.5), an ephemeral encrypted "open this
+// tab" frame that is not sync data and is simply lost if the socket is down.
 //
 // The socket and timers die with the MV3 service worker, but the backoff
 // state is persisted to chrome.storage.session so a restart doesn't bypass
@@ -12,6 +13,15 @@ import { fetchSettings, invalidateSettingsCache, refreshAccessToken } from "./cl
 
 type ChangesAvailableHandler = () => void;
 type AuthRequestHandler = () => void;
+
+/** A `tab_send` frame as received; nothing in it is trusted until the
+ * envelope decrypts (send-tab/receive.ts). */
+export interface TabSendFrame {
+  id: string;
+  fromDeviceId: string;
+  envelope: unknown;
+}
+type TabSendHandler = (frame: TabSendFrame) => void;
 
 const INITIAL_RECONNECT_DELAY_MS = 1_000;
 const MAX_RECONNECT_DELAY_MS = 60_000;
@@ -38,6 +48,7 @@ let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
 let reconnectBlockedUntil = 0;
 let changesHandler: ChangesAvailableHandler | undefined;
 let authRequestHandler: AuthRequestHandler | undefined;
+let tabSendHandler: TabSendHandler | undefined;
 let disconnectRequested = false;
 
 const RECONNECT_DELAY_STORAGE_KEY = "reconnectDelayMs";
@@ -86,6 +97,11 @@ export function onChangesAvailable(handler: ChangesAvailableHandler): void {
  * created, or another extension answered one (docs/protocol.md §12). */
 export function onAuthRequest(handler: AuthRequestHandler): void {
   authRequestHandler = handler;
+}
+
+/** Called for a tab another of the account's devices sent to this one. */
+export function onTabSend(handler: TabSendHandler): void {
+  tabSendHandler = handler;
 }
 
 function wsUrlFor(serverUrl: string): string {
@@ -201,6 +217,11 @@ async function connect(): Promise<void> {
       changesHandler?.();
     } else if (type === "auth_request") {
       authRequestHandler?.();
+    } else if (type === "tab_send") {
+      const { id, fromDeviceId, envelope } = msg as Partial<TabSendFrame>;
+      if (typeof id === "string" && typeof fromDeviceId === "string" && typeof envelope === "object" && envelope !== null) {
+        tabSendHandler?.({ id, fromDeviceId, envelope });
+      }
     } else if (type === "auth_error") {
       // The token is likely stale. fetchSettings would be served from its
       // cache and never hit the 401 -> refresh path, so clear the cache

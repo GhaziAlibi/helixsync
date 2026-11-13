@@ -539,6 +539,13 @@ pub const AUTH_REQUEST_DEVICE_LIMIT: RateLimitConfig = RateLimitConfig {
     window: Duration::from_secs(60),
     partition: RateLimitPartition::Authenticated,
 };
+// Send-tab (docs/protocol.md §12.5), keyed by sending device.
+pub const TAB_SEND_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "tab_send",
+    limit: 30,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
 pub const SYNC_UPLOAD_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "sync_upload",
     limit: 600,

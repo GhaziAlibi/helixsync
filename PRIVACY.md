@@ -1,6 +1,6 @@
 # HelixSync Privacy Policy
 
-_Last updated: 2026-10-01_
+_Last updated: 2026-11-12_
 
 HelixSync is a self-hosted browser extension. There is no HelixSync-operated
 service, and the developer does not collect, receive, or have access to any
@@ -16,6 +16,8 @@ of your data.
 | `tabGroups` (optional) | Read/apply tab group title, color, and collapsed state, if supported.|
 | `storage`, `unlimitedStorage` | Store your settings and a local sync cache/queue on-device.  |
 | `alarms`               | Schedule periodic background sync checks.                            |
+| `contextMenus`         | Add the "Send to device" right-click menu.                           |
+| `notifications` (optional) | Show a notification when a tab is sent or arrives, only if you turn it on. |
 | Host permission (optional, requested per-site) | Only for the exact server address you enter when connecting a device — requested once, for that origin only, never for "all sites." |
 
 ## Where your data goes
@@ -53,6 +55,11 @@ The server you configure stores the following in its PostgreSQL database:
   kind it is, its size, the number of bookmarks and whether you pinned it.
   Unpinned ones are deleted after 90 days by default
   (`RESTORE_POINT_RETENTION_DAYS`), and you can delete any of them yourself.
+- **Sent tabs:** when you send a tab to another of your devices, the page
+  address travels encrypted through your server to that device and is not
+  stored: the server passes it on only if the other device is connected at that
+  moment, and keeps nothing afterwards (no record, no log entry). The server can
+  see that one of your devices sent something to another, and when.
 - **Settings:** which data you sync, your tab restore policy, your history
   retention and whether automatic restore points are on.
 - **Audit log:** security events such as sign-ins, device changes and password

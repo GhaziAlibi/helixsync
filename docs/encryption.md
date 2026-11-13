@@ -458,6 +458,28 @@ they were made. If key rotation (§4) is ever implemented it has to re-encrypt
 stored points, or keep the old SDEKs, or old points become unreadable; that
 belongs to that design.
 
+### 6.4 Sent tabs
+
+A tab sent to another device (`docs/protocol.md` §12.5) is one §6 envelope under
+the current SDEK. Its plaintext is `{ "url", "title"?, "sentAt" }`, and the
+envelope's AAD is
+
+```text
+["tabSend", "<id>", "<fromDeviceId>", "<toDeviceId>"]
+```
+
+`tabSend` is not an object type, so a sent tab can never be replayed as an
+operation payload (or the reverse). Binding the sender and the target stops the
+server from redirecting the ciphertext to another device or relabelling who sent
+it; the receiver builds the AAD from the frame's `id` and `fromDeviceId` and its
+own device id. The `id` is client generated, and `sentAt` inside the ciphertext
+lets a receiver reject a stale replay. The envelope format is unchanged (`v: 2`).
+An envelope of any other version is dropped, not retried: a sent tab is
+ephemeral.
+
+**What the server sees.** That a device sent something to another at a given
+time, and the envelope's size. The URL and title are inside the ciphertext.
+
 ---
 
 ## 7. Server Enforcement
