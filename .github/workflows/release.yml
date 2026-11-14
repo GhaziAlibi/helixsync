@@ -126,7 +126,7 @@ jobs:
           git commit -m "chore: bump version to $new_version"
           git push origin HEAD:main
 
-      - name: Sync manifest versions with VERSION
+      - name: Sync manifest and Cargo versions with VERSION
         if: github.event_name == 'push'
         run: |
           version=$(tr -d '[:space:]' < VERSION)
@@ -140,10 +140,15 @@ jobs:
               changed=true
             fi
           done
+          .github/scripts/set-cargo-version.sh "$version"
+          if ! git diff --quiet -- server/Cargo.toml server/Cargo.lock; then
+            git add server/Cargo.toml server/Cargo.lock
+            changed=true
+          fi
           if [ "$changed" = true ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git commit -m "chore: sync manifest version to $version"
+            git commit -m "chore: sync manifest and Cargo versions to $version"
             git push origin HEAD:main
           fi
 
@@ -188,6 +193,14 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # This job builds the pushed commit, not the version-sync commit the
+      # `version` job may have added after it, so stamp the release version
+      # here too (as the extension job does with its manifests).
+      - name: Stamp Cargo version
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: .github/scripts/set-cargo-version.sh "$VERSION"
 
       - name: Build and push server image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
