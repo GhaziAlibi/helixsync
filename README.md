@@ -432,8 +432,9 @@ startup and refuses to start, naming the variable, when one is invalid.
 - [ ] **`ALLOW_REGISTRATION=false`** once your accounts exist, or anyone who
   finds the URL can sign up and store up to `MAX_ACCOUNT_STORAGE_BYTES` (5 GiB
   by default) each on your server.
-- [ ] **Backups** of the database, with a tested restore (see below). Backups
-  don't help with a forgotten password; only the user's recovery code does.
+- [ ] **Backups** of the database, copied off the host, with a tested restore
+  (see below). Backups don't help with a forgotten password; only the user's
+  recovery code does.
 - [ ] **`HELIXSYNC_VERSION`** pinned to a released version when using
   `docker-compose.prod.yml`, and updated deliberately.
 - [ ] If `web` is published directly rather than reached only through your
@@ -456,17 +457,31 @@ If you build from source, pull the repository and rebuild instead
 Read the [changelog](CHANGELOG.md) first: a release can contain breaking
 changes, and its upgrade notes say what to do. Migrations run automatically.
 
-Back up the database with `pg_dump` (adjust the user and database name if you
-changed `POSTGRES_USER` or `POSTGRES_DB`):
+**Backups.** The server can write a scheduled, encrypted dump of the whole
+database into the `helix-backup` volume (off by default). In `.env`:
 
 ```bash
-docker compose exec postgres pg_dump -U helixsync helixsync > backup.sql
+BACKUP_ENABLED=true
+BACKUP_ENCRYPTION_KEY=...   # openssl rand -base64 48; keep a copy outside the server
 ```
 
-The dump holds each account's key only in wrapped form, so it is useless
-without the account password; keep it as private as the database itself, since
-it also contains account emails and device names. Restore and disaster
-recovery steps are in [`docs/deployment.md`](docs/deployment.md).
+By default it runs every day at 03:00 UTC and keeps the newest 7 files
+(`BACKUP_CRON`, `BACKUP_KEEP_LAST`). Copying the files off the host is up to
+you. Restore is a command on the host, with the server stopped:
+
+```bash
+docker compose stop server
+docker compose run --rm server restore-backup      # newest backup, or name a file
+docker compose up -d server
+```
+
+`backup-now` and `list-backups` work the same way. The files hold each
+account's key only in wrapped form, so they are useless without the account
+password, but they also contain account emails and device names: keep them as
+private as the database. Details, restore steps and a disaster recovery
+checklist are in [`docs/deployment.md`](docs/deployment.md#backups). Plain
+`pg_dump` (`docker compose exec postgres pg_dump -U helixsync helixsync`) still
+works too.
 
 ## Troubleshooting
 

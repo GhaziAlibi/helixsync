@@ -14,6 +14,7 @@
     "devices": "Appareils",
     "sync": "Synchronisation",
     "restorePoints": "Points de restauration",
+    "backups": "Sauvegardes",
     "security": "Sécurité"
   },
   "layout": {
@@ -248,6 +249,38 @@
     "pin": "Épingler",
     "unpin": "Désépingler",
     "deleteConfirm": "Supprimer le point de restauration du {{date}} ? Cette action est irréversible."
+  },
+  "backups": {
+    "title": "Sauvegardes",
+    "intro": "Copies chiffrées de toute la base de données du serveur, faites par le serveur lui-même. Tous les comptes de ce serveur voient cette page. La restauration est faite par l'opérateur sur la machine du serveur ; elle n'est pas possible d'ici.",
+    "unsupported": "Ce serveur ne prend pas encore en charge cette page.",
+    "off": "Les sauvegardes sont désactivées sur ce serveur. L'opérateur les active avec BACKUP_ENABLED=true.",
+    "schedule": "Planification",
+    "cronValue": "{{cron}} (UTC)",
+    "nextRun": "Prochaine exécution",
+    "keepLast": "Fichiers conservés",
+    "recentTitle": "Sauvegardes récentes",
+    "noFiles": "Aucun fichier de sauvegarde pour le moment.",
+    "created": "Créée",
+    "kindColumn": "Type",
+    "size": "Taille",
+    "file": "Fichier",
+    "kind": {
+      "scheduled": "Planifiée",
+      "manual": "Manuelle",
+      "prerestore": "Avant une restauration"
+    },
+    "historyTitle": "Historique",
+    "noHistory": "Rien ne s'est encore exécuté.",
+    "time": "Heure",
+    "result": "Résultat",
+    "event": {
+      "completed": "Réussie",
+      "failed": "Échouée",
+      "restored": "Restaurée"
+    },
+    "failedHelp": "Une exécution échouée est retentée au bout d'une heure ; le journal du serveur en donne la raison.",
+    "refresh": "Actualiser"
   },
   "errors": {
     "generic": "Un problème est survenu",

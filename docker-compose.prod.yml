@@ -82,6 +82,13 @@ services:
       AUDIT_LOG_RETENTION_SECS: ${AUDIT_LOG_RETENTION_SECS:-7776000}
       RUST_LOG: ${RUST_LOG:-info}
       LOG_FORMAT: ${LOG_FORMAT:-text}
+      # Scheduled, encrypted database backups into the helix-backup volume
+      # (docs/deployment.md, "Backups"). Off unless BACKUP_ENABLED=true.
+      BACKUP_ENABLED: ${BACKUP_ENABLED:-false}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:-}
+      BACKUP_CRON: ${BACKUP_CRON:-0 3 * * *}
+      BACKUP_KEEP_LAST: ${BACKUP_KEEP_LAST:-7}
+      BACKUP_DIR: /backups
     # On stop the server drains requests for up to SHUTDOWN_DEADLINE_SECS
     # (30s) and then closes its database connections; Docker's default of
     # 10s would kill it partway through.
@@ -91,8 +98,12 @@ services:
     # over the internal `helixsync` network instead.
     networks:
       - helixsync
-    # Runs as non-root `helixsync` (server/Dockerfile) and does no file I/O.
+    # Runs as non-root `helixsync` (server/Dockerfile). The root filesystem
+    # stays read-only: the only place the server writes is the helix-backup
+    # volume, and only when BACKUP_ENABLED=true.
     read_only: true
+    volumes:
+      - helix-backup:/backups
     cap_drop:
       - ALL
     security_opt:
@@ -135,6 +146,7 @@ services:
 
 volumes:
   helixsync_postgres_data:
+  helix-backup:
 
 networks:
   helixsync:

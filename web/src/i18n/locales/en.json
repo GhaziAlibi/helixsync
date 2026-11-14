@@ -14,6 +14,7 @@
     "devices": "Devices",
     "sync": "Synchronization",
     "restorePoints": "Restore points",
+    "backups": "Backups",
     "security": "Security"
   },
   "layout": {
@@ -248,6 +249,38 @@
     "pin": "Pin",
     "unpin": "Unpin",
     "deleteConfirm": "Delete the restore point from {{date}}? This can't be undone."
+  },
+  "backups": {
+    "title": "Backups",
+    "intro": "Encrypted copies of the whole server database, made by the server itself. Everyone with an account on this server sees this page. Restoring is done by the server's operator on the host; it can't be done from here.",
+    "unsupported": "This server doesn't support this page yet.",
+    "off": "Backups are turned off on this server. The operator turns them on with BACKUP_ENABLED=true.",
+    "schedule": "Schedule",
+    "cronValue": "{{cron}} (UTC)",
+    "nextRun": "Next run",
+    "keepLast": "Files kept",
+    "recentTitle": "Recent backups",
+    "noFiles": "No backup files yet.",
+    "created": "Created",
+    "kindColumn": "Kind",
+    "size": "Size",
+    "file": "File",
+    "kind": {
+      "scheduled": "Scheduled",
+      "manual": "Manual",
+      "prerestore": "Before a restore"
+    },
+    "historyTitle": "History",
+    "noHistory": "Nothing has run yet.",
+    "time": "Time",
+    "result": "Result",
+    "event": {
+      "completed": "Completed",
+      "failed": "Failed",
+      "restored": "Restored"
+    },
+    "failedHelp": "A failed run is tried again after an hour; the server log says why.",
+    "refresh": "Refresh"
   },
   "errors": {
     "generic": "Something went wrong",

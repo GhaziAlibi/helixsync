@@ -468,6 +468,16 @@ describe("getServerVersion", () => {
   });
 });
 
+describe("backups", () => {
+  it("reads the read-only status", async () => {
+    const { getBackupStatus } = await client();
+    const status = { enabled: true, cron: "0 3 * * *", keepLast: 7, nextRunAt: null, files: [], history: [] };
+    fetchMock.mockResolvedValueOnce(jsonResponse(status));
+    expect(await getBackupStatus()).toEqual(status);
+    expect(call(0)).toMatchObject({ url: "/api/v1/backups", method: "GET", credentials: "include" });
+  });
+});
+
 describe("restore points", () => {
   it("lists the account's points", async () => {
     const { listRestorePoints } = await client();

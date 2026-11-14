@@ -1,5 +1,6 @@
 use std::env;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use axum::http::HeaderValue;
 
@@ -77,6 +78,111 @@ pub struct Config {
     pub shutdown_deadline_secs: u64,
     /// Limits and retention for bookmark restore points (docs/protocol.md §16).
     pub restore_points: RestorePointLimits,
+    /// Scheduled database backups (docs/deployment.md, "Backups").
+    pub backup: BackupConfig,
+}
+
+/// Default `BACKUP_CRON`: every day at 03:00 UTC.
+pub const DEFAULT_BACKUP_CRON: &str = "0 3 * * *";
+
+/// Shortest accepted `BACKUP_ENCRYPTION_KEY`.
+pub const MIN_BACKUP_KEY_LEN: usize = 32;
+
+/// Scheduled, encrypted database backups. Off unless `BACKUP_ENABLED` is
+/// true, since a deployment that only bumps the image has no volume mounted.
+// No `Debug`: carries the backup encryption key.
+#[derive(Clone)]
+pub struct BackupConfig {
+    pub enabled: bool,
+    /// `BACKUP_ENCRYPTION_KEY`, if set. Check it with [`Self::key`] before
+    /// use: it is only validated when backups are enabled or a backup
+    /// command runs.
+    encryption_key: Option<String>,
+    /// `BACKUP_CRON`: five fields, UTC.
+    pub cron: String,
+    /// `BACKUP_DIR`.
+    pub dir: PathBuf,
+    /// `BACKUP_KEEP_LAST`.
+    pub keep_last: usize,
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            encryption_key: None,
+            cron: DEFAULT_BACKUP_CRON.to_string(),
+            dir: PathBuf::from("/backups"),
+            keep_last: 7,
+        }
+    }
+}
+
+impl BackupConfig {
+    /// Builds a config from explicit values (tests, and `from_env`).
+    pub fn new(
+        enabled: bool,
+        encryption_key: Option<String>,
+        cron: &str,
+        dir: impl Into<PathBuf>,
+        keep_last: usize,
+    ) -> Self {
+        Self {
+            enabled,
+            encryption_key,
+            cron: cron.to_string(),
+            dir: dir.into(),
+            keep_last,
+        }
+    }
+
+    /// The encryption key, refused if it is missing, too short or still a
+    /// `.env.example` placeholder.
+    pub fn key(&self) -> anyhow::Result<&str> {
+        let key = self
+            .encryption_key
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("BACKUP_ENCRYPTION_KEY is required for backups"))?;
+        validate_backup_key(key)?;
+        Ok(key)
+    }
+
+    /// Everything that must hold for the scheduler to start: key, cron.
+    /// (`BACKUP_DIR` writability is checked by `backup::check_dir_writable`.)
+    pub fn validate_enabled(&self) -> anyhow::Result<()> {
+        self.key()?;
+        crate::backup::scheduler::parse_cron(&self.cron)?;
+        Ok(())
+    }
+
+    fn from_env() -> anyhow::Result<Self> {
+        let defaults = Self::default();
+        let enabled = env_parse("BACKUP_ENABLED", false, parse_flag)?;
+        let encryption_key = env::var("BACKUP_ENCRYPTION_KEY")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let cron = match env::var("BACKUP_CRON")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+        {
+            Some(v) => v.trim().to_string(),
+            None => defaults.cron,
+        };
+        let dir = match env::var("BACKUP_DIR").ok().filter(|v| !v.trim().is_empty()) {
+            Some(v) => PathBuf::from(v.trim()),
+            None => defaults.dir,
+        };
+        let keep_last = env_parse(
+            "BACKUP_KEEP_LAST",
+            defaults.keep_last as u32,
+            parse_positive_u32,
+        )? as usize;
+        let config = Self::new(enabled, encryption_key, &cron, dir, keep_last);
+        if config.enabled {
+            config.validate_enabled()?;
+        }
+        Ok(config)
+    }
 }
 
 /// Limits and retention for bookmark restore points. They have their own
@@ -243,6 +349,23 @@ fn validate_jwt_signing_key(key: &str) -> anyhow::Result<()> {
     if lowered.contains("change-me") || lowered.contains("replace-me") {
         return Err(anyhow::anyhow!(
             "JWT_SIGNING_KEY still looks like a .env.example placeholder (contains \"change-me\" or \"replace-me\"); set a real secret, e.g. `openssl rand -base64 48`"
+        ));
+    }
+    Ok(())
+}
+
+/// Checks `BACKUP_ENCRYPTION_KEY`: long enough, and not a `.env.example`
+/// placeholder. Same substring rule as [`validate_jwt_signing_key`].
+fn validate_backup_key(key: &str) -> anyhow::Result<()> {
+    if key.len() < MIN_BACKUP_KEY_LEN {
+        return Err(anyhow::anyhow!(
+            "BACKUP_ENCRYPTION_KEY must be at least {MIN_BACKUP_KEY_LEN} characters"
+        ));
+    }
+    let lowered = key.to_ascii_lowercase();
+    if lowered.contains("change-me") || lowered.contains("replace-me") {
+        return Err(anyhow::anyhow!(
+            "BACKUP_ENCRYPTION_KEY still looks like a .env.example placeholder (contains \"change-me\" or \"replace-me\"); set a real secret, e.g. `openssl rand -base64 48`"
         ));
     }
     Ok(())
@@ -489,6 +612,8 @@ impl Config {
             )?,
         };
 
+        let backup = BackupConfig::from_env()?;
+
         Ok(Self {
             database_url,
             bind_addr,
@@ -520,6 +645,7 @@ impl Config {
             upload_semaphore_acquire_timeout_secs,
             shutdown_deadline_secs,
             restore_points,
+            backup,
         })
     }
 }
@@ -763,6 +889,38 @@ mod tests {
     #[test]
     fn jwt_key_accepts_a_random_looking_key() {
         assert!(validate_jwt_signing_key("k3Yb0ardCat-9fQ2xVzLmW7pRtN1uHsJ4aEoXyC6dGq8").is_ok());
+    }
+
+    // --- backup key ---
+
+    #[test]
+    fn backup_key_rejects_missing_short_and_placeholder_keys() {
+        let key = |k: Option<&str>| {
+            BackupConfig::new(true, k.map(str::to_string), DEFAULT_BACKUP_CRON, "/b", 7)
+                .key()
+                .map(str::to_string)
+        };
+        assert!(key(None).is_err());
+        assert!(key(Some("too-short")).is_err());
+        assert!(key(Some("change-me-to-a-long-random-secret-0123456789")).is_err());
+        assert!(key(Some("REPLACE-ME-with-a-real-secret-0123456789ab")).is_err());
+        let good = "k3Yb0ardCat-9fQ2xVzLmW7pRtN1uHsJ4aEoXyC6dGq8";
+        assert_eq!(key(Some(good)).unwrap(), good);
+    }
+
+    #[test]
+    fn backup_enabled_needs_a_valid_cron() {
+        let good = "k3Yb0ardCat-9fQ2xVzLmW7pRtN1uHsJ4aEoXyC6dGq8".to_string();
+        let with_cron = |cron: &str| {
+            BackupConfig::new(true, Some(good.clone()), cron, "/b", 7).validate_enabled()
+        };
+        assert!(with_cron("0 3 * * *").is_ok());
+        assert!(with_cron("not a cron").is_err());
+    }
+
+    #[test]
+    fn backup_is_off_by_default() {
+        assert!(!BackupConfig::default().enabled);
     }
 
     // --- CORS origin validation ---

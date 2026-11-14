@@ -28,7 +28,10 @@ RUN cargo about generate --locked about.hbs -o THIRD_PARTY_LICENSES.txt
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --no-create-home --uid 10001 helixsync
+    && useradd --system --no-create-home --uid 10001 helixsync \
+    # Where scheduled backups are written (BACKUP_DIR). A named volume mounted
+    # here starts with this directory's owner, so the non-root server can write.
+    && mkdir /backups && chown 10001:10001 /backups
 
 WORKDIR /app
 COPY --from=builder /build/target/release/helixsync-server /app/helixsync-server

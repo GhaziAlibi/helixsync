@@ -14,6 +14,7 @@
     "devices": "Dispositivos",
     "sync": "Sincronización",
     "restorePoints": "Puntos de restauración",
+    "backups": "Copias de seguridad",
     "security": "Seguridad"
   },
   "layout": {
@@ -248,6 +249,38 @@
     "pin": "Fijar",
     "unpin": "Desfijar",
     "deleteConfirm": "¿Eliminar el punto de restauración del {{date}}? No se puede deshacer."
+  },
+  "backups": {
+    "title": "Copias de seguridad",
+    "intro": "Copias cifradas de toda la base de datos del servidor, hechas por el propio servidor. Todas las cuentas de este servidor ven esta página. La restauración la hace el operador en el equipo del servidor; no se puede hacer desde aquí.",
+    "unsupported": "Este servidor aún no admite esta página.",
+    "off": "Las copias de seguridad están desactivadas en este servidor. El operador las activa con BACKUP_ENABLED=true.",
+    "schedule": "Programación",
+    "cronValue": "{{cron}} (UTC)",
+    "nextRun": "Próxima ejecución",
+    "keepLast": "Archivos conservados",
+    "recentTitle": "Copias recientes",
+    "noFiles": "Aún no hay archivos de copia.",
+    "created": "Creada",
+    "kindColumn": "Tipo",
+    "size": "Tamaño",
+    "file": "Archivo",
+    "kind": {
+      "scheduled": "Programada",
+      "manual": "Manual",
+      "prerestore": "Antes de una restauración"
+    },
+    "historyTitle": "Historial",
+    "noHistory": "Todavía no se ha ejecutado nada.",
+    "time": "Hora",
+    "result": "Resultado",
+    "event": {
+      "completed": "Completada",
+      "failed": "Fallida",
+      "restored": "Restaurada"
+    },
+    "failedHelp": "Una ejecución fallida se reintenta pasada una hora; el registro del servidor indica el motivo.",
+    "refresh": "Actualizar"
   },
   "errors": {
     "generic": "Algo salió mal",
