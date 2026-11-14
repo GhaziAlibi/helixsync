@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod auth;
 pub mod background;
+pub mod backup;
 pub mod config;
 pub mod crypto;
 pub mod database;
@@ -59,6 +60,7 @@ pub fn app(state: AppState) -> Router {
             "/restore-points",
             restore_points::routes::router(state.config.restore_points.max_bytes),
         )
+        .nest("/backups", backup::status::router())
         .route("/ws", get(websocket::ws_handler))
         .route("/version", get(version))
         // Snapshots can be 20-60MB of JSON.
@@ -131,6 +133,7 @@ async fn version(State(state): State<AppState>) -> Json<serde_json::Value> {
         "minimumSupportedProtocolVersion": state.config.minimum_supported_protocol_version,
         "registrationEnabled": state.config.allow_registration,
         "restorePoints": true,
+        "backups": true,
         "sendTab": true,
     }))
 }

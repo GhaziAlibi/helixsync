@@ -30,3 +30,42 @@ pub async fn run_migrations(pool: &PgPool) -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
 }
+
+/// Versions of every migration this binary ships, oldest first.
+pub fn known_migration_versions() -> Vec<i64> {
+    sqlx::migrate!("./migrations")
+        .iter()
+        .map(|m| m.version)
+        .collect()
+}
+
+/// A fixed list of migrations, so a database can be brought to an older
+/// schema than this binary's latest.
+#[derive(Debug)]
+struct MigrationList(Vec<sqlx::migrate::Migration>);
+
+impl<'s> sqlx::migrate::MigrationSource<'s> for MigrationList {
+    fn resolve(
+        self,
+    ) -> futures::future::BoxFuture<
+        's,
+        Result<Vec<sqlx::migrate::Migration>, sqlx::error::BoxDynError>,
+    > {
+        Box::pin(async move { Ok(self.0) })
+    }
+}
+
+/// Applies the migrations up to and including `version`, and no later one.
+/// Used by `restore-backup` to rebuild the schema a backup was taken with.
+pub async fn run_migrations_up_to(pool: &PgPool, version: i64) -> anyhow::Result<()> {
+    let upto: Vec<_> = sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version <= version)
+        .cloned()
+        .collect();
+    sqlx::migrate::Migrator::new(MigrationList(upto))
+        .await?
+        .run(pool)
+        .await?;
+    Ok(())
+}

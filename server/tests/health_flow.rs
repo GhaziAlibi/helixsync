@@ -39,6 +39,7 @@ fn test_config() -> Config {
         upload_semaphore_acquire_timeout_secs: 20,
         shutdown_deadline_secs: 30,
         restore_points: Default::default(),
+        backup: Default::default(),
     }
 }
 

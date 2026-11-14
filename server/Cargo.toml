@@ -1,6 +1,6 @@
 [package]
 name = "helixsync-server"
-version = "1.0.0"
+version = "1.0.21"
 edition = "2021"
 description = "Self-hosted, end-to-end encrypted browser sync server"
 license = "MIT"
@@ -42,6 +42,9 @@ base64 = "0.23"
 dashmap = "6"
 futures = "0.3"
 flate2 = "1.1.10"
+age = "0.12"
+croner = "4"
+zstd = "0.14"
 
 [dev-dependencies]
 axum-test = { version = "21", features = ["ws"] }

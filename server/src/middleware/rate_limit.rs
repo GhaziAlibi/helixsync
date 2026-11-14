@@ -607,6 +607,13 @@ pub const RESTORE_POINT_DOWNLOAD_LIMIT: RateLimitConfig = RateLimitConfig {
     window: Duration::from_secs(60),
     partition: RateLimitPartition::Authenticated,
 };
+/// The dashboard's Backups page.
+pub const BACKUP_STATUS_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "backup_status",
+    limit: 30,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
 pub const RESTORE_POINT_READ_LIMIT: RateLimitConfig = RateLimitConfig {
     bucket: "restore_point_read",
     limit: 60,

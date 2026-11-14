@@ -8,6 +8,7 @@ const navItems = [
   { to: "/devices", key: "nav.devices" },
   { to: "/sync", key: "nav.sync" },
   { to: "/restore-points", key: "nav.restorePoints" },
+  { to: "/backups", key: "nav.backups" },
   { to: "/security", key: "nav.security" },
 ];
 
