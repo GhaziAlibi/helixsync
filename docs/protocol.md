@@ -1053,6 +1053,7 @@ extensionVersion: "<semver>"
   "minimumSupportedProtocolVersion": 1,
   "registrationEnabled": true,
   "restorePoints": true,
+  "backups": true,
   "sendTab": true
 }
 ```
@@ -1063,6 +1064,10 @@ treat a missing value as `true`. `restorePoints` is `true` on a server that
 has the bookmark restore points of §16; clients must treat a missing value as
 `false` and hide the feature. `sendTab` is `true` on a server with the
 send-tab push of §12.5; clients treat a missing value as `false` and hide it.
+`backups` is `true` on a server with the read-only `GET /api/v1/backups` that
+the dashboard's Backups page reads (docs/deployment.md, "Backups"); the
+dashboard treats a missing value as `false`. It is not part of the sync
+protocol.
 
 Rules:
 

@@ -14,6 +14,7 @@
     "devices": "设备",
     "sync": "同步",
     "restorePoints": "还原点",
+    "backups": "备份",
     "security": "安全"
   },
   "layout": {
@@ -248,6 +249,38 @@
     "pin": "固定",
     "unpin": "取消固定",
     "deleteConfirm": "删除 {{date}} 的还原点？此操作无法撤销。"
+  },
+  "backups": {
+    "title": "备份",
+    "intro": "由服务器自身生成的整个服务器数据库的加密副本。此服务器上的所有账户都能看到此页面。恢复由运维人员在服务器主机上进行，无法在此操作。",
+    "unsupported": "此服务器暂不支持此页面。",
+    "off": "此服务器已关闭备份。运维人员可通过 BACKUP_ENABLED=true 开启。",
+    "schedule": "计划",
+    "cronValue": "{{cron}}（UTC）",
+    "nextRun": "下次运行",
+    "keepLast": "保留的文件数",
+    "recentTitle": "最近的备份",
+    "noFiles": "还没有备份文件。",
+    "created": "创建时间",
+    "kindColumn": "类型",
+    "size": "大小",
+    "file": "文件",
+    "kind": {
+      "scheduled": "定时",
+      "manual": "手动",
+      "prerestore": "恢复之前"
+    },
+    "historyTitle": "历史记录",
+    "noHistory": "尚未运行过。",
+    "time": "时间",
+    "result": "结果",
+    "event": {
+      "completed": "已完成",
+      "failed": "失败",
+      "restored": "已恢复"
+    },
+    "failedHelp": "失败的运行会在一小时后重试；原因见服务器日志。",
+    "refresh": "刷新"
   },
   "errors": {
     "generic": "出了点问题",

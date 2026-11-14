@@ -233,6 +233,11 @@ its working directory). The Compose files pass through the ones marked
 | `AUDIT_LOG_RETENTION_SECS` | `7776000` | How long audit-log rows are kept (90 days). **C** |
 | `RUST_LOG` | `info` | Log filter (`tracing` env-filter syntax). **C** |
 | `LOG_FORMAT` | `text` | `text` or `json`. **C** |
+| `BACKUP_ENABLED` | `false` | Write scheduled, encrypted database backups ([Backups](#backups)). **C** |
+| `BACKUP_ENCRYPTION_KEY` | none | Encrypts every backup; required when backups are on, at least 32 characters, never a placeholder. **C** |
+| `BACKUP_CRON` | `0 3 * * *` | When to back up: five-field cron expression, UTC. **C** |
+| `BACKUP_DIR` | `/backups` | Where backup files go; must be writable when backups are on. **C** (fixed to the volume) |
+| `BACKUP_KEEP_LAST` | `7` | Newest backup files kept; older ones are deleted. **C** |
 | `INACTIVE_DEVICE_COMPACTION_GRACE_PERIOD_SECS` | `2592000` | A device idle this long stops holding back compaction; it resyncs from a snapshot if it returns |
 | `NEVER_SYNCED_DEVICE_COMPACTION_GRACE_PERIOD_SECS` | `86400` | The same for a device that never downloaded changes |
 | `HOUSEKEEPING_INTERVAL_SECS` | `86400` | How often expired credentials, sessions and old audit rows are deleted |
@@ -337,29 +342,154 @@ other headers from [`web/security-headers.conf`](../web/security-headers.conf)
 (see [`security.md`](security.md) §4). Without the image you have to add them in
 your own proxy, or the dashboard loses that protection.
 
-## Backup and restore
+## Backups
 
-Restore points (`bookmark_restore_points`) are rows in the same database, so a
-`pg_dump` backup includes them, and they can be up to
-`RESTORE_POINT_MAX_ACCOUNT_BYTES` per account. If a reverse proxy sits in front
-of the server, let it accept bodies up to `RESTORE_POINT_MAX_BYTES` (the bundled
-nginx allows 150 MB).
+The server can write a scheduled, encrypted dump of the whole database into
+its data folder. It is **off by default**; the server talks to no storage
+provider, so copying the files off the host (Backrest/restic, rclone, a cron
+`rsync`, ...) is your job. On its own the folder sits on the same host as the
+database and is not disaster recovery.
 
-Minimum supported backup mechanism is `pg_dump`/`pg_restore` against the
-`postgres` service's volume:
+### Turning it on
+
+In `.env` (both Compose files already mount the `helix-backup` volume at
+`/backups`):
+
+```bash
+BACKUP_ENABLED=true
+BACKUP_ENCRYPTION_KEY=...   # openssl rand -base64 48
+# optional
+BACKUP_CRON="0 3 * * *"     # five fields, UTC; this is the default
+BACKUP_KEEP_LAST=7
+```
+
+then `docker compose up -d`. The server refuses to start with backups on if
+the key is missing, shorter than 32 characters or still a `change-me`
+placeholder, if `BACKUP_CRON` does not parse, or if `/backups` is not
+writable. If the server was down at a scheduled time it takes one backup at
+startup; a failed run is retried after an hour. A bind mount instead of the
+named volume must be owned by uid 10001.
+
+**Keep a copy of `BACKUP_ENCRYPTION_KEY` outside the server** (a password
+manager). Without it every backup is unreadable. The key also sits in the
+server's environment next to the files, so the encryption protects the copies
+that leave the host, not a compromised host.
+
+### What gets written
+
+```
+/backups/helixsync-backup-20261113T030000Z.sql.zst.age            scheduled
+/backups/helixsync-backup-20261113T030000Z-manual.sql.zst.age     backup-now
+/backups/helixsync-backup-20261113T030000Z-prerestore.sql.zst.age before a restore
+```
+
+Each file is one consistent snapshot of every table (taken while sync keeps
+running), compressed with zstd and encrypted with
+[age](https://age-encryption.org) using `BACKUP_ENCRYPTION_KEY` as the
+passphrase. It includes the `users` rows that hold each account's wrapped key:
+the encrypted sync data cannot be read without them. A file is written as
+`<name>.partial` and renamed when complete, so **ignore `*.partial` files when
+copying the folder**; leftovers from a crashed run are removed at the next
+run. After each successful backup the server deletes the oldest files beyond
+`BACKUP_KEEP_LAST`; the newest pre-restore file is never deleted, and files
+whose names do not match the patterns above are never touched. Disk use is up
+to `BACKUP_KEEP_LAST` + 1 times the compressed database size. Encrypted files
+do not deduplicate in tools like restic: each daily file is stored in full.
+
+The outcome of each run is logged and recorded in the audit log
+(`backup_completed`, `backup_failed`, `backup_restored`).
+
+Resource use: the database streams straight to disk, so memory stays flat
+however large it is; the only peak is about 128 MiB for a moment at the start
+of each backup and restore, while the passphrase is turned into an encryption
+key. As a guide, a 3.8 GB database took about 25 seconds to back up (1.9 GiB
+file) and under two minutes to restore, safety backup included.
+
+### Seeing them in the dashboard
+
+The dashboard has a read-only **Backups** page: whether backups are on, the
+schedule and next run, the files in the folder, and the history of recent runs
+(completed, failed, restored). HelixSync has no admin role, so **every account
+on the server sees it**; it shows file names, sizes and times, never file
+contents or keys, and it can't start, change or restore anything. Failures show
+only that a run failed; the reason is in the server log. History comes from the
+audit log, so it goes back as far as `AUDIT_LOG_RETENTION_SECS` (90 days by
+default).
+
+### Commands
+
+Run them through Compose; they use the same environment as the server:
+
+```bash
+docker compose run --rm server backup-now       # write one backup immediately
+docker compose run --rm server list-backups     # name, time, size, kind
+docker compose run --rm server restore-backup   # restore the newest scheduled or manual file
+docker compose run --rm server restore-backup helixsync-backup-20261113T030000Z.sql.zst.age
+```
+
+Starting, changing or restoring a backup is not possible from the dashboard or
+the API: several people can share an instance and there is no admin role, so a
+server-wide restore cannot sit behind an account. Only someone with shell
+access to the host can run these commands.
+
+### Restoring
+
+1. **Stop the server**: `docker compose stop server`. The command refuses to
+   run while another connection of the same database user is open, which is
+   what the running server is.
+2. `docker compose run --rm server restore-backup [<file>]`.
+3. The whole file is checked first (decryption, checksum, row counts); a wrong
+   key, a damaged or truncated file, a file with anything in it the server did
+   not write, or a backup taken by a newer HelixSync version is refused
+   before anything changes.
+4. If the database holds data, you see what will be replaced and must type
+   `restore`. A safety backup of the current data
+   (`...-prerestore.sql.zst.age`) is written first; if that fails, nothing is
+   changed. It is skipped when the database is empty (a fresh install).
+5. A backup of the same schema version is loaded in one transaction: any
+   failure rolls back and the current data is untouched. A backup of an older
+   version rebuilds the schema first, which is not atomic; the safety backup
+   is what protects you there.
+6. `docker compose up -d server`. Devices resync on their own (a device that
+   was ahead of the restored data gets `cursor_invalid` and falls back to a
+   snapshot, `docs/protocol.md` §10.1); sessions and passwords are those of
+   the backup.
+
+Restoring on a brand-new server works the same way: start it once so the
+database exists, stop `server`, copy the files into the volume, and run the
+command.
+
+### Reading a backup without HelixSync
+
+A file is a plain `psql` script under the encryption and compression, so you
+are not locked in. Into a database that already has the schema (start the
+server once, then stop it):
+
+```bash
+age -d helixsync-backup-20261113T030000Z.sql.zst.age | zstd -dc | psql -U helixsync helixsync
+```
+
+`age` asks for `BACKUP_ENCRYPTION_KEY` as the passphrase.
+
+### Plain `pg_dump`
+
+`pg_dump` against the `postgres` service still works and needs none of the
+above:
 
 ```bash
 docker compose exec postgres pg_dump -U helixsync helixsync > backup.sql
+docker compose exec -T postgres psql -U helixsync helixsync < backup.sql   # restore
 ```
 
-Restore into a fresh instance:
+### About encrypted data and account removal
 
-```bash
-docker compose exec -T postgres psql -U helixsync helixsync < backup.sql
-```
+Restore points (`bookmark_restore_points`) are rows in the same database, so
+backups include them, and they can be up to `RESTORE_POINT_MAX_ACCOUNT_BYTES`
+per account. If a reverse proxy sits in front of the server, let it accept
+bodies up to `RESTORE_POINT_MAX_BYTES` (the bundled nginx allows 150 MB).
 
 If E2E encryption (`docs/encryption.md`) is enabled, `sync_operations.payload`
-and `sync_snapshots.data` contain only opaque encrypted blobs — the database
+and `sync_snapshots.data` contain only opaque encrypted blobs — a database
 backup alone is sufficient for disaster recovery of the encrypted data. The
 backup holds each account's key only in wrapped form, encrypted under a key
 derived from the account password, and in a second copy under a key derived
@@ -367,12 +497,12 @@ from the user's recovery code; the server never sees either. A restored
 database is therefore only readable by someone who knows the password or the
 recovery code: if a user loses both, their data is unrecoverable by design
 (docs/encryption.md §9) — this is not a backup gap, it's the point of E2E
-encryption. Keep database
-backups as private as the database itself, since they also hold the account
-metadata (emails, device names) in the clear.
+encryption. Keep backups as private as the database itself, since they also
+hold the account metadata (emails, device names) in the clear.
 
 Deleting an account removes its data from the live database immediately, but
-not from backups taken before; they age out with your backup retention.
+not from backups taken before; they age out with `BACKUP_KEEP_LAST` and your
+own retention for the copies you keep elsewhere.
 
 ## Database migrations
 
@@ -387,15 +517,24 @@ sqlx migrate run --database-url "$DATABASE_URL"
 
 ## Disaster recovery checklist
 
-1. Restore the `postgres` volume from the latest `pg_dump` backup.
-2. Bring up `server` against the restored database; migrations are
-   idempotent (`sqlx::migrate!` tracks applied versions) and safe to re-run.
-3. Devices resume incremental sync from their last acknowledged cursor, or
+1. Have `BACKUP_ENCRYPTION_KEY` from your own records (the server's `.env` is
+   gone with the host) and the newest backup file from wherever you copy them
+   to.
+2. Deploy the stack again, start it once, then `docker compose stop server`.
+3. Put the backup file into the `helix-backup` volume and run
+   `docker compose run --rm server restore-backup <file>` (see
+   [Restoring](#restoring)). Restoring from a `pg_dump` file instead: load it
+   with `psql` into the `postgres` service.
+4. `docker compose up -d server`. Migrations are idempotent
+   (`sqlx::migrate!` tracks applied versions) and safe to re-run.
+5. Devices resume incremental sync from their last acknowledged cursor, or
    fall back to snapshot resync automatically if that cursor is no longer
-   covered by retained operations (`docs/protocol.md` §11).
-4. If encryption is enabled, sign in to the dashboard (or reconnect a device)
+   covered by the restored data (`docs/protocol.md` §10.1, §11).
+6. If encryption is enabled, sign in to the dashboard (or reconnect a device)
    with a restored account's password to confirm the restore is complete —
    the database alone cannot decrypt anything.
+7. Once a year, practise steps 2–4 on a spare machine: a backup nobody has
+   restored is a hope.
 
 ## Health checks
 

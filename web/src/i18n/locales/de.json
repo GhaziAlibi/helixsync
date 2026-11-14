@@ -14,6 +14,7 @@
     "devices": "Geräte",
     "sync": "Synchronisierung",
     "restorePoints": "Wiederherstellungspunkte",
+    "backups": "Backups",
     "security": "Sicherheit"
   },
   "layout": {
@@ -248,6 +249,38 @@
     "pin": "Anheften",
     "unpin": "Lösen",
     "deleteConfirm": "Den Wiederherstellungspunkt vom {{date}} löschen? Das kann nicht rückgängig gemacht werden."
+  },
+  "backups": {
+    "title": "Backups",
+    "intro": "Verschlüsselte Kopien der gesamten Serverdatenbank, die der Server selbst erstellt. Jedes Konto auf diesem Server sieht diese Seite. Wiederhergestellt wird durch den Betreiber auf dem Server; von hier aus ist das nicht möglich.",
+    "unsupported": "Dieser Server unterstützt diese Seite noch nicht.",
+    "off": "Backups sind auf diesem Server ausgeschaltet. Der Betreiber schaltet sie mit BACKUP_ENABLED=true ein.",
+    "schedule": "Zeitplan",
+    "cronValue": "{{cron}} (UTC)",
+    "nextRun": "Nächster Lauf",
+    "keepLast": "Aufbewahrte Dateien",
+    "recentTitle": "Letzte Backups",
+    "noFiles": "Noch keine Backup-Dateien.",
+    "created": "Erstellt",
+    "kindColumn": "Art",
+    "size": "Größe",
+    "file": "Datei",
+    "kind": {
+      "scheduled": "Geplant",
+      "manual": "Manuell",
+      "prerestore": "Vor einer Wiederherstellung"
+    },
+    "historyTitle": "Verlauf",
+    "noHistory": "Noch nichts gelaufen.",
+    "time": "Zeitpunkt",
+    "result": "Ergebnis",
+    "event": {
+      "completed": "Erfolgreich",
+      "failed": "Fehlgeschlagen",
+      "restored": "Wiederhergestellt"
+    },
+    "failedHelp": "Ein fehlgeschlagener Lauf wird nach einer Stunde wiederholt; der Grund steht im Serverprotokoll.",
+    "refresh": "Aktualisieren"
   },
   "errors": {
     "generic": "Etwas ist schiefgelaufen",

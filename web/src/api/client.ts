@@ -384,6 +384,9 @@ export interface ServerVersion {
   /** True once the server has bookmark restore points. Missing on an older
    * server; read as false. */
   restorePoints?: boolean;
+  /** True once the server has the read-only Backups page. Missing on an
+   * older server; read as false. */
+  backups?: boolean;
   /** False when the operator has set `ALLOW_REGISTRATION=false`. Optional
    * because servers from before the switch existed don't send it; treat a
    * missing value as "registration open". */
@@ -392,6 +395,40 @@ export interface ServerVersion {
 
 export async function getServerVersion(): Promise<ServerVersion> {
   return request("/api/v1/version");
+}
+
+export type BackupKind = "scheduled" | "manual" | "prerestore";
+
+export interface BackupFile {
+  name: string;
+  kind: BackupKind;
+  createdAt: string;
+  sizeBytes: number;
+}
+
+export interface BackupEvent {
+  event: "completed" | "failed" | "restored";
+  at: string;
+  kind: "scheduled" | "manual" | null;
+  file: string | null;
+  bytes: number | null;
+  rows: number | null;
+}
+
+/** What the server's backups are doing. Read-only, and the same for every
+ * account: the server has no admin role. */
+export interface BackupStatus {
+  enabled: boolean;
+  /** Five-field cron expression, UTC. Only when `enabled`. */
+  cron: string | null;
+  keepLast: number | null;
+  nextRunAt: string | null;
+  files: BackupFile[];
+  history: BackupEvent[];
+}
+
+export async function getBackupStatus(): Promise<BackupStatus> {
+  return request("/api/v1/backups");
 }
 
 export interface SyncStats {

@@ -19,6 +19,23 @@ All notable changes to HelixSync are documented here. The format follows
   and stale tabs, and opens at most 10 a minute. See `docs/protocol.md` §12.5.
   `GET /api/v1/devices` also reports which devices are `online`.
 
+- Automated database backups (server). With `BACKUP_ENABLED=true` the server
+  writes an encrypted dump of the whole database into the new `helix-backup`
+  volume (`/backups`) on a cron schedule (`BACKUP_CRON`, daily at 03:00 UTC by
+  default) and keeps the newest `BACKUP_KEEP_LAST` files. Files are
+  `psql`-loadable scripts compressed with zstd and encrypted with age under
+  `BACKUP_ENCRYPTION_KEY` (required, 32 characters or more). Operator commands:
+  `helixsync-server backup-now`, `list-backups` and `restore-backup [<file>]`;
+  a restore needs the server stopped, checks the whole file first, writes a
+  safety backup of the current data and loads in one transaction. Off by
+  default. The dashboard gets a read-only **Backups** page (`GET
+  /api/v1/backups`, advertised as `backups` in `/version`) with the schedule,
+  the files and the history of recent runs; with no admin role, every account
+  on the server sees it. Starting and restoring stay commands on the host.
+  Upgrade note: both Compose files now
+  mount the `helix-backup` volume on `server`; nothing else changes until you
+  turn it on. See `docs/deployment.md`, "Backups".
+
 - Firefox support (desktop, 159 or newer). `npm run build:firefox` builds a
   Manifest V2 package with a persistent background page into
   `extension/dist-firefox/`, and releases attach it as
