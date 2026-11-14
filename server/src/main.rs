@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use helixsync_server::auth::account::delete_user_by_email;
 use helixsync_server::auth::normalize_email;
-use helixsync_server::config::{Config, LogFormat};
+use helixsync_server::config::{BackupOff, Config, LogFormat};
 use helixsync_server::middleware::rate_limit::RateLimiter;
 use helixsync_server::state::AppState;
 use helixsync_server::websocket::ConnectionRegistry;
@@ -36,8 +36,23 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    if config.backup.enabled {
-        backup::check_dir_writable(&config.backup.dir)?;
+    match config.backup.off {
+        None => backup::check_dir_writable(&config.backup.dir)?,
+        Some(BackupOff::MissingKey) => tracing::warn!(
+            "scheduled database backups are ON by default but BACKUP_ENCRYPTION_KEY is not set, so none will be written. Set a key (e.g. `openssl rand -base64 48`) to turn them on, or set BACKUP_ENABLED=false to silence this. See docs/deployment.md, \"Backups\"."
+        ),
+        Some(BackupOff::InvalidKey) => {
+            let problem = config
+                .backup
+                .key()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            tracing::warn!(
+                "scheduled database backups are ON by default but BACKUP_ENCRYPTION_KEY is not usable ({problem}), so none will be written. Set a valid key (e.g. `openssl rand -base64 48`), or set BACKUP_ENABLED=false to silence this. See docs/deployment.md, \"Backups\"."
+            );
+        }
+        Some(BackupOff::Disabled) => {}
     }
 
     let db = database::connect(&config).await?;
@@ -66,7 +81,7 @@ async fn main() -> anyhow::Result<()> {
 
     helixsync_server::sync::compaction::spawn(state.clone());
     helixsync_server::housekeeping::spawn(state.clone());
-    if state.config.backup.enabled {
+    if state.config.backup.enabled() {
         tracing::info!(
             cron = %state.config.backup.cron,
             dir = %state.config.backup.dir.display(),

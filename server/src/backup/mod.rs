@@ -42,7 +42,7 @@ pub fn check_dir_writable(dir: &Path) -> anyhow::Result<()> {
 }
 
 /// Writes a backup, records the outcome (log and `audit_logs`) and, on
-/// success, prunes old files beyond `BACKUP_KEEP_LAST`.
+/// success, prunes scheduled files beyond `BACKUP_KEEP_LAST`.
 pub async fn run_audited(
     pool: &PgPool,
     config: &BackupConfig,

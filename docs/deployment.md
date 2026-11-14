@@ -233,11 +233,11 @@ its working directory). The Compose files pass through the ones marked
 | `AUDIT_LOG_RETENTION_SECS` | `7776000` | How long audit-log rows are kept (90 days). **C** |
 | `RUST_LOG` | `info` | Log filter (`tracing` env-filter syntax). **C** |
 | `LOG_FORMAT` | `text` | `text` or `json`. **C** |
-| `BACKUP_ENABLED` | `false` | Write scheduled, encrypted database backups ([Backups](#backups)). **C** |
-| `BACKUP_ENCRYPTION_KEY` | none | Encrypts every backup; required when backups are on, at least 32 characters, never a placeholder. **C** |
+| `BACKUP_ENABLED` | `true` once a key is set | Write scheduled, encrypted database backups ([Backups](#backups)). Unset: on if `BACKUP_ENCRYPTION_KEY` is set and valid, otherwise off with a startup warning. `false` turns it off; `true` with a missing or invalid key stops startup. **C** |
+| `BACKUP_ENCRYPTION_KEY` | none | Encrypts every backup; at least 32 characters, never a placeholder. Backups only run once it is set. **C** |
 | `BACKUP_CRON` | `0 3 * * *` | When to back up: five-field cron expression, UTC. **C** |
 | `BACKUP_DIR` | `/backups` | Where backup files go; must be writable when backups are on. **C** (fixed to the volume) |
-| `BACKUP_KEEP_LAST` | `7` | Newest backup files kept; older ones are deleted. **C** |
+| `BACKUP_KEEP_LAST` | `7` | Newest scheduled backups kept; older scheduled ones are deleted. Manual and pre-restore files are never deleted. **C** |
 | `INACTIVE_DEVICE_COMPACTION_GRACE_PERIOD_SECS` | `2592000` | A device idle this long stops holding back compaction; it resyncs from a snapshot if it returns |
 | `NEVER_SYNCED_DEVICE_COMPACTION_GRACE_PERIOD_SECS` | `86400` | The same for a device that never downloaded changes |
 | `HOUSEKEEPING_INTERVAL_SECS` | `86400` | How often expired credentials, sessions and old audit rows are deleted |
@@ -345,30 +345,35 @@ your own proxy, or the dashboard loses that protection.
 ## Backups
 
 The server can write a scheduled, encrypted dump of the whole database into
-its data folder. It is **off by default**; the server talks to no storage
-provider, so copying the files off the host (Backrest/restic, rclone, a cron
+its data folder. It is **on by default, but only once you set
+`BACKUP_ENCRYPTION_KEY`**: without a key, or with one that is too short or
+still a placeholder, the server starts normally, writes no backups and logs a
+warning. The server talks to no storage provider, so copying the files off the host (Backrest/restic, rclone, a cron
 `rsync`, ...) is your job. On its own the folder sits on the same host as the
 database and is not disaster recovery.
 
 ### Turning it on
 
-In `.env` (both Compose files already mount the `helix-backup` volume at
-`/backups`):
+Set the key in `.env` (both Compose files already mount the `helix-backup`
+volume at `/backups`):
 
 ```bash
-BACKUP_ENABLED=true
 BACKUP_ENCRYPTION_KEY=...   # openssl rand -base64 48
 # optional
 BACKUP_CRON="0 3 * * *"     # five fields, UTC; this is the default
 BACKUP_KEEP_LAST=7
 ```
 
-then `docker compose up -d`. The server refuses to start with backups on if
-the key is missing, shorter than 32 characters or still a `change-me`
-placeholder, if `BACKUP_CRON` does not parse, or if `/backups` is not
-writable. If the server was down at a scheduled time it takes one backup at
-startup; a failed run is retried after an hour. A bind mount instead of the
-named volume must be owned by uid 10001.
+then `docker compose up -d`. `BACKUP_ENABLED` needs no value: unset it means
+"on, if there is a valid key". `BACKUP_ENABLED=false` turns backups off even
+with a key. Written as `true`, it is taken literally: a missing key, or one
+shorter than 32 characters or still a `change-me` placeholder, then stops the
+server at startup instead of starting with backups off.
+
+With backups on, the server refuses to start if `BACKUP_CRON` does not parse
+or if `/backups` is not writable. If the server was down at a scheduled time it
+takes one backup at startup; a failed run is retried after an hour. A bind
+mount instead of the named volume must be owned by uid 10001.
 
 **Keep a copy of `BACKUP_ENCRYPTION_KEY` outside the server** (a password
 manager). Without it every backup is unreadable. The key also sits in the
@@ -390,10 +395,12 @@ passphrase. It includes the `users` rows that hold each account's wrapped key:
 the encrypted sync data cannot be read without them. A file is written as
 `<name>.partial` and renamed when complete, so **ignore `*.partial` files when
 copying the folder**; leftovers from a crashed run are removed at the next
-run. After each successful backup the server deletes the oldest files beyond
-`BACKUP_KEEP_LAST`; the newest pre-restore file is never deleted, and files
-whose names do not match the patterns above are never touched. Disk use is up
-to `BACKUP_KEEP_LAST` + 1 times the compressed database size. Encrypted files
+run. After each successful backup the server deletes the oldest scheduled
+files beyond `BACKUP_KEEP_LAST`. Manual (`backup-now`) and pre-restore files
+are never deleted automatically and do not count toward the limit: remove them
+yourself when you no longer need them. Files whose names do not match the
+patterns above are never touched. Disk use is about `BACKUP_KEEP_LAST` + 1
+times the compressed database size, plus any manual and pre-restore files. Encrypted files
 do not deduplicate in tools like restic: each daily file is stored in full.
 
 The outcome of each run is logged and recorded in the audit log
@@ -501,8 +508,9 @@ encryption. Keep backups as private as the database itself, since they also
 hold the account metadata (emails, device names) in the clear.
 
 Deleting an account removes its data from the live database immediately, but
-not from backups taken before; they age out with `BACKUP_KEEP_LAST` and your
-own retention for the copies you keep elsewhere.
+not from backups taken before; scheduled ones age out with `BACKUP_KEEP_LAST`,
+manual and pre-restore files stay until you delete them, and your own
+retention applies to the copies you keep elsewhere.
 
 ## Database migrations
 

@@ -64,8 +64,11 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       LOG_FORMAT: ${LOG_FORMAT:-text}
       # Scheduled, encrypted database backups into the helix-backup volume
-      # (docs/deployment.md, "Backups"). Off unless BACKUP_ENABLED=true.
-      BACKUP_ENABLED: ${BACKUP_ENABLED:-false}
+      # (docs/deployment.md, "Backups"). On by default once
+      # BACKUP_ENCRYPTION_KEY is set; BACKUP_ENABLED=false turns it off.
+      # Left empty (not defaulted here) so the server can tell "unset" from
+      # an explicit true: without a key it then starts with backups off.
+      BACKUP_ENABLED: ${BACKUP_ENABLED:-}
       BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:-}
       BACKUP_CRON: ${BACKUP_CRON:-0 3 * * *}
       BACKUP_KEEP_LAST: ${BACKUP_KEEP_LAST:-7}
@@ -81,7 +84,8 @@ services:
       - helixsync
     # Runs as non-root `helixsync` (server/Dockerfile). The root filesystem
     # stays read-only: the only place the server writes is the helix-backup
-    # volume, and only when BACKUP_ENABLED=true.
+    # volume, and only while backups are on (a valid BACKUP_ENCRYPTION_KEY
+    # is set and BACKUP_ENABLED is not false).
     read_only: true
     volumes:
       - helix-backup:/backups

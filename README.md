@@ -458,15 +458,17 @@ Read the [changelog](CHANGELOG.md) first: a release can contain breaking
 changes, and its upgrade notes say what to do. Migrations run automatically.
 
 **Backups.** The server can write a scheduled, encrypted dump of the whole
-database into the `helix-backup` volume (off by default). In `.env`:
+database into the `helix-backup` volume. It is on by default and starts as
+soon as you set a key in `.env` (until then the server logs a warning and
+writes nothing):
 
 ```bash
-BACKUP_ENABLED=true
 BACKUP_ENCRYPTION_KEY=...   # openssl rand -base64 48; keep a copy outside the server
 ```
 
-By default it runs every day at 03:00 UTC and keeps the newest 7 files
-(`BACKUP_CRON`, `BACKUP_KEEP_LAST`). Copying the files off the host is up to
+By default it runs every day at 03:00 UTC and keeps the newest 7 scheduled
+files (`BACKUP_CRON`, `BACKUP_KEEP_LAST`; manual and pre-restore files are kept
+until you delete them). Copying the files off the host is up to
 you. Restore is a command on the host, with the server stopped:
 
 ```bash

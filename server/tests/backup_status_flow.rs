@@ -151,6 +151,7 @@ async fn when_backups_are_off_it_says_so_and_lists_nothing(pool: PgPool) {
 
     let body: serde_json::Value = server.get("/api/v1/backups").await.json();
     assert_eq!(body["enabled"], json!(false));
+    assert_eq!(body["offReason"], json!("disabled"));
     assert_eq!(body["files"], json!([]));
     assert_eq!(body["history"], json!([]));
     assert!(body["cron"].is_null());
@@ -178,6 +179,7 @@ async fn it_lists_files_and_outcomes_newest_first(pool: PgPool) {
 
     let body: serde_json::Value = server.get("/api/v1/backups").await.json();
     assert_eq!(body["enabled"], json!(true));
+    assert!(body["offReason"].is_null());
     assert_eq!(body["cron"], json!("30 2 * * *"));
     assert_eq!(body["keepLast"], json!(7));
     let next: DateTime<Utc> = body["nextRunAt"].as_str().unwrap().parse().unwrap();

@@ -125,16 +125,17 @@ pub fn newest_scheduled(files: &[BackupFile]) -> Option<&BackupFile> {
     files.iter().rfind(|f| f.kind == Kind::Scheduled)
 }
 
-/// Which files to delete: everything beyond the newest `keep_last`, except
-/// the newest safety copy, which is never pruned. `files` is oldest first, as
-/// [`list`] returns it.
+/// Which files to delete: the scheduled ones beyond the newest `keep_last`.
+/// Manual backups and safety copies are never pruned: the operator made them
+/// on purpose and removes them by hand, and they must not push scheduled
+/// backups (which the missed-run check relies on) out of the folder. `files`
+/// is oldest first, as [`list`] returns it.
 pub fn select_prune(files: &[BackupFile], keep_last: usize) -> Vec<&BackupFile> {
-    let protected = files.iter().rfind(|f| f.kind == Kind::PreRestore);
     files
         .iter()
         .rev()
+        .filter(|f| f.kind == Kind::Scheduled)
         .skip(keep_last)
-        .filter(|f| protected.is_none_or(|p| p.name != f.name))
         .collect()
 }
 
@@ -227,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_keeps_the_newest_and_the_newest_safety_copy() {
+    fn prune_only_counts_and_removes_scheduled_backups() {
         let files = vec![
             file(at(1, 0, 0), Kind::PreRestore),
             file(at(2, 0, 0), Kind::PreRestore),
@@ -235,20 +236,16 @@ mod tests {
             file(at(4, 0, 0), Kind::Scheduled),
             file(at(5, 0, 0), Kind::Manual),
             file(at(6, 0, 0), Kind::Scheduled),
+            file(at(7, 0, 0), Kind::Manual),
+            file(at(8, 0, 0), Kind::Manual),
         ];
         let doomed: Vec<_> = select_prune(&files, 2)
             .into_iter()
             .map(|f| f.name.as_str())
             .collect();
-        // Newest two (05:00, 06:00) stay; the 02:00 safety copy is protected.
-        assert_eq!(
-            doomed,
-            vec![
-                file_name(at(4, 0, 0), Kind::Scheduled),
-                file_name(at(3, 0, 0), Kind::Scheduled),
-                file_name(at(1, 0, 0), Kind::PreRestore),
-            ]
-        );
+        // The newest two scheduled (04:00, 06:00) stay; manual backups and
+        // safety copies are never pruned and don't count.
+        assert_eq!(doomed, vec![file_name(at(3, 0, 0), Kind::Scheduled)]);
     }
 
     #[test]

@@ -30,6 +30,9 @@ pub fn router() -> Router<AppState> {
 #[serde(rename_all = "camelCase")]
 pub struct Status {
     pub enabled: bool,
+    /// Why backups are off: `disabled` (`BACKUP_ENABLED=false`),
+    /// `missingKey` or `invalidKey`. Only when not enabled.
+    pub off_reason: Option<&'static str>,
     /// The five-field cron expression, UTC. Only when enabled.
     pub cron: Option<String>,
     pub keep_last: Option<usize>,
@@ -103,9 +106,10 @@ async fn status(user: AuthenticatedUser, State(state): State<AppState>) -> AppRe
     )?;
 
     let config = &state.config.backup;
-    if !config.enabled {
+    if let Some(off) = config.off {
         return Ok(Json(Status {
             enabled: false,
+            off_reason: Some(off.label()),
             cron: None,
             keep_last: None,
             next_run_at: None,
@@ -157,6 +161,7 @@ async fn status(user: AuthenticatedUser, State(state): State<AppState>) -> AppRe
 
     Ok(Json(Status {
         enabled: true,
+        off_reason: None,
         cron: Some(config.cron.clone()),
         keep_last: Some(config.keep_last),
         next_run_at,

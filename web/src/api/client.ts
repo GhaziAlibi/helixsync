@@ -417,8 +417,12 @@ export interface BackupEvent {
 
 /** What the server's backups are doing. Read-only, and the same for every
  * account: the server has no admin role. */
+export type BackupOffReason = "disabled" | "missingKey" | "invalidKey";
+
 export interface BackupStatus {
   enabled: boolean;
+  /** Why backups are off. Only when not `enabled`. */
+  offReason: BackupOffReason | null;
   /** Five-field cron expression, UTC. Only when `enabled`. */
   cron: string | null;
   keepLast: number | null;

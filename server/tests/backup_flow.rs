@@ -980,3 +980,31 @@ async fn the_newest_safety_backup_survives_pruning(pool: PgPool) {
     assert_eq!(file_count(dir.path(), Kind::PreRestore), 1, "never pruned");
     assert_eq!(file_count(dir.path(), Kind::Scheduled), 2);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn manual_backups_neither_count_nor_get_pruned(pool: PgPool) {
+    let dir = TempDir::new();
+    let config = backup_config(dir.path(), 2);
+    helixsync_server::backup::run_audited(&pool, &config, Kind::Scheduled, t(0))
+        .await
+        .unwrap();
+    for i in 1..5 {
+        helixsync_server::backup::run_audited(&pool, &config, Kind::Manual, t(i * 10))
+            .await
+            .unwrap();
+    }
+    assert_eq!(file_count(dir.path(), Kind::Manual), 4);
+    assert_eq!(
+        file_count(dir.path(), Kind::Scheduled),
+        1,
+        "the scheduled backup is not pushed out by manual ones"
+    );
+
+    for i in 5..8 {
+        helixsync_server::backup::run_audited(&pool, &config, Kind::Scheduled, t(i * 10))
+            .await
+            .unwrap();
+    }
+    assert_eq!(file_count(dir.path(), Kind::Scheduled), 2);
+    assert_eq!(file_count(dir.path(), Kind::Manual), 4);
+}

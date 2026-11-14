@@ -69,7 +69,11 @@ export default function Backups() {
 
       {status && !status.enabled && (
         <div className="bg-white rounded-lg shadow-xs border border-slate-200 p-5 text-sm text-slate-600">
-          {t("backups.off")}
+          {status.offReason === "missingKey"
+            ? t("backups.offMissingKey")
+            : status.offReason === "invalidKey"
+              ? t("backups.offInvalidKey")
+              : t("backups.off")}
         </div>
       )}
 

@@ -88,12 +88,39 @@ pub const DEFAULT_BACKUP_CRON: &str = "0 3 * * *";
 /// Shortest accepted `BACKUP_ENCRYPTION_KEY`.
 pub const MIN_BACKUP_KEY_LEN: usize = 32;
 
-/// Scheduled, encrypted database backups. Off unless `BACKUP_ENABLED` is
-/// true, since a deployment that only bumps the image has no volume mounted.
+/// Why scheduled backups are not running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupOff {
+    /// `BACKUP_ENABLED=false`.
+    Disabled,
+    /// `BACKUP_ENABLED` unset and no `BACKUP_ENCRYPTION_KEY`.
+    MissingKey,
+    /// `BACKUP_ENABLED` unset and `BACKUP_ENCRYPTION_KEY` is too short or a
+    /// placeholder.
+    InvalidKey,
+}
+
+impl BackupOff {
+    /// The value `GET /api/v1/backups` reports as `offReason`.
+    pub fn label(self) -> &'static str {
+        match self {
+            BackupOff::Disabled => "disabled",
+            BackupOff::MissingKey => "missingKey",
+            BackupOff::InvalidKey => "invalidKey",
+        }
+    }
+}
+
+/// Scheduled, encrypted database backups. On by default, but only once a
+/// usable `BACKUP_ENCRYPTION_KEY` is set: a deployment that upgrades without
+/// one (missing, too short or a placeholder) keeps running with backups off
+/// and a warning, it does not fail to start. `BACKUP_ENABLED=true` written
+/// out loud *does* fail startup without a usable key.
 // No `Debug`: carries the backup encryption key.
 #[derive(Clone)]
 pub struct BackupConfig {
-    pub enabled: bool,
+    /// `None` when backups run, otherwise why they don't.
+    pub off: Option<BackupOff>,
     /// `BACKUP_ENCRYPTION_KEY`, if set. Check it with [`Self::key`] before
     /// use: it is only validated when backups are enabled or a backup
     /// command runs.
@@ -102,19 +129,33 @@ pub struct BackupConfig {
     pub cron: String,
     /// `BACKUP_DIR`.
     pub dir: PathBuf,
-    /// `BACKUP_KEEP_LAST`.
+    /// `BACKUP_KEEP_LAST`: scheduled backups kept.
     pub keep_last: usize,
 }
 
 impl Default for BackupConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            off: Some(BackupOff::Disabled),
             encryption_key: None,
             cron: DEFAULT_BACKUP_CRON.to_string(),
             dir: PathBuf::from("/backups"),
             keep_last: 7,
         }
+    }
+}
+
+/// Decides whether backups run, from the parsed `BACKUP_ENABLED` (`None`
+/// when unset) and the key. Unset means "on, if there is a usable key to
+/// encrypt with"; an explicit `true` is taken at its word (a bad key then
+/// fails startup in `validate_enabled`); an explicit `false` is off.
+fn resolve_backup_off(flag: Option<bool>, key: Option<&str>) -> Option<BackupOff> {
+    match (flag, key) {
+        (Some(true), _) => None,
+        (Some(false), _) => Some(BackupOff::Disabled),
+        (None, None) => Some(BackupOff::MissingKey),
+        (None, Some(key)) if validate_backup_key(key).is_err() => Some(BackupOff::InvalidKey),
+        (None, Some(_)) => None,
     }
 }
 
@@ -128,12 +169,17 @@ impl BackupConfig {
         keep_last: usize,
     ) -> Self {
         Self {
-            enabled,
+            off: (!enabled).then_some(BackupOff::Disabled),
             encryption_key,
             cron: cron.to_string(),
             dir: dir.into(),
             keep_last,
         }
+    }
+
+    /// Whether scheduled backups run.
+    pub fn enabled(&self) -> bool {
+        self.off.is_none()
     }
 
     /// The encryption key, refused if it is missing, too short or still a
@@ -157,10 +203,12 @@ impl BackupConfig {
 
     fn from_env() -> anyhow::Result<Self> {
         let defaults = Self::default();
-        let enabled = env_parse("BACKUP_ENABLED", false, parse_flag)?;
         let encryption_key = env::var("BACKUP_ENCRYPTION_KEY")
             .ok()
             .filter(|v| !v.trim().is_empty());
+        let flag =
+            parse_optional_flag("BACKUP_ENABLED", env::var("BACKUP_ENABLED").ok().as_deref())?;
+        let off = resolve_backup_off(flag, encryption_key.as_deref());
         let cron = match env::var("BACKUP_CRON")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -177,8 +225,14 @@ impl BackupConfig {
             defaults.keep_last as u32,
             parse_positive_u32,
         )? as usize;
-        let config = Self::new(enabled, encryption_key, &cron, dir, keep_last);
-        if config.enabled {
+        let config = Self {
+            off,
+            encryption_key,
+            cron,
+            dir,
+            keep_last,
+        };
+        if config.enabled() {
             config.validate_enabled()?;
         }
         Ok(config)
@@ -323,12 +377,18 @@ fn env_parse<T>(
 /// `off` as "on" would leave an operator believing they had disabled
 /// something they hadn't.
 fn parse_flag(name: &str, raw: Option<&str>, default: bool) -> anyhow::Result<bool> {
+    Ok(parse_optional_flag(name, raw)?.unwrap_or(default))
+}
+
+/// [`parse_flag`] without a default: `None` when unset or empty, for a flag
+/// whose meaning depends on whether it was written out at all.
+fn parse_optional_flag(name: &str, raw: Option<&str>) -> anyhow::Result<Option<bool>> {
     let Some(raw) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
-        return Ok(default);
+        return Ok(None);
     };
     match raw.to_ascii_lowercase().as_str() {
-        "true" | "1" => Ok(true),
-        "false" | "0" => Ok(false),
+        "true" | "1" => Ok(Some(true)),
+        "false" | "0" => Ok(Some(false)),
         _ => Err(anyhow::anyhow!(
             "{name} must be one of true, false, 1 or 0, got {raw:?}"
         )),
@@ -919,8 +979,57 @@ mod tests {
     }
 
     #[test]
-    fn backup_is_off_by_default() {
-        assert!(!BackupConfig::default().enabled);
+    fn backup_default_config_value_is_off_for_tests_and_callers_that_build_one() {
+        assert!(!BackupConfig::default().enabled());
+    }
+
+    const GOOD_KEY: &str = "k3Yb0ardCat-9fQ2xVzLmW7pRtN1uHsJ4aEoXyC6dGq8";
+
+    fn flag(raw: Option<&str>) -> Option<bool> {
+        parse_optional_flag("BACKUP_ENABLED", raw).unwrap()
+    }
+
+    #[test]
+    fn backups_are_on_by_default_once_there_is_a_usable_key() {
+        for unset in [None, Some(""), Some("  ")] {
+            assert_eq!(resolve_backup_off(flag(unset), Some(GOOD_KEY)), None);
+        }
+    }
+
+    #[test]
+    fn without_a_usable_key_the_default_stays_off_and_says_why() {
+        for unset in [None, Some("")] {
+            assert_eq!(
+                resolve_backup_off(flag(unset), None),
+                Some(BackupOff::MissingKey)
+            );
+            for bad in ["too-short", "change-me-change-me-change-me-change-me"] {
+                assert_eq!(
+                    resolve_backup_off(flag(unset), Some(bad)),
+                    Some(BackupOff::InvalidKey)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_explicit_value_is_taken_at_its_word() {
+        // Written out loud, `true` stays on, so a missing or bad key fails
+        // startup in `validate_enabled`.
+        for on in ["true", "1"] {
+            for key in [None, Some("too-short"), Some(GOOD_KEY)] {
+                assert_eq!(resolve_backup_off(flag(Some(on)), key), None);
+            }
+        }
+        for off in ["false", "0", " FALSE "] {
+            for key in [None, Some(GOOD_KEY)] {
+                assert_eq!(
+                    resolve_backup_off(flag(Some(off)), key),
+                    Some(BackupOff::Disabled)
+                );
+            }
+        }
+        assert!(parse_optional_flag("BACKUP_ENABLED", Some("yes")).is_err());
     }
 
     // --- CORS origin validation ---
