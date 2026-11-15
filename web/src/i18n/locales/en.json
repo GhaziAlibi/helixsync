@@ -282,6 +282,16 @@
       "restored": "Restored"
     },
     "failedHelp": "A failed run is tried again after an hour; the server log says why.",
+    "commandsTitle": "Commands",
+    "commandsIntro": "For the server's operator, run on the host from the folder with the Compose file. Stop the server before restoring.",
+    "cmd": {
+      "backupNow": "Write one backup now",
+      "listBackups": "List backup files (name, time, size, kind)",
+      "stop": "Stop the server (before a restore)",
+      "restoreNewest": "Restore the newest scheduled or manual backup",
+      "restoreFile": "Restore a specific file",
+      "start": "Start the server again"
+    },
     "refresh": "Refresh"
   },
   "errors": {

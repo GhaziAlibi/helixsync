@@ -282,6 +282,16 @@
       "restored": "Visszaállítva"
     },
     "failedHelp": "A sikertelen futást a szerver egy óra múlva újrapróbálja; az okot a szerver naplója tartalmazza.",
+    "commandsTitle": "Parancsok",
+    "commandsIntro": "A szerver üzemeltetőjének: a gépen, a Compose-fájl mappájában futtatandó. Visszaállítás előtt állítsa le a szervert.",
+    "cmd": {
+      "backupNow": "Mentés készítése most",
+      "listBackups": "Mentésfájlok listája (név, idő, méret, típus)",
+      "stop": "A szerver leállítása (visszaállítás előtt)",
+      "restoreNewest": "A legújabb ütemezett vagy kézi mentés visszaállítása",
+      "restoreFile": "Egy adott fájl visszaállítása",
+      "start": "A szerver újraindítása"
+    },
     "refresh": "Frissítés"
   },
   "errors": {

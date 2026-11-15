@@ -282,6 +282,16 @@
       "restored": "Restaurada"
     },
     "failedHelp": "Una ejecución fallida se reintenta pasada una hora; el registro del servidor indica el motivo.",
+    "commandsTitle": "Comandos",
+    "commandsIntro": "Para el operador del servidor, se ejecutan en el equipo desde la carpeta del archivo Compose. Detén el servidor antes de restaurar.",
+    "cmd": {
+      "backupNow": "Hacer una copia ahora",
+      "listBackups": "Listar los archivos de copia (nombre, fecha, tamaño, tipo)",
+      "stop": "Detener el servidor (antes de restaurar)",
+      "restoreNewest": "Restaurar la copia programada o manual más reciente",
+      "restoreFile": "Restaurar un archivo concreto",
+      "start": "Volver a iniciar el servidor"
+    },
     "refresh": "Actualizar"
   },
   "errors": {

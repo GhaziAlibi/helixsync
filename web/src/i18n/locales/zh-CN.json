@@ -282,6 +282,16 @@
       "restored": "已恢复"
     },
     "failedHelp": "失败的运行会在一小时后重试；原因见服务器日志。",
+    "commandsTitle": "命令",
+    "commandsIntro": "供服务器运维人员使用，在主机上 Compose 文件所在的目录中运行。恢复前请先停止服务器。",
+    "cmd": {
+      "backupNow": "立即写入一个备份",
+      "listBackups": "列出备份文件（名称、时间、大小、类型）",
+      "stop": "停止服务器（恢复前）",
+      "restoreNewest": "恢复最新的定时或手动备份",
+      "restoreFile": "恢复指定文件",
+      "start": "重新启动服务器"
+    },
     "refresh": "刷新"
   },
   "errors": {

@@ -282,6 +282,16 @@
       "restored": "Restaurée"
     },
     "failedHelp": "Une exécution échouée est retentée au bout d'une heure ; le journal du serveur en donne la raison.",
+    "commandsTitle": "Commandes",
+    "commandsIntro": "Pour l'opérateur du serveur, à lancer sur la machine depuis le dossier du fichier Compose. Arrêtez le serveur avant une restauration.",
+    "cmd": {
+      "backupNow": "Faire une sauvegarde maintenant",
+      "listBackups": "Lister les fichiers de sauvegarde (nom, date, taille, type)",
+      "stop": "Arrêter le serveur (avant une restauration)",
+      "restoreNewest": "Restaurer la sauvegarde planifiée ou manuelle la plus récente",
+      "restoreFile": "Restaurer un fichier précis",
+      "start": "Redémarrer le serveur"
+    },
     "refresh": "Actualiser"
   },
   "errors": {

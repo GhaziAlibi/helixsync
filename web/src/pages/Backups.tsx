@@ -11,6 +11,16 @@ const EVENT_STYLE: Record<api.BackupEvent["event"], string> = {
   restored: "text-blue-700",
 };
 
+// Operator commands, as in docs/deployment.md "Backups > Commands".
+const COMMANDS: { key: string; command: string }[] = [
+  { key: "backupNow", command: "docker compose run --rm server backup-now" },
+  { key: "listBackups", command: "docker compose run --rm server list-backups" },
+  { key: "stop", command: "docker compose stop server" },
+  { key: "restoreNewest", command: "docker compose run --rm server restore-backup" },
+  { key: "restoreFile", command: "docker compose run --rm server restore-backup <file>" },
+  { key: "start", command: "docker compose up -d server" },
+];
+
 export default function Backups() {
   const { t } = useTranslation();
   const [status, setStatus] = useState<api.BackupStatus | null>(null);
@@ -156,6 +166,21 @@ export default function Backups() {
           {status.history.some((h) => h.event === "failed") && (
             <p className="text-xs text-slate-400 mt-3">{t("backups.failedHelp")}</p>
           )}
+
+          <h2 className="text-lg font-semibold mt-8 mb-1">{t("backups.commandsTitle")}</h2>
+          <p className="text-sm text-slate-500 mb-3">{t("backups.commandsIntro")}</p>
+          <div className="bg-white rounded-lg shadow-xs border border-slate-200 overflow-hidden">
+            <ul>
+              {COMMANDS.map((c, i) => (
+                <li key={c.key} className={`px-4 py-3 ${i > 0 ? "border-t border-slate-100" : ""}`}>
+                  <div className="text-sm text-slate-600">{t(`backups.cmd.${c.key}`)}</div>
+                  <code dir="ltr" className="block mt-1 font-mono text-xs text-slate-800 bg-slate-50 border border-slate-200 rounded px-2 py-1 text-start break-all">
+                    {c.command}
+                  </code>
+                </li>
+              ))}
+            </ul>
+          </div>
         </>
       )}
     </div>

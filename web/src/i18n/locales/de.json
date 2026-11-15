@@ -282,6 +282,16 @@
       "restored": "Wiederhergestellt"
     },
     "failedHelp": "Ein fehlgeschlagener Lauf wird nach einer Stunde wiederholt; der Grund steht im Serverprotokoll.",
+    "commandsTitle": "Befehle",
+    "commandsIntro": "Für den Betreiber des Servers, auf dem Server im Ordner mit der Compose-Datei auszuführen. Vor einer Wiederherstellung den Server stoppen.",
+    "cmd": {
+      "backupNow": "Jetzt ein Backup schreiben",
+      "listBackups": "Backup-Dateien auflisten (Name, Zeit, Größe, Art)",
+      "stop": "Server stoppen (vor einer Wiederherstellung)",
+      "restoreNewest": "Neuestes geplantes oder manuelles Backup wiederherstellen",
+      "restoreFile": "Eine bestimmte Datei wiederherstellen",
+      "start": "Server wieder starten"
+    },
     "refresh": "Aktualisieren"
   },
   "errors": {
