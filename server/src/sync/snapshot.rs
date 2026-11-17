@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::error::AppResult;
 
 use super::conflict::OrderingKey;
-use super::model::SnapshotObject;
+use super::model::{SnapshotLayer, SnapshotObject};
 use super::vocabulary;
 
 /// Max size a stored snapshot may decompress to. Real snapshots are
@@ -110,8 +110,22 @@ fn combine_object(
                 lamport_timestamp: ordering_key.lamport_timestamp,
                 device_id: ordering_key.device_id,
                 operation_id: ordering_key.operation_id,
+                layers: Vec::new(),
             });
         }
+    }
+
+    let all_encrypted = new_ops_ascending
+        .iter()
+        .all(|op| op.encryption_version >= 1)
+        && base.as_ref().is_none_or(|b| b.encryption_version >= 1);
+    if all_encrypted && LAYERED_OBJECT_TYPES.contains(&object_type.as_str()) {
+        return Some(combine_layered(
+            object_type,
+            object_id,
+            base,
+            new_ops_ascending,
+        ));
     }
 
     // Whole-object LWW: the last (highest-key) op wins and replaces `base`.
@@ -130,7 +144,147 @@ fn combine_object(
         lamport_timestamp: winner.lamport_timestamp,
         device_id: winner.device_id,
         operation_id: winner.operation_id,
+        layers: Vec::new(),
     })
+}
+
+/// Encrypted object types whose operations can carry only some fields (a
+/// bookmark's `update` or `move`, a tab's `activate`).
+const LAYERED_OBJECT_TYPES: &[&str] = &["bookmark", "bookmarkFolder", "tab", "window", "tabGroup"];
+
+/// Operation types whose payload is the object's whole state. Everything
+/// before the latest of these is superseded and dropped.
+const FULL_STATE_OPERATIONS: &[&str] = &["create", "restore"];
+
+/// How many operations of one type are kept after the latest full-state
+/// operation. Bounds an object that is changed endlessly (a tab activated
+/// every time it is switched to) without letting that flood push out its
+/// other kinds of change.
+const MAX_LAYERS_PER_OPERATION_TYPE: usize = 8;
+
+/// One operation of an object, as `combine_layered` sees it.
+struct Link {
+    operation_type: String,
+    encryption_version: i32,
+    payload: serde_json::Value,
+    created_at: DateTime<Utc>,
+    visit_count: Option<i64>,
+    key: OrderingKey,
+}
+
+impl Link {
+    fn from_row(row: SnapshotSourceRow) -> Self {
+        Link {
+            key: row.ordering_key(),
+            operation_type: row.operation_type,
+            encryption_version: row.encryption_version,
+            payload: row.payload,
+            created_at: row.created_at,
+            visit_count: row.visit_count.map(|v| v as i64),
+        }
+    }
+}
+
+/// Encrypted counterpart of the plaintext field merge: the server can't read
+/// the fields, so it keeps the chain of operations since the object's latest
+/// full state and lets the reader fold them in order. The object's own fields
+/// stay those of the latest operation, as for whole-object LWW, so readers that
+/// ignore `layers` see what they always did.
+fn combine_layered(
+    object_type: String,
+    object_id: Uuid,
+    base: Option<SnapshotObject>,
+    new_ops_ascending: Vec<SnapshotSourceRow>,
+) -> SnapshotObject {
+    let mut links: Vec<Link> = Vec::new();
+    if let Some(base) = base {
+        for layer in base.layers {
+            links.push(Link {
+                key: OrderingKey {
+                    lamport_timestamp: layer.lamport_timestamp,
+                    device_id: layer.device_id,
+                    operation_id: layer.operation_id,
+                },
+                operation_type: layer.operation_type,
+                encryption_version: base.encryption_version,
+                payload: layer.payload,
+                created_at: base.created_at,
+                visit_count: None,
+            });
+        }
+        links.push(Link {
+            key: OrderingKey {
+                lamport_timestamp: base.lamport_timestamp,
+                device_id: base.device_id,
+                operation_id: base.operation_id,
+            },
+            operation_type: base.operation_type,
+            encryption_version: base.encryption_version,
+            payload: base.payload,
+            created_at: base.created_at,
+            visit_count: base.visit_count,
+        });
+    }
+    links.extend(new_ops_ascending.into_iter().map(Link::from_row));
+    links.sort_by_key(|l| l.key);
+    // Snapshots saved before ordering keys were stored have nil operation
+    // ids; those must not be mistaken for each other.
+    links.dedup_by(|a, b| !a.key.operation_id.is_nil() && a.key.operation_id == b.key.operation_id);
+
+    let winner = links.pop().expect("an object has at least one operation");
+
+    // Nothing before the latest full state matters.
+    if let Some(at) = links
+        .iter()
+        .rposition(|l| FULL_STATE_OPERATIONS.contains(&l.operation_type.as_str()))
+    {
+        links.drain(..at);
+    }
+
+    // A deletion carries no state, and the winner may itself be one.
+    links.retain(|l| !vocabulary::is_terminal_operation(&object_type, &l.operation_type));
+
+    // Newest first, so the cap keeps the latest of each partial type.
+    let mut kept_by_type: HashMap<String, usize> = HashMap::new();
+    let mut layers: Vec<SnapshotLayer> = Vec::new();
+    for link in links.into_iter().rev() {
+        if !FULL_STATE_OPERATIONS.contains(&link.operation_type.as_str()) {
+            let kept = kept_by_type.entry(link.operation_type.clone()).or_insert(0);
+            if *kept >= MAX_LAYERS_PER_OPERATION_TYPE {
+                continue;
+            }
+            *kept += 1;
+        }
+        layers.push(SnapshotLayer {
+            operation_type: link.operation_type,
+            payload: link.payload,
+            lamport_timestamp: link.key.lamport_timestamp,
+            device_id: link.key.device_id,
+            operation_id: link.key.operation_id,
+        });
+    }
+    layers.reverse();
+    if vocabulary::is_terminal_operation(&object_type, &winner.operation_type) {
+        layers.clear();
+    }
+    // A full-state winner has nothing before it that matters.
+    if FULL_STATE_OPERATIONS.contains(&winner.operation_type.as_str()) {
+        layers.clear();
+    }
+
+    SnapshotObject {
+        object_type,
+        object_id,
+        operation_type: winner.operation_type,
+        encryption_version: winner.encryption_version,
+        payload: winner.payload,
+        created_at: winner.created_at,
+        visit_count: winner.visit_count,
+        lamport_timestamp: winner.key.lamport_timestamp,
+        device_id: winner.key.device_id,
+        operation_id: winner.key.operation_id,
+        layers,
+    }
 }
 
 /// Sorts one object's rows by `OrderingKey` and merges them into `objects`.
@@ -474,6 +628,7 @@ mod decompress_snapshot_data_tests {
                 lamport_timestamp: 0,
                 device_id: Uuid::nil(),
                 operation_id: Uuid::nil(),
+                layers: Vec::new(),
             })
             .collect()
     }
@@ -530,5 +685,242 @@ mod decompress_snapshot_data_tests {
             result.is_err(),
             "a snapshot bigger than the read cap must never be persisted"
         );
+    }
+}
+
+#[cfg(test)]
+mod combine_layered_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn row(
+        object_type: &str,
+        operation_type: &str,
+        lamport: i64,
+        encrypted: bool,
+    ) -> SnapshotSourceRow {
+        SnapshotSourceRow {
+            object_type: object_type.to_string(),
+            object_id: Uuid::nil(),
+            operation_type: operation_type.to_string(),
+            encryption_version: i32::from(encrypted),
+            payload: json!({ "op": operation_type, "n": lamport }),
+            lamport_timestamp: lamport,
+            device_id: Uuid::nil(),
+            operation_id: Uuid::from_u128(lamport as u128),
+            created_at: Utc::now(),
+            visit_count: None,
+        }
+    }
+
+    fn combine(object_type: &str, ops: Vec<SnapshotSourceRow>) -> SnapshotObject {
+        combine_object(object_type.to_string(), Uuid::nil(), None, ops).unwrap()
+    }
+
+    fn layer_ops(object: &SnapshotObject) -> Vec<(&str, i64)> {
+        object
+            .layers
+            .iter()
+            .map(|l| (l.operation_type.as_str(), l.lamport_timestamp))
+            .collect()
+    }
+
+    #[test]
+    fn keeps_the_chain_since_the_latest_full_state_oldest_first() {
+        let object = combine(
+            "bookmark",
+            vec![
+                row("bookmark", "create", 1, true),
+                row("bookmark", "update", 2, true),
+                row("bookmark", "move", 3, true),
+            ],
+        );
+        assert_eq!(object.operation_type, "move");
+        assert_eq!(object.payload["n"], 3);
+        assert_eq!(layer_ops(&object), vec![("create", 1), ("update", 2)]);
+    }
+
+    #[test]
+    fn a_later_restore_supersedes_everything_before_it() {
+        let object = combine(
+            "bookmark",
+            vec![
+                row("bookmark", "create", 1, true),
+                row("bookmark", "update", 2, true),
+                row("bookmark", "delete", 3, true),
+                row("bookmark", "restore", 4, true),
+                row("bookmark", "move", 5, true),
+            ],
+        );
+        assert_eq!(object.operation_type, "move");
+        assert_eq!(layer_ops(&object), vec![("restore", 4)]);
+    }
+
+    #[test]
+    fn a_full_state_winner_has_no_layers() {
+        let object = combine(
+            "bookmark",
+            vec![
+                row("bookmark", "update", 1, true),
+                row("bookmark", "create", 2, true),
+            ],
+        );
+        assert_eq!(object.operation_type, "create");
+        assert!(object.layers.is_empty());
+    }
+
+    #[test]
+    fn orders_by_key_not_by_arrival() {
+        let object = combine(
+            "tab",
+            vec![
+                row("tab", "activate", 3, true),
+                row("tab", "create", 1, true),
+                row("tab", "update", 2, true),
+            ],
+        );
+        assert_eq!(object.operation_type, "activate");
+        assert_eq!(layer_ops(&object), vec![("create", 1), ("update", 2)]);
+    }
+
+    #[test]
+    fn caps_each_operation_type_so_a_flood_cannot_push_out_other_changes() {
+        let mut ops = vec![row("tab", "create", 1, true), row("tab", "update", 2, true)];
+        for n in 0..50 {
+            ops.push(row("tab", "activate", 10 + n, true));
+        }
+        let object = combine("tab", ops);
+
+        let activates = object
+            .layers
+            .iter()
+            .filter(|l| l.operation_type == "activate")
+            .count();
+        // The winner is the newest activate; the cap applies to the layers.
+        assert_eq!(activates, MAX_LAYERS_PER_OPERATION_TYPE);
+        assert_eq!(object.lamport_timestamp, 59);
+        let newest_layer_activate = object
+            .layers
+            .iter()
+            .filter(|l| l.operation_type == "activate")
+            .map(|l| l.lamport_timestamp)
+            .max()
+            .unwrap();
+        assert_eq!(
+            newest_layer_activate, 58,
+            "the latest ones are the ones kept"
+        );
+        assert!(object.layers.iter().any(|l| l.operation_type == "update"));
+        assert!(object.layers.iter().any(|l| l.operation_type == "create"));
+        assert!(object
+            .layers
+            .windows(2)
+            .all(|w| w[0].lamport_timestamp < w[1].lamport_timestamp));
+    }
+
+    #[test]
+    fn a_terminal_winner_keeps_no_layers_and_deletions_are_never_layers() {
+        let closed = combine(
+            "tab",
+            vec![
+                row("tab", "create", 1, true),
+                row("tab", "update", 2, true),
+                row("tab", "close", 3, true),
+            ],
+        );
+        assert_eq!(closed.operation_type, "close");
+        assert!(closed.layers.is_empty());
+
+        // A write newer than a delete wins; the delete itself carries no state.
+        let revived = combine(
+            "bookmark",
+            vec![
+                row("bookmark", "create", 1, true),
+                row("bookmark", "delete", 2, true),
+                row("bookmark", "update", 3, true),
+            ],
+        );
+        assert_eq!(layer_ops(&revived), vec![("create", 1)]);
+    }
+
+    #[test]
+    fn folds_new_operations_onto_a_stored_snapshot_object() {
+        let base = combine(
+            "bookmark",
+            vec![
+                row("bookmark", "create", 1, true),
+                row("bookmark", "update", 2, true),
+            ],
+        );
+        let next = combine_object(
+            "bookmark".to_string(),
+            Uuid::nil(),
+            Some(base),
+            vec![row("bookmark", "move", 3, true)],
+        )
+        .unwrap();
+        assert_eq!(next.operation_type, "move");
+        assert_eq!(layer_ops(&next), vec![("create", 1), ("update", 2)]);
+    }
+
+    #[test]
+    fn the_object_fields_are_still_those_of_the_latest_operation() {
+        let object = combine(
+            "bookmark",
+            vec![
+                row("bookmark", "create", 1, true),
+                row("bookmark", "update", 2, true),
+            ],
+        );
+        // What a client that ignores `layers` has always seen.
+        assert_eq!(object.payload, json!({ "op": "update", "n": 2 }));
+        assert_eq!(object.lamport_timestamp, 2);
+        assert_eq!(object.operation_id, Uuid::from_u128(2));
+    }
+
+    #[test]
+    fn other_objects_are_unchanged() {
+        // History visits and plaintext or mixed objects use the old rules.
+        let visit = combine(
+            "historyVisit",
+            vec![
+                row("historyVisit", "visit", 1, true),
+                row("historyVisit", "visit", 2, true),
+            ],
+        );
+        assert!(visit.layers.is_empty());
+        assert_eq!(visit.lamport_timestamp, 2);
+
+        let mixed = combine(
+            "tab",
+            vec![
+                row("tab", "create", 1, false),
+                row("tab", "update", 2, true),
+            ],
+        );
+        assert!(mixed.layers.is_empty());
+        assert_eq!(mixed.lamport_timestamp, 2);
+    }
+
+    #[test]
+    fn layers_are_left_out_of_the_json_when_empty_and_old_snapshots_still_parse() {
+        let object = combine("historyVisit", vec![row("historyVisit", "visit", 1, true)]);
+        let json = serde_json::to_value(&object).unwrap();
+        assert!(json.get("layers").is_none());
+
+        // A snapshot stored before `layers` existed.
+        let old: SnapshotObject = serde_json::from_value(json).unwrap();
+        assert!(old.layers.is_empty());
+
+        let layered = combine(
+            "bookmark",
+            vec![
+                row("bookmark", "create", 1, true),
+                row("bookmark", "update", 2, true),
+            ],
+        );
+        let json = serde_json::to_value(&layered).unwrap();
+        assert_eq!(json["layers"][0]["operationType"], "create");
+        assert_eq!(json["layers"][0]["lamportTimestamp"], 1);
     }
 }

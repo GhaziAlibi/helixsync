@@ -2,8 +2,9 @@
 // server. This module mirrors the derive/wrap/unwrap primitives in
 // extension/src/crypto/index.ts (same info strings, same algorithms) so an
 // account created on one side is usable from the other — but only the
-// subset the dashboard actually needs (no SDEK/bulk/base64-perf code; the
-// web app never encrypts or decrypts synced payloads itself).
+// subset the dashboard actually needs (no base64-perf code). The dashboard
+// decrypts synced records for the read-only vault (see "Record decryption"
+// below) and never encrypts them: there are no encrypt functions here.
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { argon2idAsync } from "@noble/hashes/argon2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
@@ -403,4 +404,79 @@ export async function unsealRecoveryCode(
     fromB64(envelope.ciphertext),
   );
   return formatRecoveryCode(bytes);
+}
+
+// --- Record decryption (read-only vault, docs/encryption.md §6) ------------
+// Port of the decrypt side of extension/src/crypto/index.ts, same behavior.
+// The dashboard only reads synced records, so nothing here encrypts them.
+
+/** Format version of every AAD-bound ciphertext envelope (docs/encryption.md
+ * §6). Same value as the extension's `ENVELOPE_VERSION`; it is not the version
+ * of the account-key wrap, which stays 1. */
+export const ENVELOPE_VERSION = 2;
+
+export interface EncryptionEnvelope {
+  v: typeof ENVELOPE_VERSION;
+  keyVersion: number;
+  alg: "xchacha20poly1305";
+  nonce: string;
+  ciphertext: string;
+}
+
+/** An envelope whose `v` this build doesn't understand. Distinct from an
+ * authentication failure on purpose: a tampered or wrong-key ciphertext is
+ * skipped, but an envelope from another format is data this build can't read
+ * yet, so the vault stops and asks for an update instead of showing a partial
+ * result as if it were complete. */
+export class UnsupportedEnvelopeVersionError extends Error {
+  readonly envelopeVersion: number;
+
+  constructor(envelopeVersion: number) {
+    super(`Some synced data uses encryption format v${envelopeVersion}, which this version of HelixSync can't read.`);
+    this.name = "UnsupportedEnvelopeVersionError";
+    this.envelopeVersion = envelopeVersion;
+  }
+}
+
+/** Throws `UnsupportedEnvelopeVersionError` if `envelope` is an object whose
+ * numeric `v` isn't `ENVELOPE_VERSION`. Anything without a numeric `v` is left
+ * to fail normally (it's malformed, not from another format). */
+export function assertSupportedEnvelopeVersion(envelope: unknown): void {
+  if (typeof envelope !== "object" || envelope === null) return;
+  const v = (envelope as { v?: unknown }).v;
+  if (typeof v === "number" && v !== ENVELOPE_VERSION) throw new UnsupportedEnvelopeVersionError(v);
+}
+
+/** Derives SDEK_v(n) from the account key (docs/encryption.md §1). Callers
+ * decoding many records call this once per key version and reuse the result.
+ * Not cached here: the account key must not outlive the vault's lock. */
+export async function getSdek(accountKey: Uint8Array, keyVersion: number): Promise<Uint8Array> {
+  return hkdfSha256(accountKey, `helixsync-sdek-v${keyVersion}`);
+}
+
+/** The AEAD's associated data: binds a ciphertext to the metadata the server
+ * stores next to it in plaintext (objectType, objectId, operationType), so a
+ * relabelled or spliced record fails to decrypt. JSON-encoding the tuple
+ * avoids delimiter ambiguity. Must match the extension byte for byte. */
+export function buildOperationAad(objectType: string, objectId: string, operationType: string): Uint8Array {
+  return sharedTextEncoder.encode(JSON.stringify([objectType, objectId, operationType]));
+}
+
+/** Throws `UnsupportedEnvelopeVersionError` for any version but
+ * `ENVELOPE_VERSION`, and on authentication failure, including a mismatched
+ * `aad`. There is deliberately no fallback that reads an envelope without its
+ * AAD: that would let a server relabel exactly those ciphertexts. */
+export function decryptBytesWithSdek(envelope: EncryptionEnvelope, sdek: Uint8Array, aad: Uint8Array): Uint8Array {
+  assertSupportedEnvelopeVersion(envelope);
+  if ((envelope as { v?: unknown }).v !== ENVELOPE_VERSION) {
+    throw new Error("malformed encryption envelope: missing version");
+  }
+  return xchacha20poly1305(sdek, fromB64(envelope.nonce), aad).decrypt(fromB64(envelope.ciphertext));
+}
+
+const sharedTextDecoder = new TextDecoder();
+
+/** Throws on authentication failure, including a mismatched `aad`. */
+export function decryptWithSdek(envelope: EncryptionEnvelope, sdek: Uint8Array, aad: Uint8Array): unknown {
+  return JSON.parse(sharedTextDecoder.decode(decryptBytesWithSdek(envelope, sdek, aad)));
 }

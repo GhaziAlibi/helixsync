@@ -977,6 +977,7 @@ async fn snapshot_route_falls_back_to_uncompressed_legacy_data(pool: PgPool) {
         lamport_timestamp: 0,
         device_id: Uuid::nil(),
         operation_id: Uuid::nil(),
+        layers: Vec::new(),
     }];
     // Plain JSON, like rows written before snapshots were compressed.
     let legacy_bytes = serde_json::to_vec(&legacy_objects).unwrap();
@@ -1043,6 +1044,7 @@ async fn expired_history_visit_baked_into_base_snapshot_is_pruned(pool: PgPool) 
             lamport_timestamp: 0,
             device_id: Uuid::nil(),
             operation_id: Uuid::nil(),
+            layers: Vec::new(),
         },
         SnapshotObject {
             object_type: "historyVisit".to_string(),
@@ -1056,6 +1058,7 @@ async fn expired_history_visit_baked_into_base_snapshot_is_pruned(pool: PgPool) 
             lamport_timestamp: 0,
             device_id: Uuid::nil(),
             operation_id: Uuid::nil(),
+            layers: Vec::new(),
         },
         SnapshotObject {
             object_type: "bookmark".to_string(),
@@ -1069,6 +1072,7 @@ async fn expired_history_visit_baked_into_base_snapshot_is_pruned(pool: PgPool) 
             lamport_timestamp: 0,
             device_id: Uuid::nil(),
             operation_id: Uuid::nil(),
+            layers: Vec::new(),
         },
     ];
     let base_bytes = serde_json::to_vec(&base_objects).unwrap();
@@ -1963,5 +1967,134 @@ async fn compaction_self_heals_missing_bulk_ledger_row(pool: PgPool) {
     assert!(
         row_after_self_heal.is_some(),
         "compaction must self-heal the missing bulk-history ledger row from the object set it folds into the new snapshot"
+    );
+}
+
+fn encrypted_op(
+    object_type: &str,
+    object_id: Uuid,
+    operation_type: &str,
+    seq: i64,
+    marker: &str,
+) -> serde_json::Value {
+    json!({
+        "operationId": Uuid::now_v7(),
+        "deviceSequence": seq,
+        "lamportTimestamp": seq,
+        "objectType": object_type,
+        "objectId": object_id,
+        "operationType": operation_type,
+        "encryptionVersion": 1,
+        "payload": { "v": 2, "keyVersion": 1, "alg": "xchacha20poly1305", "nonce": "AAAA", "ciphertext": marker }
+    })
+}
+
+fn snapshot_layers(
+    snapshot: &serde_json::Value,
+    object_id: Uuid,
+) -> (String, Vec<(String, String)>) {
+    let object = snapshot["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["objectId"] == json!(object_id))
+        .expect("object is in the snapshot");
+    let layers = object["layers"]
+        .as_array()
+        .map(|layers| {
+            layers
+                .iter()
+                .map(|l| {
+                    (
+                        l["operationType"].as_str().unwrap().to_string(),
+                        l["payload"]["ciphertext"].as_str().unwrap().to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (
+        object["operationType"].as_str().unwrap().to_string(),
+        layers,
+    )
+}
+
+/// An encrypted object's snapshot carries the earlier operations its latest
+/// one depends on, and keeps them through compaction.
+#[sqlx::test(migrations = "./migrations")]
+async fn snapshot_hands_over_the_chain_of_an_encrypted_object_and_compaction_keeps_it(
+    pool: PgPool,
+) {
+    let state = state_for(pool.clone());
+    let server = server_for_state(state.clone());
+
+    register_and_login(&server, "lena@example.com").await;
+    let (_device, token) = register_device(&server, "lena@example.com", "Laptop").await;
+
+    let bookmark = Uuid::now_v7();
+    let tab = Uuid::now_v7();
+    for op in [
+        encrypted_op("bookmark", bookmark, "create", 1, "create-1"),
+        encrypted_op("bookmark", bookmark, "update", 2, "title-2"),
+        encrypted_op("tab", tab, "create", 3, "tab-create-3"),
+    ] {
+        upload(&server, &token, op).await;
+    }
+
+    let snapshot: serde_json::Value = server
+        .get("/api/v1/sync/snapshot")
+        .authorization_bearer(&token)
+        .await
+        .json();
+    let (latest, layers) = snapshot_layers(&snapshot, bookmark);
+    assert_eq!(latest, "update");
+    assert_eq!(layers, vec![("create".to_string(), "create-1".to_string())]);
+    // A full-state object has no layers at all.
+    assert!(snapshot["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["objectId"] == json!(tab))
+        .unwrap()
+        .get("layers")
+        .is_none());
+
+    // Compaction folds the operations into a stored snapshot and deletes them.
+    sync_device(&server, &token).await;
+    let user_id = user_id_for_email(&pool, "lena@example.com").await;
+    compaction::run_once(&state).await.unwrap();
+    assert_eq!(count_operations(&pool, user_id).await, 0);
+
+    let snapshot: serde_json::Value = server
+        .get("/api/v1/sync/snapshot")
+        .authorization_bearer(&token)
+        .await
+        .json();
+    assert_eq!(
+        snapshot_layers(&snapshot, bookmark).1,
+        vec![("create".to_string(), "create-1".to_string())],
+        "the chain survives compaction"
+    );
+
+    // A newer operation lands on top of the stored object.
+    upload(
+        &server,
+        &token,
+        encrypted_op("bookmark", bookmark, "move", 4, "move-4"),
+    )
+    .await;
+    let snapshot: serde_json::Value = server
+        .get("/api/v1/sync/snapshot")
+        .authorization_bearer(&token)
+        .await
+        .json();
+    let (latest, layers) = snapshot_layers(&snapshot, bookmark);
+    assert_eq!(latest, "move");
+    assert_eq!(
+        layers,
+        vec![
+            ("create".to_string(), "create-1".to_string()),
+            ("update".to_string(), "title-2".to_string()),
+        ]
     );
 }

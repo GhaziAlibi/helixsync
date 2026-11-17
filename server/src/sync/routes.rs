@@ -11,6 +11,7 @@ use serde::Deserialize;
 use tower::limit::ConcurrencyLimitLayer;
 use uuid::Uuid;
 
+use crate::auth::extractors::AnyAuthenticatedUser;
 use crate::auth::model::AuthenticatedDevice;
 use crate::error::{AppError, AppResult};
 use crate::middleware::rate_limit::{
@@ -1215,17 +1216,25 @@ struct SnapshotTombstoneRow {
 pub const SNAPSHOT_TX_ISOLATION: &str = "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY";
 
 /// Builds a point-in-time snapshot on demand (docs/protocol.md §10.3).
+///
+/// Takes a device token or a web session: the dashboard's read-only vault
+/// reads it with the session cookie. The body is ciphertext and the request
+/// is a `GET`, so no CSRF token is needed. Nothing else in `/sync` accepts a
+/// session.
 async fn snapshot(
-    device: AuthenticatedDevice,
+    caller: AnyAuthenticatedUser,
     State(state): State<AppState>,
 ) -> AppResult<Json<SnapshotResponse>> {
     enforce(
         &state.rate_limiter,
         SYNC_SNAPSHOT_LIMIT,
-        &device.device_id.to_string(),
+        &caller.rate_limit_key,
     )?;
 
-    crate::devices::touch_last_seen_background(&state, device.device_id);
+    // A session is not a device: it has no `last_seen_at` to update.
+    if let Some(device_id) = caller.device_id {
+        crate::devices::touch_last_seen_background(&state, device_id);
+    }
 
     // Limit concurrent snapshot builds across the process (see
     // `SNAPSHOT_CONCURRENCY_LIMIT`). Held until the response is built.
@@ -1236,20 +1245,20 @@ async fn snapshot(
         .expect("snapshot semaphore is never closed");
 
     // Read settings before opening the transaction, to keep it short.
-    let history_cutoff = history_retention_cutoff(&state.db, device.user_id).await?;
+    let history_cutoff = history_retention_cutoff(&state.db, caller.user_id).await?;
 
     // Objects and tombstones are read in one REPEATABLE READ transaction so
     // they match (docs/protocol.md §10.3). Committed right after to keep it short.
     let mut tx = state.db.begin_with(SNAPSHOT_TX_ISOLATION).await?;
     let (snapshot_cursor, objects_map) =
-        compute_objects(&mut tx, device.user_id, None, history_cutoff).await?;
+        compute_objects(&mut tx, caller.user_id, None, history_cutoff).await?;
 
     // Same transaction as the objects, so both see the same data.
     let tombstone_rows = sqlx::query_as!(
         SnapshotTombstoneRow,
         "SELECT object_type, object_id, lamport_timestamp, device_id, operation_id \
          FROM tombstones WHERE user_id = $1 AND active = true",
-        device.user_id
+        caller.user_id
     )
     .fetch_all(&mut *tx)
     .await?;

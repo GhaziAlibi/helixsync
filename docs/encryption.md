@@ -20,7 +20,9 @@ implementations of the primitives below may be used:
   (Argon2id, CSPRNG) — independently audited, pure-TypeScript
   implementations. Both clients implement the same derive/wrap/unwrap
   primitives (`extension/src/crypto/index.ts`, `web/src/crypto/index.ts`),
-  so an account created on one is fully usable from the other.
+  so an account created on one is fully usable from the other. The dashboard
+  also derives SDEKs and decrypts records (§6) for its read-only Vault page; it
+  has no encrypt functions for synced records.
 
 ---
 
@@ -508,7 +510,9 @@ page shows.
 
 The dashboard's code is served by your server. If that server is hacked,
 the attacker can change the login page to steal the password you type, and
-with it decrypt your data. The extension doesn't have this problem: its
+with it decrypt your data. The Vault page also holds the account key and your
+decrypted bookmarks, history and tabs in the page's memory while it is
+unlocked, so the same attacker could read them without the password. The extension doesn't have this problem: its
 code comes from the extension install, not the server.
 
 Only use the dashboard on a server you trust.

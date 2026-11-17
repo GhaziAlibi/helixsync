@@ -16,6 +16,7 @@ import {
   wrapAccountKey,
   type KdfParams,
 } from "../crypto";
+import { lockVault, setAccountKey } from "../vault/keyring";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -111,6 +112,13 @@ export async function login(email: string, password: string): Promise<AuthRespon
     body: JSON.stringify({ email, authKey }),
   });
   setCsrfToken(result.csrfToken);
+  // The read-only vault needs the account key. Keep it in memory only; if it
+  // can't be unwrapped here, the Vault page asks for the password itself.
+  try {
+    setAccountKey(unwrapAccountKey(await deriveKek(masterKey), result.wrappedAk));
+  } catch {
+    // Not fatal for signing in.
+  }
   return { user: result.user, csrfToken: result.csrfToken };
 }
 
@@ -290,6 +298,8 @@ export async function completeReset(
 }
 
 export async function logout(): Promise<void> {
+  // Drop the account key and decrypted data even if the request fails.
+  lockVault();
   await request("/api/v1/auth/logout", { method: "POST" });
   csrfToken = null;
 }
@@ -512,6 +522,22 @@ export async function regenerateRecoveryCode(currentPassword: string): Promise<s
   return next.code;
 }
 
+/** Unlocks the read-only vault after a reload or an auto-lock: derives the
+ * account key from the typed password and keeps it in memory (never storage).
+ * A wrong password is a 401, as for `changePassword`. Nothing is sent to the
+ * server but the `/auth/me` request for the wrapped key. */
+export async function unlockAccountKey(password: string): Promise<void> {
+  const current = await currentKeyMaterial();
+  const masterKey = await deriveMasterKey(password, current.kdfSalt, current.kdfParams);
+  let accountKey: Uint8Array;
+  try {
+    accountKey = unwrapAccountKey(await deriveKek(masterKey), current.wrappedAk);
+  } catch {
+    throw new ApiError("current password is incorrect", 401, "unauthorized");
+  }
+  setAccountKey(accountKey);
+}
+
 /** Permanently deletes the signed-in account and everything stored under it
  * (`DELETE /auth/account`). The server wants the current `authKey` in the
  * body, not just the session, so a stolen cookie alone can't do this. The
@@ -529,6 +555,7 @@ export async function deleteAccount(password: string): Promise<void> {
   });
   // The session and CSRF cookies are gone server-side too.
   csrfToken = null;
+  lockVault();
 }
 
 export interface WebSession {
