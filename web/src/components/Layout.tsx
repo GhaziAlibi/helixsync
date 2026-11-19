@@ -5,6 +5,7 @@ import LanguageSelect from "./LanguageSelect";
 
 const navItems = [
   { to: "/", key: "nav.dashboard", end: true },
+  { to: "/vault", key: "nav.vault" },
   { to: "/devices", key: "nav.devices" },
   { to: "/sync", key: "nav.sync" },
   { to: "/restore-points", key: "nav.restorePoints" },
@@ -17,10 +18,10 @@ export default function Layout() {
   const { t } = useTranslation();
 
   return (
-    <div className="min-h-screen flex">
-      <aside className="w-56 border-e border-slate-200 bg-white p-4 flex flex-col">
-        <div className="text-lg font-semibold mb-6">HelixSync</div>
-        <nav className="flex flex-col gap-1 flex-1">
+    <div className="min-h-screen flex flex-col md:flex-row">
+      <aside className="md:w-56 border-b md:border-b-0 md:border-e border-slate-200 bg-white p-4 flex flex-col">
+        <div className="text-lg font-semibold mb-3 md:mb-6">HelixSync</div>
+        <nav className="flex flex-row flex-wrap md:flex-col gap-1 md:flex-1 mb-3 md:mb-0">
           {navItems.map((item) => (
             <NavLink
               key={item.to}
@@ -45,7 +46,7 @@ export default function Layout() {
           {t("layout.logOut")}
         </button>
       </aside>
-      <main className="flex-1 p-8">
+      <main className="flex-1 min-w-0 p-4 md:p-8">
         {user?.recoveryCodeConfirmed === false && (
           <div role="alert" className="mb-6 text-sm text-amber-900 bg-amber-50 border border-amber-300 rounded px-4 py-3">
             {t("layout.recoveryBanner")}{" "}

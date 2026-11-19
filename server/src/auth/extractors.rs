@@ -256,6 +256,9 @@ impl FromRequestParts<AppState> for AuthenticatedDevice {
 /// both the extension and the dashboard. For writes, use `AnyAuthorizedMutator`.
 pub struct AnyAuthenticatedUser {
     pub user_id: uuid::Uuid,
+    /// The calling device, or `None` for a session cookie. Lets a handler
+    /// skip device-only side effects (`last_seen_at`) for a session.
+    pub device_id: Option<uuid::Uuid>,
     /// `device:<id>` for device tokens (one bucket per device) or
     /// `user:<id>` for session cookies.
     pub rate_limit_key: String,
@@ -272,6 +275,7 @@ impl FromRequestParts<AppState> for AnyAuthenticatedUser {
             Ok(device) => {
                 return Ok(AnyAuthenticatedUser {
                     user_id: device.user_id,
+                    device_id: Some(device.device_id),
                     rate_limit_key: format!("device:{}", device.device_id),
                 });
             }
@@ -281,6 +285,7 @@ impl FromRequestParts<AppState> for AnyAuthenticatedUser {
         let user = AuthenticatedUser::from_request_parts(parts, state).await?;
         Ok(AnyAuthenticatedUser {
             user_id: user.user_id,
+            device_id: None,
             rate_limit_key: format!("user:{}", user.user_id),
         })
     }

@@ -1,0 +1,89 @@
+{
+ "_comment": "Produced by extension/src/crypto/index.ts (encryptWithSdek / encryptBytesWithSdek) so the web decoder is tested against the extension's real output. Account key and key version 1 are fixed test values.",
+ "akB64": "AwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dw",
+ "bookmark": {
+  "objectType": "bookmark",
+  "objectId": "0198f1d1-5e12-7a11-9d0a-2f2d1f6a7c20",
+  "operationType": "create",
+  "plaintext": {
+   "title": "Example",
+   "url": "https://example.com/",
+   "parent": null,
+   "position": "a0"
+  },
+  "envelope": {
+   "v": 2,
+   "keyVersion": 1,
+   "alg": "xchacha20poly1305",
+   "nonce": "8zqUySOaM0T5z80h6Woh5sdCk8-wVLY9",
+   "ciphertext": "UDl9C1r3akb5gfk1Fa885c_y0eznFZykXUd6D-3kNjE4x1s-OA8-aT5BRlKKMDAaqGztrL78a_GS3pLcFbNKrL2JVZp_r9RsA9FWZkn4eVCKgJDyOMmtzh4617vrXg"
+  }
+ },
+ "bulkV2Deflate": {
+  "objectId": "0198f1d1-5e12-7a11-9d0a-2f2d1f6a7c21",
+  "container": {
+   "v": 1,
+   "bulkVersion": 2,
+   "codec": "deflate-raw",
+   "visitCount": 3,
+   "segments": [
+    {
+     "v": 2,
+     "keyVersion": 1,
+     "alg": "xchacha20poly1305",
+     "nonce": "4tYVAOoOScS1zUyZcidfnl9zBlKq-wjo",
+     "ciphertext": "N9yI-cpLg_SuUHiCbeA4yc9AH-W9K_yoCJomRYJcKihYAd-BVL7PMAgLEXGcycEYWlWb_OEd-NjxOCEysiailNk3sXr4jGKetiAckZkKguK6H3CIu3pRpM-vGFXUaCM"
+    }
+   ]
+  }
+ },
+ "bulkV2Plain": {
+  "objectId": "0198f1d1-5e12-7a11-9d0a-2f2d1f6a7c21",
+  "container": {
+   "v": 1,
+   "bulkVersion": 2,
+   "visitCount": 3,
+   "segments": [
+    {
+     "v": 2,
+     "keyVersion": 1,
+     "alg": "xchacha20poly1305",
+     "nonce": "mAc1825IwV3OluSpqViftIsoLUL3p7Gh",
+     "ciphertext": "ehRlvknGEwF0MgF_17FFh5Jokh5yxEIX20dhGpQcPlzZcR8n7PXMvRbIr7dlO27Nm3KchA1jWf5qaypem_MPnMRmJTjoyDiQ6CjwZf2cQuP2G3NAApMDKjQ_uD0p582wCJwKtqnVfK06TjGNPzAw-1HhKNHlTahqnHbFx9e3hAw75053NPTTvSaufN0l7x8W"
+    }
+   ]
+  }
+ },
+ "bulkV1": {
+  "objectId": "0198f1d1-5e12-7a11-9d0a-2f2d1f6a7c21",
+  "container": {
+   "v": 1,
+   "bulkVersion": 1,
+   "visitCount": 1,
+   "segments": [
+    {
+     "v": 2,
+     "keyVersion": 1,
+     "alg": "xchacha20poly1305",
+     "nonce": "Dv81FcWR2TBtUe5xqMxTFz1Xz1FQBnGQ",
+     "ciphertext": "PA2s1bX-rfJvcgWPU4jyPZygAtDa4jsDfU08oSlCBvK134vhJ9YG7M51hDGbx6w1epdYx24dQ7IwIZDlBJDS7n8R_wM4SDAx4l7-os3YU_N3qAEQOsoO1S1sZL3y-lC6scA3QtBWIC9P6TC50utB"
+    }
+   ]
+  }
+ },
+ "visit": {
+  "objectId": "0198f1d1-5e12-7a11-9d0a-2f2d1f6a7c22",
+  "plaintext": {
+   "url": "https://v.test/",
+   "title": "V",
+   "visitedAt": "2023-11-15T00:00:00.000Z"
+  },
+  "envelope": {
+   "v": 2,
+   "keyVersion": 1,
+   "alg": "xchacha20poly1305",
+   "nonce": "HUypDbhTE0SOzwkAm7UYdTLe75rf0qPw",
+   "ciphertext": "YHj9crzFGLGvV0hSyiUW9xgYK-tF3M5QZu_1IgToVFyUYJxboKxAszFRN_MvYX1y_aFvDvWatqf24CN2skeU53u7TZ9t6v3uj-BVOvsgiqCi3sXMes7pEfH_dYU"
+  }
+ }
+}

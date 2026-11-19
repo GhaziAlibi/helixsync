@@ -6,7 +6,33 @@ All notable changes to HelixSync are documented here. The format follows
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-17
+
 ### Added
+
+- Read-only **Vault** page in the web dashboard (and installable as a PWA): shows
+  and searches your bookmarks (folder tree), history (newest first) and open
+  tabs (by device, window and tab group), decrypted in the browser, for phones
+  and locked-down computers where the extension can't be installed. Nothing can
+  be changed from it. The web is not a device: it uses the dashboard session,
+  and `GET /api/v1/sync/snapshot` now accepts the session cookie (read-only;
+  `/sync/changes` and `/sync/operations` still need a device, and no device row
+  or `last_seen_at` is touched). The account key is kept from login in memory
+  only (a reload asks for the password again), and the key and all plaintext
+  are dropped after 5 minutes idle and on logout. Nothing is written to
+  `localStorage`, `sessionStorage`, IndexedDB or a cache, and there is no
+  service worker. See `docs/security.md` §10 and `docs/encryption.md` §8.
+
+- `GET /api/v1/sync/snapshot` now gives an encrypted bookmark, folder, tab,
+  window or tab group its earlier operations as `layers` (since its latest
+  `create` or `restore`, at most 8 per operation type), because the server
+  can't merge ciphertext and the object's own payload may be a partial
+  `update`, `move` or `activate`. Additive: the object's fields are unchanged,
+  clients that don't know `layers` ignore it, there is no migration, and stored
+  snapshots stay readable. Objects already folded into a stored snapshot by an
+  older server have lost those operations, and the Vault says how many items it
+  leaves out for that reason. The extension does not use `layers` yet. See
+  `docs/protocol.md` §10.3.
 
 - Send tab to device. Right-click a page or a link (or use the popup) and pick
   another of your devices: the page opens there at once, in the focused window.

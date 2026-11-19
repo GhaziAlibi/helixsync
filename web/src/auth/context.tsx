@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import * as api from "../api/client";
+import { lockVault } from "../vault/keyring";
 
 interface AuthState {
   user: api.UserPublic | null;
@@ -59,6 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const register = useCallback(async (email: string, password: string) => {
     const result = await api.register(email, password);
+    lockVault(); // never carry a previous account's key into this one
     setUser({ ...result.user, recoveryCodeConfirmed: false });
     return result.recoveryCode;
   }, []);
@@ -66,6 +68,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const pollDeviceLogin = useCallback(async (id: string, secret: string) => {
     const result = await api.pollAuthRequest(id, secret);
     if (result.status === "approved") {
+      // An approved device login brings no account key; drop any earlier one.
+      lockVault();
       setUser(result.user);
       void refreshUser(setUser);
     }

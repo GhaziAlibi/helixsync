@@ -913,6 +913,11 @@ GET /api/v1/sync/snapshot
 Authorization: Bearer <deviceAccessToken>
 ```
 
+A web session cookie is accepted instead of the bearer token (read-only:
+`/sync/changes` and `/sync/operations` still require a device). The
+dashboard's Vault page uses this, and it neither registers a device nor
+updates any `last_seen_at`.
+
 ```json
 {
   "snapshotCursor": 9000,
@@ -922,7 +927,18 @@ Authorization: Bearer <deviceAccessToken>
 ```
 
 Snapshot creation is atomic (a consistent point-in-time view keyed to one
-`server_cursor`, `snapshotCursor`). After downloading and applying a
+`server_cursor`, `snapshotCursor`). The server can't merge ciphertext, so for
+an encrypted `bookmark`, `bookmarkFolder`, `tab`, `window` or `tabGroup` the
+object's own fields are those of its latest operation, which after a partial
+`update`, `move` or `activate` holds only some fields. Such an object also
+carries `layers`: its earlier operations since its latest `create` or
+`restore`, oldest first, each `{operationType, payload, lamportTimestamp,
+deviceId, operationId}`, at most 8 per operation type besides that one. A
+reader that needs the whole state decrypts each layer (its AAD uses the layer's
+own `operationType`) and applies them in order, then the object's own payload,
+each field coming from the last operation that set it. `layers` is absent when
+empty, and from objects folded into a stored snapshot before it existed (their
+earlier operations are gone). Readers that don't know it ignore it. After downloading and applying a
 snapshot, the client resumes incremental sync via §10.1 from
 `cursor=snapshotCursor`.
 

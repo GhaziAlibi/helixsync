@@ -127,6 +127,27 @@ pub struct SnapshotObject {
     pub device_id: Uuid,
     #[serde(default = "Uuid::nil")]
     pub operation_id: Uuid,
+    /// Earlier operations of an encrypted object whose latest operation
+    /// (`payload` above) holds only part of its state, oldest first: a
+    /// bookmark's `update` or `move`, a tab's `activate`. The server can't
+    /// merge ciphertext, so it hands the chain over and the reader applies
+    /// `layers` then `payload` in order (docs/protocol.md §10.3). Empty, and
+    /// left out of the JSON, for every other object and for snapshots stored
+    /// before this field existed, which clients that don't know it ignore.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub layers: Vec<SnapshotLayer>,
+}
+
+/// One earlier operation in `SnapshotObject::layers`: the same fields a
+/// snapshot object carries for its latest operation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotLayer {
+    pub operation_type: String,
+    pub payload: serde_json::Value,
+    pub lamport_timestamp: i64,
+    pub device_id: Uuid,
+    pub operation_id: Uuid,
 }
 
 impl SnapshotObject {

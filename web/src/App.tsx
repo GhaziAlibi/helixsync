@@ -10,6 +10,7 @@ import Devices from "./pages/Devices";
 import RestorePoints from "./pages/RestorePoints";
 import Backups from "./pages/Backups";
 import Sync from "./pages/Sync";
+import Vault from "./pages/Vault";
 import Security from "./pages/Security";
 
 export default function App() {
@@ -28,6 +29,7 @@ export default function App() {
             }
           >
             <Route path="/" element={<Dashboard />} />
+            <Route path="/vault" element={<Vault />} />
             <Route path="/devices" element={<Devices />} />
             <Route path="/sync" element={<Sync />} />
             <Route path="/restore-points" element={<RestorePoints />} />

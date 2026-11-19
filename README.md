@@ -375,6 +375,7 @@ oldest first when space runs out, and after 90 days. See
 | Page | What you can do |
 |------|-----------------|
 | Dashboard | Connection and sync health, last sync, device count, how many bookmarks, history items and tabs are synced, storage used against your limit, and recent devices |
+| Vault | Read-only view of your bookmarks (folder tree), history (newest first) and open tabs (by device, window and tab group), with one search box. For a phone or a locked-down computer where the extension can't be installed; installable as an app (PWA). Decrypted in the browser's memory only: after a reload, 5 minutes idle or logout it asks for your password again. Nothing can be changed from it |
 | Devices | List, rename and revoke connected browsers |
 | Synchronization | The same sync settings as the popup, kept in one place |
 | Restore points | See, pin and delete your bookmark restore points, switch automatic ones off, and see the space they use. Restoring is done in the extension |
@@ -538,8 +539,14 @@ synced data in it).
   [`docs/deployment.md`](docs/deployment.md).
 - **Use the web dashboard only on a server you trust.** Its code is served by
   that server, so a compromised server could capture the password you type
-  there. The extension is installed separately and isn't affected. See
-  [`docs/security.md`](docs/security.md).
+  there, and, since the Vault page decrypts your bookmarks, history and tabs in
+  the browser, read them too. The extension is installed separately and isn't
+  affected. See [`docs/security.md`](docs/security.md).
+- **The Vault can miss items changed before the server was updated.** The
+  snapshot now carries the earlier operations a bookmark or tab needs, so a
+  moved or renamed bookmark shows in full. Objects that were compacted into a
+  stored snapshot by an older server lost those earlier operations; the Vault
+  leaves such an item out and says how many.
 - **Tab groups need a permission in each browser.** Turning on Tab Groups in a
   browser's popup asks for it; when the setting was turned on elsewhere, open
   the popup's settings and press Save. Tab, tab group and restore behavior is

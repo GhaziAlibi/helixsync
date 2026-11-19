@@ -106,6 +106,13 @@ protection is exactly the two layers above. Cross-origin browser requests are
 additionally constrained by the CORS allowlist (§4), which governs what a
 foreign origin can read, not what the server will accept.
 
+One sync route also accepts the web session: `GET /api/v1/sync/snapshot`,
+which the dashboard's read-only Vault page uses. It is a `GET` and the body is
+ciphertext, so it needs no CSRF token. A session cannot call `/sync/changes`
+(it writes the device's cursor) or `/sync/operations`, which still need a
+device credential, and a session call does not touch any device's
+`last_seen_at`. A device token is not needed or created for the web.
+
 Device-credential-authenticated API calls (the extension's sync traffic) are
 bearer-token authenticated, not cookie-authenticated, and are therefore not
 subject to CSRF in the browser-cookie sense: a malicious page cannot make a
@@ -297,9 +304,14 @@ discover them:
   JavaScript and capture it. This is inherent to browser-based end-to-end
   encryption; the strict CSP (§4) limits what injected third-party content can
   do but cannot help against the origin itself. If you don't operate the
-  server yourself, you are trusting its operator with this prompt. The
-  extension, which is installed from the Web Store and not served by the
-  server, is not exposed to this.
+  server yourself, you are trusting its operator with this prompt. The same
+  holds for the Vault page: it decrypts your bookmarks, history and open tabs
+  in the page, so modified JavaScript could read them, not only the password.
+  The extension, which is installed from the Web Store and not served by the
+  server, is not exposed to this. The Vault keeps the account key and the
+  plaintext in memory only (no `localStorage`, `sessionStorage`, IndexedDB,
+  cache or service worker), drops them after 5 minutes without input, on
+  logout and on reload, and links only `http:`, `https:` and `ftp:` addresses.
 - **A hostile server can withhold or delete data.** It controls the operation
   log, so it can drop operations or serve incomplete history. What it cannot do
   is read the data, forge content that was never encrypted under the account
