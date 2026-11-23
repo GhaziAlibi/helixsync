@@ -10,6 +10,7 @@ pub mod error;
 pub mod housekeeping;
 pub mod middleware;
 pub mod restore_points;
+pub mod rulesets;
 pub mod state;
 pub mod sync;
 pub mod websocket;
@@ -39,10 +40,18 @@ pub fn app(state: AppState) -> Router {
         .collect();
 
     let cors = CorsLayer::new()
-        .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
         .allow_headers([
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
+            // Rulesets: `PUT /rulesets/{id}` carries the revision it edits.
+            header::IF_MATCH,
             HeaderName::from_static(auth::extractors::CSRF_HEADER_NAME),
             HeaderName::from_static(sync::routes::PROTOCOL_VERSION_HEADER),
         ])
@@ -60,6 +69,7 @@ pub fn app(state: AppState) -> Router {
             "/restore-points",
             restore_points::routes::router(state.config.restore_points.max_bytes),
         )
+        .nest("/rulesets", rulesets::routes::router())
         .nest("/backups", backup::status::router())
         .route("/ws", get(websocket::ws_handler))
         .route("/version", get(version))
@@ -135,5 +145,6 @@ async fn version(State(state): State<AppState>) -> Json<serde_json::Value> {
         "restorePoints": true,
         "backups": true,
         "sendTab": true,
+        "rulesets": true,
     }))
 }

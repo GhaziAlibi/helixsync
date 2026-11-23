@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO sync_ruleset_assignments (ruleset_id, device_id)\n         SELECT $1, UNNEST($2::uuid[])\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "816f0eac27a9dcb5690fcabe258043aeaefa8137a7f37a8b75c28bed9a4b6cba"
+}

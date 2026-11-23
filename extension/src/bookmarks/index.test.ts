@@ -34,6 +34,9 @@ const getMappedChromiumIdsByTypeMock = vi.fn();
 const getMappingsByLocalIdsMock = vi.fn(async (_type: any, _ids: any) => new Map<string, any>());
 
 vi.mock("../storage/db", () => ({
+  getRulesetsRecord: vi.fn(async () => undefined),
+  putRulesetsRecord: vi.fn(async () => undefined),
+  getAllMoveStates: vi.fn(async () => new Map()),
   commitBookmarkBackfillBatch: (...args: unknown[]) => commitBookmarkBackfillBatchMock(...args),
   deleteDeferredMaterialization: vi.fn(),
   deleteDeferredMaterializationsBatch: vi.fn(),

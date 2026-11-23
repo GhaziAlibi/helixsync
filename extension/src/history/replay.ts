@@ -114,18 +114,22 @@ function sweepStaleWindows(now: number): void {
 /** Adds each distinct URL that has no local visit yet to the browser's
  * history, oldest synced visit first. Returns how many were added. Stops
  * early (returning what was added so far) when `shouldStop` reports true.
+ * URLs `isBlocked` reports are left out.
  * A URL that can't be checked or added is skipped, never thrown. Paced like
  * the bulk import, since a large profile means many calls. */
 export async function replayVisitsIntoBrowserHistory(
   newestByUrl: ReadonlyMap<string, number>,
   shouldStop: () => Promise<boolean>,
+  // A ruleset blocks the URL on this device (rulesets/index.ts): it is not
+  // written into this browser's history, whoever visited it.
+  isBlocked: (url: string) => boolean = () => false,
 ): Promise<number> {
   // One entry per URL, at its newest visit: a URL visited fifty times needs
   // one history entry, not fifty. Merged in canonical form, so "https://x.test"
   // and "https://x.test/" are one.
   const merged = new Map<string, { url: string; time: number }>();
   for (const [url, time] of newestByUrl) {
-    if (!isSyncableUrl(url) || !platform.canStoreHistoryUrl(url)) continue;
+    if (!isSyncableUrl(url) || !platform.canStoreHistoryUrl(url) || isBlocked(url)) continue;
     const key = canonicalUrl(url);
     const previous = merged.get(key);
     if (!previous || time > previous.time) merged.set(key, { url, time });

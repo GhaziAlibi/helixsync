@@ -776,3 +776,49 @@ export async function serverSupportsSendTab(): Promise<boolean> {
 export function resetSendTabSupportCache(): void {
   sendTabSupportCache = undefined;
 }
+
+// --- Rulesets (docs/protocol.md §17) ---
+
+export interface OwnRulesetDto {
+  id: string;
+  revision: number;
+  isDefault: boolean;
+  /** `null` for a Default nobody has edited: no rules. */
+  envelope: unknown | null;
+}
+
+let rulesetsSupportCache: { serverUrl: string; supported: boolean; at: number } | undefined;
+const RULESETS_SUPPORT_TTL_MS = 10 * 60_000;
+
+/** Whether the server reports `rulesets` in `/version`; an older server omits
+ * it. Unlike the other feature checks this throws when the server can't be
+ * asked (offline, a server error): a device that took "unknown" for "no
+ * rulesets" would import everything unfiltered. Cached for a few minutes. */
+export async function serverSupportsRulesets(): Promise<boolean> {
+  const device = await getDevice();
+  if (!device) return false;
+  const cached = rulesetsSupportCache;
+  if (cached && cached.serverUrl === device.serverUrl && Date.now() - cached.at < RULESETS_SUPPORT_TTL_MS) {
+    return cached.supported;
+  }
+  const res = await fetchWithTimeout(`${device.serverUrl}/api/v1/version`);
+  if (!res.ok) throw await buildApiError(res, `version check failed (${res.status})`);
+  const body = (await res.json()) as { rulesets?: unknown };
+  const supported = body.rulesets === true;
+  rulesetsSupportCache = { serverUrl: device.serverUrl, supported, at: Date.now() };
+  return supported;
+}
+
+export function resetRulesetsSupportCache(): void {
+  rulesetsSupportCache = undefined;
+}
+
+/** The rulesets this device is assigned to. Possibly none. */
+export async function fetchOwnRulesets(): Promise<OwnRulesetDto[]> {
+  const res = await authedFetch("/api/v1/rulesets/self");
+  if (!res.ok) {
+    throw await buildApiError(res, `fetching rulesets failed (${res.status})`);
+  }
+  const body = (await res.json()) as { rulesets?: unknown };
+  return Array.isArray(body.rulesets) ? (body.rulesets as OwnRulesetDto[]) : [];
+}

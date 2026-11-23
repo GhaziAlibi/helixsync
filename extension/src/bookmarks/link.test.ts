@@ -29,6 +29,9 @@ let mappings = new Map<string, string>();
 const record = (chromiumLocalId: string, objectId: string) => ({ chromiumLocalId, objectId });
 
 vi.mock("../storage/db", () => ({
+  getRulesetsRecord: vi.fn(async () => undefined),
+  putRulesetsRecord: vi.fn(async () => undefined),
+  getAllMoveStates: vi.fn(async () => new Map()),
   commitBookmarkBackfillBatch: vi.fn(),
   deleteDeferredMaterialization: vi.fn(),
   deleteDeferredMaterializationsBatch: vi.fn(),

@@ -20,6 +20,7 @@ import {
   ensureConnected as ensureWebSocketConnected,
   onAuthRequest,
   onChangesAvailable,
+  onRulesetChanged,
   onTabSend,
 } from "../api/websocket";
 import {
@@ -54,6 +55,7 @@ import type { ObjectType } from "../sync/types";
 import {
   backfillExisting as backfillBookmarks,
   materializeWaitingLazyRoots,
+  reconcileFolderRules,
   registerCapture as registerBookmarkCapture,
   setBookmarkCaptureEnabled,
   setLinkExistingBookmarks,
@@ -85,6 +87,8 @@ import {
   setTabGroupsCaptureEnabled,
   setTabsCaptureEnabled,
 } from "../tabs";
+import { failedRulesetCount, onRulesChanged, refreshRulesets } from "../rulesets/fetch";
+import { getLoadedRulesets, invalidateRulesetsMemory } from "../rulesets";
 import { handleTabSend } from "../send-tab/receive";
 import { sendTabToDevice } from "../send-tab/send";
 import { refreshSendTabMenu, registerSendTabMenu } from "../send-tab/menu";
@@ -129,6 +133,18 @@ onAuthRequest(() => {
 // A tab another device sent to this one (docs/protocol.md §12.5).
 onTabSend((frame) => {
   void handleTabSend(frame);
+});
+
+// A ruleset this device is in changed, or its assignment did (docs/protocol.md
+// §17). The periodic sync checks too, in case this hint was missed.
+onRulesetChanged(() => {
+  void refreshRulesets(true).catch((e) => console.warn("HelixSync: could not fetch rulesets after a push", e));
+});
+
+// New effective rules: bookmarks are caught up with any folder the rules now
+// let through. Narrowing needs nothing (nothing is deleted).
+onRulesChanged(() => {
+  void reconcileFolderRules().catch((e) => console.error("HelixSync: could not apply the changed folder rules", e));
 });
 
 // Recounting walks every live remote tab and this runs on every tick and
@@ -237,6 +253,10 @@ export async function updateBadge(force = false): Promise<void> {
     console.warn("HelixSync: failed to update restore badge", e);
   }
 }
+
+// Set while the first import waits for a rulesets fetch the server could not
+// answer; the periodic sync tries again.
+let rulesetsDelayedImport = false;
 
 // Dedupes concurrent initial imports within one worker. The message that
 // wakes a fresh worker races that worker's own startup chain; both would see
@@ -361,6 +381,19 @@ async function initializeCaptureForSettings(): Promise<void> {
   }
 
   if (!device.initialImportCompletedAt) {
+    // Rulesets before the first import (docs/protocol.md §17): bookmarks and
+    // history already in this browser must not be uploaded unfiltered. A server
+    // that has rulesets but can't be asked just now delays the import; it is
+    // retried on the next periodic sync and the next start.
+    try {
+      await refreshRulesets(true);
+      rulesetsDelayedImport = false;
+    } catch (e) {
+      rulesetsDelayedImport = true;
+      console.warn("HelixSync: rulesets could not be fetched, delaying the initial import", e);
+      return;
+    }
+    await reconcileFolderRules().catch((e) => console.error("HelixSync: could not record the folder rules", e));
     await runInitialImport(device);
     // The server's push announces only changes made after this device
     // connected, so nothing would prompt its first pull until the periodic
@@ -368,6 +401,13 @@ async function initializeCaptureForSettings(): Promise<void> {
     void runSyncCycle().catch((e) => console.error("HelixSync: first sync after connecting failed", e));
   } else {
     console.log("HelixSync: initial import already completed at", device.initialImportCompletedAt);
+    // Not awaited: what was last fetched keeps applying meanwhile. A change
+    // since is announced to `onRulesChanged`; folder rules the bookmarks have
+    // not been caught up with (an interrupted catch-up) are finished here.
+    void refreshRulesets()
+      .catch((e) => console.warn("HelixSync: could not refresh rulesets", e))
+      .then(() => reconcileFolderRules())
+      .catch((e) => console.error("HelixSync: could not apply the folder rules", e));
     // Resume an older-history import a worker restart interrupted. Detached:
     // it can run for minutes, and this function is awaited by settings save.
     if (device.historyOlderCutoffMs !== undefined) void runOlderHistoryImport();
@@ -413,6 +453,12 @@ async function runPeriodicSync(): Promise<void> {
   void ensureWebSocketConnected();
   refreshSendTabMenuQuietly();
   try {
+    if (rulesetsDelayedImport) {
+      await initializeCaptureForSettings();
+    } else {
+      // Cheap: skipped while the last fetch is under a minute old.
+      await refreshRulesets().catch((e) => console.warn("HelixSync: could not refresh rulesets", e));
+    }
     await runSyncCycle();
     await updateBadge(await refreshPendingAuthRequests());
     await runMaintenanceIfDue().catch((e) =>
@@ -468,6 +514,7 @@ function invalidateMemoryCaches(): void {
   invalidateDeviceMemory();
   invalidateSettingsMemory();
   invalidatePolicyMemory();
+  invalidateRulesetsMemory();
 }
 
 type PopupMessage =
@@ -511,7 +558,13 @@ async function handleMessage(message: PopupMessage | undefined): Promise<unknown
     case "GET_STATUS": {
       const pendingCount = await getPendingCount();
       const state = await getSyncState();
+      const { effective } = await getLoadedRulesets();
       return {
+        // Which rulesets this device is in, for the popup's read-only line.
+        rulesets: {
+          names: effective.rulesets.map((r) => (r.isDefault ? null : r.name)),
+          unreadable: failedRulesetCount(),
+        },
         status: lastStatus,
         errorDetail: lastErrorDetail,
         errorCode: lastErrorCode,

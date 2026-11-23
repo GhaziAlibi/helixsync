@@ -85,6 +85,13 @@ export interface DeviceRecord {
   historyOlderEndMs?: number;
   historyOlderUploadedChunks?: number;
   historyOlderUploadedVisits?: number;
+  // Hash of the effective rulesets (rulesets/effective.ts) the checkpoint
+  // above was taken under. A resume skips visits by count, which is only
+  // right while the same URLs are filtered out; under other rules the scope
+  // restarts (history/bulk.ts). Missing means no rules, which is also what
+  // `""` means.
+  historyBulkRulesetHash?: string;
+  historyOlderRulesetHash?: string;
 }
 
 export interface SyncStateRecord {
@@ -187,6 +194,27 @@ export interface RestoreJobRecord {
   phase: "preparing" | "applying" | "finishing";
 }
 
+/** One ruleset as the server sent it (docs/protocol.md §17), still encrypted:
+ * the contents never touch disk in the clear. */
+export interface StoredRuleset {
+  id: string;
+  revision: number;
+  isDefault: boolean;
+  /** `null` for a Default nobody has edited: no rules. */
+  envelope: unknown | null;
+}
+
+/** The rulesets this device last fetched, kept so rules still apply offline
+ * and after a restart. At most one, under the fixed key. */
+export interface RulesetsRecord {
+  id: "self";
+  rulesets: StoredRuleset[];
+  fetchedAt: string;
+  /** The bookmark folder rules the bookmark sync last caught up with
+   * (bookmarks/index.ts reconcileFolderRules). Missing means none. */
+  appliedFolderRules?: { excluded: string[]; included: string[] };
+}
+
 export interface HelixSyncDB extends DBSchema {
   device: {
     key: "self";
@@ -255,13 +283,17 @@ export interface HelixSyncDB extends DBSchema {
     key: "current";
     value: RestoreJobRecord;
   };
+  rulesets: {
+    key: "self";
+    value: RulesetsRecord;
+  };
 }
 
 let dbPromise: Promise<IDBPDatabase<HelixSyncDB>> | null = null;
 
 export function getDb(): Promise<IDBPDatabase<HelixSyncDB>> {
   if (!dbPromise) {
-    dbPromise = openDB<HelixSyncDB>("helixsync", 9, {
+    dbPromise = openDB<HelixSyncDB>("helixsync", 10, {
       async upgrade(db, oldVersion, _newVersion, transaction) {
         if (oldVersion < 1) {
           db.createObjectStore("device", { keyPath: "id" });
@@ -338,6 +370,10 @@ export function getDb(): Promise<IDBPDatabase<HelixSyncDB>> {
         if (oldVersion < 9) {
           db.createObjectStore("restore_point_outbox", { keyPath: "id" });
           db.createObjectStore("restore_jobs", { keyPath: "id" });
+        }
+
+        if (oldVersion < 10) {
+          db.createObjectStore("rulesets", { keyPath: "id" });
         }
       },
       // An older connection still open in another context (e.g. a worker
@@ -487,6 +523,7 @@ export async function clearAllLocalData(): Promise<void> {
     "deferred_materializations",
     "restore_point_outbox",
     "restore_jobs",
+    "rulesets",
   ] as const;
   const tx = db.transaction([...stores], "readwrite");
   await Promise.all(stores.map((name) => tx.objectStore(name).clear()));
@@ -1236,4 +1273,32 @@ export async function putRestoreJob(record: RestoreJobRecord): Promise<void> {
 
 export async function deleteRestoreJob(): Promise<void> {
   await (await getDb()).delete("restore_jobs", "current");
+}
+
+export async function getRulesetsRecord(): Promise<RulesetsRecord | undefined> {
+  return (await getDb()).get("rulesets", "self");
+}
+
+export async function putRulesetsRecord(record: RulesetsRecord): Promise<void> {
+  await (await getDb()).put("rulesets", record);
+}
+
+/** Every recorded `move` field state, by objectId: where the account last put
+ * each bookmark and folder this device has heard of. Read in pages with
+ * yields so a large account doesn't hold the worker. */
+export async function getAllMoveStates(): Promise<Map<string, { parent: string | null; position: string }>> {
+  const db = await getDb();
+  const out = new Map<string, { parent: string | null; position: string }>();
+  let cursor = await db.transaction("field_state").store.openCursor();
+  let seen = 0;
+  while (cursor) {
+    const record = cursor.value;
+    if (record.field === "move" && record.value && typeof record.value === "object") {
+      const value = record.value as { parent?: string | null; position?: string };
+      if (typeof value.position === "string") out.set(record.objectId, { parent: value.parent ?? null, position: value.position });
+    }
+    if (++seen % 5000 === 0) await yieldToEventLoop();
+    cursor = await cursor.continue();
+  }
+  return out;
 }

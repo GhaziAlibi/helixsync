@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT a.device_id FROM sync_ruleset_assignments a\n         JOIN devices d ON d.id = a.device_id\n         WHERE a.ruleset_id = $1 AND d.revoked_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "device_id",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1115caf7231b42d0732a68a38c3fa54d0e8ee4215a78da59bf9e40852250cc44"
+}

@@ -1,0 +1,33 @@
+{
+ "_comment": "Produced by web/src/rulesets/codec.ts encryptRuleset (nonce pinned to bytes 1..24) so the extension's decryptor is tested against the dashboard's real output. Account key is the fixed test key of vault/fixtures/extension-vectors.json, key version 1.",
+ "akB64": "AwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dw",
+ "rulesetId": "0198f1d1-5e12-7a11-9d0a-2f2d1f6a7c30",
+ "revision": 3,
+ "plaintext": {
+  "v": 1,
+  "name": "Work",
+  "rules": [
+   {
+    "id": "r1",
+    "kind": "excludeFolder",
+    "folderId": "0198f1d1-5e12-7a11-9d0a-2f2d1f6a7c20"
+   },
+   {
+    "id": "r2",
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   {
+    "id": "r3",
+    "kind": "blockLocal"
+   }
+  ]
+ },
+ "envelope": {
+  "v": 2,
+  "keyVersion": 1,
+  "alg": "xchacha20poly1305",
+  "nonce": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcY",
+  "ciphertext": "bFMntOLxBXKguQ3IqG2lIjPHnkOZkdB_vam9X0R119q8g_aausREQ6LZWV7_s0HAREgaqOYuy27vi0g8XDv0hhkrb1nSUgnU4tv7Svh6vSF2rYRu7JrMAETNfC_zSgDAvC8RnvSQbgO3LO0j5hT8Y3IDEoOl74bXdyuCsPQjHWADRYzUKQyT86A-G8W78ATApfnnwSKS7hsMgDxnOAi7FvOweM7MGw41wKGNVvqgbry-a1qO0tTv8jztlMqNUBSmEwqIYJyOvNed6jSMa7-7gFwpP8lzENTnrplOlg"
+ }
+}

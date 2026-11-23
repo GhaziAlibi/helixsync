@@ -21,6 +21,7 @@ vi.mock("../api/client", () => ({
 }));
 
 vi.mock("../storage/db", () => ({
+  getRulesetsRecord: vi.fn(async () => undefined),
   getDevice: vi.fn(async () => device),
   putDevice: vi.fn(async (record: DeviceRecord) => {
     device = record;

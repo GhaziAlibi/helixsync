@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO sync_ruleset_assignments (ruleset_id, device_id)\n         SELECT id, $2 FROM sync_rulesets WHERE user_id = $1 AND is_default\n         ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "724131f8c924a76129587dfadeea6e1d84b5aaae597038b32b168038a5f6ab4b"
+}

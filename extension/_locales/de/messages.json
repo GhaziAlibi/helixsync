@@ -173,6 +173,15 @@
   "statusview_lastSync": {
     "message": "Letzte Synchronisierung: {time} · Ausstehend: {pending}"
   },
+  "statusview_rulesets": {
+    "message": "Regelsätze: {names} (im Dashboard verwaltet)"
+  },
+  "statusview_rulesetsDefault": {
+    "message": "Standard"
+  },
+  "statusview_rulesetsUnreadable": {
+    "message": "Einige Regelsätze konnten nicht gelesen werden. Ihre zuletzt bekannten Regeln gelten weiter."
+  },
   "statusview_syncNow": {
     "message": "Jetzt synchronisieren"
   },

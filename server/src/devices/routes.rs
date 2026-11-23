@@ -337,6 +337,9 @@ pub(crate) async fn insert_device(
     let (access_token, refresh_token, access_token_expires_at) =
         issue_credentials(state, &mut **tx, device_id, user_id).await?;
 
+    // A new device starts in the account's Default ruleset.
+    crate::rulesets::assign_to_default(tx, user_id, device_id).await?;
+
     Ok(Some(IssuedDevice {
         device_id,
         access_token,
@@ -661,6 +664,7 @@ async fn revoke_device(
     )
     .execute(&mut *tx)
     .await?;
+    crate::rulesets::unassign_device(&mut *tx, id).await?;
 
     tx.commit().await?;
 
@@ -717,6 +721,7 @@ async fn revoke_self(
     )
     .execute(&mut *tx)
     .await?;
+    crate::rulesets::unassign_device(&mut *tx, device.device_id).await?;
 
     tx.commit().await?;
 
@@ -766,6 +771,7 @@ async fn revoke_device_for_token_reuse(state: &AppState, user_id: Uuid, device_i
     )
     .execute(&state.db)
     .await;
+    let _ = crate::rulesets::unassign_device(&state.db, device_id).await;
 
     write_device_revocation_cache_entry(
         &state.device_revocation_cache,

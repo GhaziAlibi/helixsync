@@ -30,6 +30,7 @@ const flushMicrotasks = async () => {
 };
 
 vi.mock("../bookmarks", () => ({
+  reconcileFolderRules: vi.fn(async () => undefined),
   backfillExisting: vi.fn(async () => {
     await new Promise((r) => setTimeout(r, 1000));
   }),
@@ -63,6 +64,17 @@ vi.mock("../restore-points/restore", () => ({
 
 vi.mock("../restore-points/service", () => ({}));
 
+vi.mock("../rulesets/fetch", () => ({
+  refreshRulesets: vi.fn(async () => "unchanged"),
+  onRulesChanged: vi.fn(),
+  failedRulesetCount: vi.fn(() => 0),
+}));
+
+vi.mock("../rulesets", () => ({
+  getLoadedRulesets: vi.fn(async () => ({ effective: { rulesets: [] }, unreadable: 0 })),
+  invalidateRulesetsMemory: vi.fn(),
+}));
+
 vi.mock("../tabs", () => ({
   captureOpenTabs: vi.fn(),
   flushPendingTitleDebounces: vi.fn(),
@@ -91,6 +103,7 @@ vi.mock("../api/websocket", () => ({
   onChangesAvailable: vi.fn(),
   onAuthRequest: vi.fn(),
   onTabSend: vi.fn(),
+  onRulesetChanged: vi.fn(),
 }));
 
 const initialDevice: Record<string, unknown> = {

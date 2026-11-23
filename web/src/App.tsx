@@ -7,6 +7,7 @@ import Recover from "./pages/Recover";
 import ResetWithDevices from "./pages/ResetWithDevices";
 import Dashboard from "./pages/Dashboard";
 import Devices from "./pages/Devices";
+import Rulesets from "./pages/Rulesets";
 import RestorePoints from "./pages/RestorePoints";
 import Backups from "./pages/Backups";
 import Sync from "./pages/Sync";
@@ -32,6 +33,7 @@ export default function App() {
             <Route path="/vault" element={<Vault />} />
             <Route path="/devices" element={<Devices />} />
             <Route path="/sync" element={<Sync />} />
+            <Route path="/rulesets" element={<Rulesets />} />
             <Route path="/restore-points" element={<RestorePoints />} />
             <Route path="/backups" element={<Backups />} />
             <Route path="/security" element={<Security />} />

@@ -16,6 +16,10 @@ const API_ERROR_CODES = new Set([
   "busy",
   "internal_error",
   "restore_point_pin_limit",
+  "revision_conflict",
+  "ruleset_limit_reached",
+  "ruleset_exists",
+  "default_ruleset_protected",
 ]);
 
 /** The text to show for any error thrown while the UI was doing something. */

@@ -13,6 +13,7 @@ import { fetchSettings, invalidateSettingsCache, refreshAccessToken } from "./cl
 
 type ChangesAvailableHandler = () => void;
 type AuthRequestHandler = () => void;
+type RulesetChangedHandler = () => void;
 
 /** A `tab_send` frame as received; nothing in it is trusted until the
  * envelope decrypts (send-tab/receive.ts). */
@@ -49,6 +50,7 @@ let reconnectBlockedUntil = 0;
 let changesHandler: ChangesAvailableHandler | undefined;
 let authRequestHandler: AuthRequestHandler | undefined;
 let tabSendHandler: TabSendHandler | undefined;
+let rulesetChangedHandler: RulesetChangedHandler | undefined;
 let disconnectRequested = false;
 
 const RECONNECT_DELAY_STORAGE_KEY = "reconnectDelayMs";
@@ -97,6 +99,13 @@ export function onChangesAvailable(handler: ChangesAvailableHandler): void {
  * created, or another extension answered one (docs/protocol.md §12). */
 export function onAuthRequest(handler: AuthRequestHandler): void {
   authRequestHandler = handler;
+}
+
+/** Called when a ruleset this device is in changed, or its assignment did
+ * (docs/protocol.md §17). Only a hint: rulesets are also re-checked on every
+ * periodic sync. */
+export function onRulesetChanged(handler: RulesetChangedHandler): void {
+  rulesetChangedHandler = handler;
 }
 
 /** Called for a tab another of the account's devices sent to this one. */
@@ -217,6 +226,8 @@ async function connect(): Promise<void> {
       changesHandler?.();
     } else if (type === "auth_request") {
       authRequestHandler?.();
+    } else if (type === "ruleset_changed") {
+      rulesetChangedHandler?.();
     } else if (type === "tab_send") {
       const { id, fromDeviceId, envelope } = msg as Partial<TabSendFrame>;
       if (typeof id === "string" && typeof fromDeviceId === "string" && typeof envelope === "object" && envelope !== null) {

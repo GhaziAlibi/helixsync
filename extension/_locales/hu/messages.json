@@ -173,6 +173,15 @@
   "statusview_lastSync": {
     "message": "Utolsó szinkronizálás: {time} · Függőben: {pending}"
   },
+  "statusview_rulesets": {
+    "message": "Szabálykészletek: {names} (az irányítópultról kezelhetők)"
+  },
+  "statusview_rulesetsDefault": {
+    "message": "Alapértelmezett"
+  },
+  "statusview_rulesetsUnreadable": {
+    "message": "Egyes szabálykészleteket nem sikerült beolvasni. Az utoljára ismert szabályaik továbbra is érvényesek."
+  },
   "statusview_syncNow": {
     "message": "Szinkronizálás most"
   },

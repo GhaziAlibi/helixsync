@@ -325,6 +325,15 @@ export function buildTabSendAad(id: string, fromDeviceId: string, toDeviceId: st
   return sharedTextEncoder.encode(JSON.stringify(["tabSend", id, fromDeviceId, toDeviceId]));
 }
 
+/** AAD of a ruleset envelope (docs/encryption.md §6.5). The "syncRuleset" tag
+ * is not an object type, so a ruleset can never be replayed as a sync
+ * operation or the reverse; the id stops the server putting one ruleset's
+ * ciphertext under another id, and the revision stops it presenting an older
+ * revision as the current one. */
+export function buildRulesetAad(rulesetId: string, revision: number): Uint8Array {
+  return sharedTextEncoder.encode(JSON.stringify(["syncRuleset", rulesetId, revision]));
+}
+
 /** Encrypts already-serialized bytes; the bulk history path uses this
  * directly for compressed segments. `aad` must be the same bytes passed to
  * the matching `decryptBytesWithSdek` call, or decryption fails. */

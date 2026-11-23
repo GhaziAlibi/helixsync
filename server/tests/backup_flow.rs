@@ -292,7 +292,7 @@ async fn dump_writes_an_encrypted_file_that_reads_back_as_a_script(pool: PgPool)
 
     let script = read_script(&path);
     assert!(script.starts_with("-- HelixSync backup\n-- format: 1\n"));
-    assert!(script.contains("-- migration_version: 3\n"));
+    assert!(script.contains("-- migration_version: 4\n"));
     assert!(script.contains("COPY public.\"users\" ("));
     assert!(script.contains("FROM stdin;\n"));
     assert!(script.contains("SELECT pg_catalog.setval('public.\"sync_operations_id_seq\"'"));
@@ -493,7 +493,7 @@ async fn round_trip_into_a_database_without_a_schema(pool: PgPool) {
     let mut conn = pool.acquire().await.unwrap();
     assert_eq!(
         catalog::migration_version(&mut conn).await.unwrap(),
-        Some(3)
+        Some(4)
     );
 }
 
@@ -521,7 +521,7 @@ async fn restore_over_existing_data_replaces_it_and_saves_a_safety_backup(pool: 
             .current
             .iter()
             .any(|(table, rows)| table == "users" && *rows == 3));
-        assert_eq!(preview.summary.header.migration_version, 3);
+        assert_eq!(preview.summary.header.migration_version, 4);
         Ok(true)
     })
     .await
@@ -606,7 +606,7 @@ async fn a_load_that_fails_midway_leaves_the_data_untouched(pool: PgPool) {
 
     // Well-formed as a file, but the row is not a valid UUID, so Postgres
     // rejects it after the tables were emptied inside the transaction.
-    let script = "-- HelixSync backup\n-- format: 1\n-- server_version: 1.0.0\n-- migration_version: 3\n-- created_at: 2026-11-13T00:00:00Z\n\nCOPY public.\"users\" (\"id\", \"email\") FROM stdin;\nnot-a-uuid\tx@example.com\n\\.\n\n-- rows \"users\" 1\n-- end\n";
+    let script = "-- HelixSync backup\n-- format: 1\n-- server_version: 1.0.0\n-- migration_version: 4\n-- created_at: 2026-11-13T00:00:00Z\n\nCOPY public.\"users\" (\"id\", \"email\") FROM stdin;\nnot-a-uuid\tx@example.com\n\\.\n\n-- rows \"users\" 1\n-- end\n";
     let name = write_script(dir.path(), script, t(0));
 
     let err = restore::run(&pool, &config, Some(&name), t(5), |_| Ok(true))
@@ -650,14 +650,14 @@ async fn files_that_cannot_be_trusted_are_refused_before_any_change(pool: PgPool
     refused.push(("not a backup", junk));
 
     // Taken by a newer server.
-    let newer = script.replace("-- migration_version: 3", "-- migration_version: 999");
+    let newer = script.replace("-- migration_version: 4", "-- migration_version: 999");
     refused.push((
         "newer than the binary",
         write_script(dir.path(), &newer, t(4)),
     ));
 
     // Not a schema version this server ever had.
-    let unknown = script.replace("-- migration_version: 3", "-- migration_version: 0");
+    let unknown = script.replace("-- migration_version: 4", "-- migration_version: 0");
     refused.push(("unknown version", write_script(dir.path(), &unknown, t(5))));
 
     // Row counts that disagree with the data.
@@ -699,13 +699,14 @@ async fn a_backup_of_an_older_schema_is_restored_by_a_newer_server(pool: PgPool)
     let config = backup_config(dir.path(), 7);
 
     // Take the database back to schema version 2 (before the recovery
-    // safeguards), as a server that old would have it.
+    // safeguards and the rulesets), as a server that old would have it.
     for statement in [
+        "DROP TABLE sync_ruleset_assignments, sync_rulesets",
         "DROP TABLE auth_request_approvals",
         "ALTER TABLE users DROP COLUMN recovery_code_confirmed_at",
         "ALTER TABLE auth_requests DROP CONSTRAINT auth_requests_kind_check",
         "ALTER TABLE auth_requests ADD CONSTRAINT auth_requests_kind_check CHECK (kind IN ('web', 'device'))",
-        "DELETE FROM _sqlx_migrations WHERE version = 3",
+        "DELETE FROM _sqlx_migrations WHERE version IN (3, 4)",
     ] {
         sqlx::query(statement).execute(&pool).await.unwrap();
     }
@@ -727,7 +728,7 @@ async fn a_backup_of_an_older_schema_is_restored_by_a_newer_server(pool: PgPool)
     let mut conn = pool.acquire().await.unwrap();
     assert_eq!(
         catalog::migration_version(&mut conn).await.unwrap(),
-        Some(3)
+        Some(4)
     );
     drop(conn);
     let after = fingerprint(&pool).await;
@@ -743,6 +744,26 @@ async fn a_backup_of_an_older_schema_is_restored_by_a_newer_server(pool: PgPool)
         assert_eq!(&after[table], rows, "{table}");
     }
     assert!(after.contains_key("auth_request_approvals"));
+
+    // The rulesets migration ran over the restored data: every account has
+    // its empty Default and every device is in it.
+    let defaults: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_rulesets WHERE is_default")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(defaults, users);
+    let unassigned: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM devices d WHERE revoked_at IS NULL AND NOT EXISTS (
+             SELECT 1 FROM sync_ruleset_assignments a WHERE a.device_id = d.id)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(unassigned, 0);
 }
 
 #[sqlx::test(migrations = "./migrations")]
