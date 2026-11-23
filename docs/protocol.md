@@ -986,7 +986,15 @@ On receipt, the client calls the normal download API (§10.1).
 
 The account's login-with-device requests changed: one was created, or a
 device answered one (§7.4). Extensions re-fetch
-`GET /api/v1/devices/auth-requests`, and also check on every periodic sync. If the
+`GET /api/v1/devices/auth-requests`, and also check on every periodic sync.
+
+```json
+{ "type": "ruleset_changed" }
+```
+
+A ruleset this device is in changed, was deleted, or the device was added to or
+removed from one (§17). Extensions re-fetch `GET /api/v1/rulesets/self`, and
+also check on every periodic sync. Sent only to the affected devices. If the
 WebSocket is unavailable or disconnects, the client falls back to periodic
 polling of §10.1 — synchronization correctness never depends on WebSocket
 delivery. Authentication uses the device access token (query-string tokens
@@ -1070,7 +1078,8 @@ extensionVersion: "<semver>"
   "registrationEnabled": true,
   "restorePoints": true,
   "backups": true,
-  "sendTab": true
+  "sendTab": true,
+  "rulesets": true
 }
 ```
 
@@ -1083,7 +1092,9 @@ send-tab push of §12.5; clients treat a missing value as `false` and hide it.
 `backups` is `true` on a server with the read-only `GET /api/v1/backups` that
 the dashboard's Backups page reads (docs/deployment.md, "Backups"); the
 dashboard treats a missing value as `false`. It is not part of the sync
-protocol.
+protocol. `rulesets` is `true` on a server with the selective-sync rulesets of
+§17; clients treat a missing value as `false`: an extension then enforces no
+rules, and the dashboard hides the page.
 
 Rules:
 
@@ -1313,3 +1324,178 @@ from a stored job if the worker is interrupted (a restore that fails with an
 error is reported and its job discarded, not resumed); planning is idempotent, so a
 resumed run emits only what is still missing.
 
+---
+
+## 17. Rulesets (Selective Sync)
+
+The account owner creates **rulesets** in the web dashboard and assigns devices
+to them. A ruleset is a named list of **rules**; each device enforces the
+combined rules of every ruleset it is assigned to, on its own. Rulesets are
+not sync operations: they are not in the operation log, are not part of
+snapshots and compaction, and do not use the operation vocabulary of §6.
+
+Rules, in the ruleset's encrypted plaintext (`docs/encryption.md` §6.5):
+
+```ts
+type Rule =
+  | { id: string; kind: "excludeFolder"; folderId: string }  // bookmark objectId
+  | { id: string; kind: "includeFolder"; folderId: string }
+  | { id: string; kind: "blockDomain"; domain: string }      // host and its subdomains
+  | { id: string; kind: "blockPattern"; pattern: string }    // regular expression
+  | { id: string; kind: "blockLocal" };
+
+interface RulesetPlaintext { v: 1; name: string; rules: Rule[] }
+```
+
+Limits: at most 500 rules, of which at most 20 `blockPattern` of at most 200
+characters; a name of at most 100 characters; an envelope of at most 64 KiB
+(the server's cap), which a ruleset of 500 folder rules fits with room to
+spare. A client ignores rules of a `kind` it doesn't know.
+
+### 17.1 Rulesets and assignments
+
+- A ruleset has an id (chosen by the dashboard), a `revision` (starts at 1,
+  bumped on every envelope write), `isDefault`, an `envelope` and the ids of its
+  devices. Assignment is many-to-many: a ruleset has any number of devices and
+  a device is in any number of rulesets.
+- Every account has exactly one **Default** ruleset. It starts with
+  `envelope: null`, meaning "no rules"; its first save writes an envelope. It
+  cannot be deleted. It is created with the account, and every device is
+  assigned to it when it registers (by either registration route); it can be
+  unassigned like any other ruleset. The migration that introduced rulesets
+  created an empty Default for every existing account and assigned every active
+  device to it, so nothing changes until a ruleset gets rules.
+- Assignments of a revoked device are removed. Rulesets and assignments are
+  removed with the account.
+- An account may have at most 100 rulesets, the Default included.
+
+### 17.2 HTTP API
+
+Under `/api/v1/rulesets`. Dashboard routes need a web session; those that
+change something also need the CSRF token (`docs/security.md` §2). A device
+token is not accepted on them, and a session is not accepted on `/self`.
+
+| Request | Who | What |
+|---------|-----|------|
+| `GET /` | session | `{ "rulesets": [{ id, revision, isDefault, envelope, deviceIds, createdAt, updatedAt }] }`, Default first. `deviceIds` lists active devices only. |
+| `POST /` | session + CSRF | Body `{ id, envelope }`. Creates revision 1. `409 ruleset_exists` if the id is taken (by any account), `409 ruleset_limit_reached`. `201`. |
+| `PUT /{id}` | session + CSRF | Header `If-Match: <revision>`, body `{ envelope }`. Replaces the envelope and bumps the revision, only if the stored revision is the one given; else `409 revision_conflict`. The envelope must have been encrypted as revision `If-Match + 1`. Returns the new row. |
+| `DELETE /{id}` | session + CSRF | `409 default_ruleset_protected` for the Default. `204`. |
+| `PUT /{id}/devices` | session + CSRF | Body `{ deviceIds }`: replaces the ruleset's device list with exactly these (at most 5000). Every id must be an active device of the account (`400` otherwise). Returns `{ deviceIds }`. Does not change the revision. |
+| `GET /self` | device | `{ "rulesets": [{ id, revision, isDefault, envelope }] }`: the rulesets this device is in, Default first. Possibly empty. |
+
+An envelope must be an object of the §6 shape (`v: 2`, `keyVersion`,
+`alg: "xchacha20poly1305"`, `nonce`, `ciphertext`) and at most 64 KiB; the
+server never reads the ciphertext. Dashboard writes are rate limited per account
+(60 a minute), a device's `/self` per device (60 a minute). Each successful
+write is audited (`ruleset_created`, `ruleset_updated`, `ruleset_assigned`,
+`ruleset_deleted`) without contents. After a change the server sends
+`{"type":"ruleset_changed"}` (§12) to the connected devices it affects: all of a
+ruleset's devices after an edit or delete, the devices added or removed after an
+assignment change.
+
+### 17.3 Combining rulesets
+
+A device's **effective rules** are the union of the rules of all its rulesets.
+
+- A URL is blocked if **any** `blockDomain`, `blockPattern` or `blockLocal` rule
+  matches it.
+- A bookmark node syncs if (1) it is **not** at or under any `excludeFolder`
+  folder (exclude always wins), **and** (2) either no ruleset has an
+  `includeFolder` rule, or it is at or under at least one `includeFolder`
+  folder.
+
+Address matching, the same in the extension and in the dashboard's "test a URL"
+box (both are tested against one set of vectors):
+
+- Domain and local rules look at the host of an `http`, `https`, `ftp`, `ws` or
+  `wss` address, lower case, without brackets or a trailing dot, an IDN as
+  punycode. A `blockDomain` rule is stored as a bare host and blocks it and its
+  subdomains on dot boundaries (`example.com` blocks `www.example.com`, not
+  `notexample.com`). Ports and credentials are ignored. The dashboard accepts
+  `https://www.Example.com/x`, `*.example.com` or `example.com:8080` and stores
+  the host.
+- `blockLocal` blocks `localhost`, `*.localhost`, `*.local`, `*.test`,
+  `*.internal`, `127.0.0.0/8`, `::1` and the private IPv4 ranges `10/8`,
+  `172.16/12` and `192.168/16`.
+- `blockPattern` is a regular expression (case-insensitive, unanchored) tested
+  against the first 2048 characters of the address as the browser reports it, so
+  it also applies to addresses without a host. A pattern that does not compile
+  matches nothing.
+- Domain rules do **not** apply to open-tab sync.
+
+### 17.4 What a device does with them
+
+Fetching. A device fetches `GET /rulesets/self` at start-up, on every periodic
+sync (at most once a minute) and on `ruleset_changed`. It decrypts each
+ruleset with the AAD of §6.5 built from the `id` and `revision` the server
+returned, so a ruleset swapped between ids, or an older revision served as
+current, is rejected. It compares `(id, revision)` with what it has and only
+decrypts what changed. Offline, it keeps the rulesets it last verified. A
+ruleset that fails to decrypt keeps its last verified version (and is reported
+in the popup); only a Default without an envelope is "no rules". A server
+without `rulesets` in `/version` means no rules; a server that has it but cannot
+be reached means the **first import waits**: after connecting, rulesets are
+fetched before the first bookmark backfill and history bulk import, and the
+import is delayed (retried on the next periodic sync and start) rather than run
+unfiltered. The rules are kept encrypted on the device, like they were sent.
+
+History. A visit to a blocked URL is not captured, not imported, and a visit
+another device synced for a blocked URL is not replayed into this browser's
+history. The bulk import does not read a blocked URL's visits. Its resume
+checkpoint (`historyBulkUploadedChunks`/`Visits`, and the older-history
+equivalent) is only valid under the rules it was taken under, so the device
+keeps a hash of the effective rules next to it (`historyBulkRulesetHash`,
+`historyOlderRulesetHash`); when the hash differs, the scope restarts from its
+first chunk instead of skipping by count. Chunk ids of a scope under non-empty
+rules include that hash, so the restarted chunks are not mistaken for
+duplicates of the earlier run's; with no rules the ids are what they always
+were. Open-tab sync is not filtered.
+
+Bookmarks. A node in an excluded subtree is **local-only** on this device:
+
+- Capture: created, changed, moved and removed nodes in it produce no
+  operation. A node moved *into* it stops being tracked; a node moved *out of*
+  it, with everything under it (minus folders that are themselves excluded), is
+  sent as `create` operations reusing the node's objectId if the account has it.
+- First import: the walk does not enter excluded subtrees; with include rules it
+  enters only included folders.
+- Remote apply: an operation whose object lies at or under an excluded folder
+  (judged by the account's recorded `move` chain, and for a move or create by
+  its destination) is resolved and recorded in field state like any other, but
+  nothing is changed in the browser. A move out of an excluded folder therefore
+  does apply. Deletes of excluded objects are not applied.
+- **Nothing is ever deleted by a rule.** Excluding a folder that already syncs
+  **freezes** it on that device: no more changes are sent or applied.
+- With include rules, an included folder whose parent is not synced here (its
+  parent is outside every included folder) is recorded and created under the
+  nearest synced folder or root instead, since no other device could place it
+  under a folder this device never sends.
+- Mass-delete detection and bookmark restore points (§16) ignore excluded
+  subtrees: they are not read into a point (a point is uploaded, so an excluded
+  folder must not be in one) and a restore never plans to remove them.
+
+Retroactive purge is out of scope (history visits have no delete operation,
+§6): rules are forward-only, and what was uploaded before a rule stays on the
+account.
+
+### 17.5 When the effective rules change
+
+Triggered by a ruleset edit, the device being added to or removed from a
+ruleset, or a ruleset being deleted. Newly excluded: capture and apply stop
+there; nothing is deleted. Newly allowed (an excluded folder lifted, an
+include rule added next to others, include rules removed): the device catches
+up, in the order of the first import — account bookmarks that are now in scope
+but have no node here are created from their recorded field state, linking to a
+node the browser already has with the same folder, title and URL instead of
+creating a second one; then local nodes still unlinked are uploaded. The folder
+rules the catch-up reached are recorded on the device, so an interrupted catch-up
+is repeated.
+
+### 17.6 Compatibility
+
+An extension older than the first release with rulesets does not fetch them and
+**does not enforce them**. The dashboard shows each device's extension version
+and flags assigned devices that are too old or whose version is unknown. The
+migration, the endpoints and the version flag are additive; an old extension
+keeps working against a server with rulesets.

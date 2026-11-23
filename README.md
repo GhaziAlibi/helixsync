@@ -7,97 +7,33 @@
 [![Firefox Add-ons](https://img.shields.io/badge/Firefox_Add--ons-HelixSync-FF7139?logo=firefoxbrowser&logoColor=white)](https://addons.mozilla.org/en-US/firefox/addon/helixsync/)
 
 **HelixSync** is a self-hosted, end-to-end encrypted sync server for your
-browser. It keeps bookmarks, history, and (optionally) open tabs, windows and
-tab groups in sync across your own devices, through a server you run
-yourself, with no Google, Microsoft, or other third-party account involved.
+browser. It syncs bookmarks, history, and (optionally) open tabs and tab
+groups across your devices, through a server you run yourself.
 
-It works with **Helium** and any other Chromium-based browser (Chrome, Brave,
-Edge, Vivaldi, ...) through a Manifest V3 extension (Chromium 116 or newer),
-and with **Firefox** desktop 159 or newer (see [`docs/firefox.md`](docs/firefox.md)).
+Works with **Helium** and other Chromium browsers (116+), and **Firefox**
+desktop (159+).
 
-- **You own the data.** Everything lives in a PostgreSQL database on your own
-  server.
-- **End-to-end encrypted.** The server only stores ciphertext; it cannot read
-  your bookmarks or history. Your password never leaves your devices.
-- **Multi-device.** Connect as many browsers as you like, and review or revoke
-  each one from the web dashboard.
-- **Real conflict resolution** instead of last-write-wins, built on an
-  operation log. See [`docs/protocol.md`](docs/protocol.md).
-- **Simple to run.** One `docker compose up` starts the API server, the
-  database and the web dashboard. No third-party service is involved.
+- **You own the data.** Everything lives in PostgreSQL on your server.
+- **End-to-end encrypted.** The server only stores ciphertext; your password
+  never leaves your devices.
+- **Multi-device.** Connect any number of browsers; manage them from the web
+  dashboard.
+- **Simple to run.** One `docker compose up`.
 
-Passwords, cookies and site sessions are deliberately **not** synced; use a
-password manager such as [Vaultwarden](https://github.com/dani-garcia/vaultwarden)
-for passwords.
+Passwords, cookies and site sessions are **not** synced.
 
 ## What it syncs
 
-| Data           | Status                                                                  |
-|----------------|--------------------------------------------------------------------------|
-| Bookmarks      | Full sync, including folders and moves                                   |
-| History        | Synced into the browser's own history; see [Limitations](#limitations) for what Chrome's API can't set |
-| Tabs / windows | Optional, restored automatically or after asking, as you choose          |
-| Tab groups     | Synced, including title, color and collapsed state                       |
-| Restore points | Encrypted snapshots of your bookmarks you can roll back to, in full or one folder |
-| Passwords      | Out of scope                                                             |
+| Data           | Status                                             |
+|----------------|----------------------------------------------------|
+| Bookmarks      | Full sync, including folders and moves             |
+| History        | Synced into the browser's own history ([limits](docs/limitations.md)) |
+| Tabs / windows | Optional                                           |
+| Tab groups     | Title, color and collapsed state                   |
+| Restore points | Encrypted bookmark snapshots you can roll back to  |
+| Passwords      | Out of scope                                       |
 
-## How it fits together
-
-```text
-   Browser #1 (extension) ─┐                         ┌─ Web dashboard (browser)
-                           │  HTTPS / WebSocket      │
-   Browser #2 (extension) ─┴──► Reverse proxy ◄──────┘
-                                (TLS, Caddy / nginx / Traefik ...)
-                                       │
-                                       ▼
-                         web (nginx: dashboard + /api proxy)
-                                       │
-                                       ▼
-                         server (Rust API + WebSocket)
-                                       │
-                                       ▼
-                                  PostgreSQL
-```
-
-| Directory     | What it is                                                              |
-|---------------|--------------------------------------------------------------------------|
-| `server/`     | Rust (axum, SQLx) sync API and WebSocket server, backed by PostgreSQL    |
-| `web/`        | React + TypeScript dashboard: accounts, devices, sync settings, security |
-| `extension/`  | TypeScript Manifest V3 browser extension, the sync client                |
-| `docs/`       | Architecture, protocol, encryption, security and deployment documents    |
-
-## Getting started
-
-Installing HelixSync takes four steps: run the server, create your account,
-install the extension, and connect your browser.
-
-### 1. Run the server
-
-You need [Docker](https://docs.docker.com/engine/install/) with the Compose
-plugin for options A to C (option E needs no Docker). Pick the deployment
-that suits you:
-
-| Option | Best for | Needs |
-|--------|----------|-------|
-| [A. Docker Compose, prebuilt images](#a-docker-compose-with-prebuilt-images-recommended) | Most self-hosters | Docker |
-| [B. Docker Compose, build from source](#b-docker-compose-built-from-source) | Trying local changes, auditing what you run | Docker, a repo checkout |
-| [C. Portainer or another stack UI](#c-portainer-or-another-stack-ui) | Managing containers through a UI, no checkout on the host | Docker, Portainer |
-| [D. Behind a reverse proxy with HTTPS](#d-reverse-proxy-with-https) | Any use from another machine | A domain name, a TLS proxy |
-| [E. Without Docker](#e-without-docker) | Bare-metal or VM installs | Rust, Node.js, PostgreSQL 16 |
-| [F. Local trial on `localhost`](#f-local-trial-on-localhost) | Looking around before committing | Docker |
-
-**HTTPS is required for anything but `localhost`.** The dashboard's session
-cookies are marked `Secure`, so a browser won't keep you signed in over plain
-HTTP, and the extension refuses a Server URL that isn't `https://` (only
-`localhost`, `127.0.0.1` and `[::1]` may use `http://`). Options A to C start
-an HTTP server on port 5173; put a TLS-terminating proxy in front of it
-(option D) before using it from another machine.
-
-#### Configure the secrets (options A to D)
-
-Every Compose-based option reads its settings from a `.env` file. Get the
-repository (for option C you only need the file contents, so you can skip the
-clone), create `.env` from the example, and fill in the two secrets:
+## Quick start
 
 ```bash
 git clone https://github.com/GhaziAlibi/helixsync.git
@@ -105,483 +41,37 @@ cd helixsync
 cp .env.example .env
 sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 32)|" .env
 sed -i "s|^JWT_SIGNING_KEY=.*|JWT_SIGNING_KEY=$(openssl rand -base64 48)|" .env
-```
-
-(That is GNU `sed`; on macOS use `sed -i ''`.) Then:
-
-- `POSTGRES_PASSWORD` protects the database. Use a hex value as above: the
-  password is embedded in a connection URL, where characters such as `/` or
-  `@` would break it. The server refuses to start while it still contains the
-  placeholder text.
-- `JWT_SIGNING_KEY` signs device access tokens. The server refuses to start
-  while it still contains the placeholder text (`change-me` or `replace-me`).
-  Keep it stable: changing it invalidates every outstanding access token
-  (refresh tokens are unaffected).
-- Set `CORS_ALLOWED_ORIGINS` to your public dashboard origin, for example
-  `https://sync.example.com`. Only requests from a different origin are
-  checked against it; with the default single-origin setup it is not used.
-
-The other variables are optional; see [Configuration](#configuration).
-
-#### A. Docker Compose with prebuilt images (recommended)
-
-Pulls the images published for every release to GitHub Container Registry, so
-nothing is compiled on your machine.
-
-```bash
-# in the helixsync directory, with .env created as above:
-# set HELIXSYNC_VERSION in .env to a released version, for example
-#   HELIXSYNC_VERSION=1.0.0
+# set HELIXSYNC_VERSION in .env to a released version, e.g. 1.1.1
 docker compose -f docker-compose.prod.yml up -d
 ```
 
-`HELIXSYNC_VERSION` is required: the stack refuses to start without it rather
-than following a moving `latest` tag. See
-[Releases](https://github.com/GhaziAlibi/helixsync/releases) for the available
-versions. Database migrations run automatically when the server starts.
-
-#### B. Docker Compose, built from source
-
-Builds the `server` and `web` images locally from the repository:
-
-```bash
-# in the helixsync directory, with .env created as above
-docker compose up -d --build
-```
-
-The first build takes a few minutes (it compiles the Rust server and builds
-the dashboard). The dashboard is then at `http://localhost:5173`.
-
-#### C. Portainer or another stack UI
-
-[`docker-compose.prod.yml`](docker-compose.prod.yml) is self-contained and
-pulls prebuilt images, so you can paste it into Portainer's **Stacks → Add
-stack → Web editor** with no files on the host. Add the variables from
-[`.env.example`](.env.example) (at least `POSTGRES_PASSWORD`, `JWT_SIGNING_KEY`,
-`CORS_ALLOWED_ORIGINS` and `HELIXSYNC_VERSION`) in the stack's environment
-section, and deploy. Any other tool that accepts a Compose file works the same
-way.
-
-#### D. Reverse proxy with HTTPS
-
-Options A to C leave `web` listening on `WEB_PORT` (5173). To use HelixSync
-from other machines, put a TLS-terminating proxy in front of it. The proxy
-must forward WebSocket upgrades (the extension uses one) and pass the client's
-scheme (`X-Forwarded-Proto`) and address (`X-Forwarded-For`) on.
-
-[Caddy](https://caddyserver.com/) does all of that by default. If it runs in
-the same Docker network as `web`:
-
-```caddyfile
-sync.example.com {
-    reverse_proxy web:80
-}
-```
-
-For nginx:
-
-```nginx
-location / {
-    proxy_pass http://web:80;
-    proxy_http_version 1.1;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $remote_addr;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-
-    # nginx's default request limit (1 MB) is far below the server's upload
-    # limit, so raise it, or large history uploads fail with 413.
-    client_max_body_size 150m;
-    proxy_read_timeout 3600s;
-}
-```
-
-Traefik and other proxies need the same three things (and, like nginx, must
-allow large request bodies). Details, including how
-real client IPs reach the rate limiter and when to narrow
-`WEB_TRUSTED_PROXY_CIDRS`, are in [`docs/deployment.md`](docs/deployment.md).
-
-#### E. Without Docker
-
-Run the server binary and PostgreSQL directly, and serve the dashboard's
-static files from a web server of your choice. You need a stable Rust
-toolchain with a C compiler, Node.js 22, and PostgreSQL 16.
-
-```bash
-git clone https://github.com/GhaziAlibi/helixsync.git
-cd helixsync
-
-# 1. Database (run as the PostgreSQL superuser; use a plain alphanumeric password)
-sudo -u postgres createuser helixsync
-sudo -u postgres createdb -O helixsync helixsync
-sudo -u postgres psql -c "ALTER ROLE helixsync PASSWORD 'choose-a-password'"
-
-# 2. Server. Builds offline from the committed query cache: no database is needed to compile.
-cd server
-SQLX_OFFLINE=true cargo build --release --locked
-
-# 3. Dashboard: builds static files into web/dist
-cd ../web
-npm ci
-npm run build
-```
-
-Configure the server with a `.env` file in the directory you run it from (it
-is read at startup and is git-ignored):
-
-```bash
-cd ../server
-cp .env.example .env
-chmod 600 .env
-```
-
-Edit `.env`: set `DATABASE_URL` to
-`postgres://helixsync:choose-a-password@127.0.0.1:5432/helixsync`, set
-`JWT_SIGNING_KEY` to the output of `openssl rand -base64 48`, and add
-`BEHIND_PROXY=true` and `CORS_ALLOWED_ORIGINS=https://sync.example.com`. Keep
-`BIND_ADDR=127.0.0.1:8080`, so the proxy below is the only way in. Then start
-it:
-
-```bash
-./target/release/helixsync-server
-```
-
-The server applies its database migrations itself on startup. To keep it
-running, use a service manager; a systemd unit is in
-[`docs/deployment.md`](docs/deployment.md#running-without-docker).
-
-Finally, serve `web/dist` and send `/api/` to the server from one origin, with
-TLS. For example with Caddy, after copying `web/dist` to `/var/www/helixsync`:
-
-```caddyfile
-sync.example.com {
-    handle /api/* {
-        reverse_proxy 127.0.0.1:8080 {
-            # the server trusts this header for rate limiting (BEHIND_PROXY=true)
-            header_up X-Real-IP {remote_host}
-        }
-    }
-    handle {
-        root * /var/www/helixsync
-        try_files {path} /index.html
-        file_server
-    }
-}
-```
-
-Set `BEHIND_PROXY=true` only when a proxy you control is the sole way to reach
-the server, as here. This setup doesn't get the security headers that the
-`web` image's nginx adds; copy them from
-[`web/security-headers.conf`](web/security-headers.conf) into your proxy.
-
-#### F. Local trial on `localhost`
-
-To look around without a domain or certificate, use option B and open
-`http://localhost:5173`. In the extension, use `http://localhost:5173` as the
-Server URL; loopback addresses are the one case where plain HTTP is allowed.
-
-Compose publishes `WEB_PORT` on all network interfaces by default. On a shared
-network, change the `web` service's port mapping to
-`"127.0.0.1:${WEB_PORT:-5173}:80"` so only your machine can reach it.
-
-### 2. Create your account
-
-Open the dashboard in your browser (`https://sync.example.com`, or
-`http://localhost:5173` for a trial) and choose **Register**. Enter an email
-and a password. The account key that encrypts your data is created in your
-browser and locked with this password, so neither the server operator nor the
-developer can reset it or read your data without it.
-
-The dashboard then shows your **recovery code**, once. Save it somewhere safe
-and offline (print it, or keep it in a password manager): if you forget your
-password, it's the only way to set a new one without losing your data.
-
-Registration is open by default. **On any instance reachable from the
-internet, close it once your accounts exist** (see
-[Lock it down](#4-connect-your-browser-and-lock-the-server-down)).
-
-### 3. Install the extension
-
-Pick one:
-
-- **Chrome Web Store:**
-  [HelixSync](https://chromewebstore.google.com/detail/helixsync/pkklkldoippchkhpokglpolepbcbjdfk).
-- **Firefox Add-ons:**
-  [HelixSync](https://addons.mozilla.org/en-US/firefox/addon/helixsync/).
-- **Prebuilt zip:** download `helixsync-extension-<version>.zip` from the
-  [Releases](https://github.com/GhaziAlibi/helixsync/releases) page, unzip it,
-  open `chrome://extensions` (or your browser's equivalent), enable
-  **Developer mode**, choose **Load unpacked**, and select the unzipped folder.
-- **From source:**
-
-  ```bash
-  cd extension
-  npm ci
-  npm run build
-  ```
-
-  Then load `extension/dist/` as an unpacked extension, as above.
-- **Firefox (from source):** build with `npm run build:firefox` and load it as described
-  in [`docs/firefox.md`](docs/firefox.md).
-
-### 4. Connect your browser, and lock the server down
-
-1. Click the HelixSync toolbar icon. In **Connect this browser**, enter the
-   **Server URL** (the same origin as your dashboard, for example
-   `https://sync.example.com`), your **Email**, your **Password**, and a
-   **Device name** for this browser.
-2. Click **Connect**. The browser asks for permission to talk to that one
-   server address; allow it. The extension requests access to that origin only,
-   never to all sites.
-3. Repeat on every browser you want to sync. Each one signs in with the same
-   email and password and ends up with the same account key. Instead of the
-   password, you can click **Log in with device instead** and approve the
-   request from the popup of a browser that's already connected, after
-   checking that both show the same phrase.
-4. **Close registration.** Once your accounts exist, set
-   `ALLOW_REGISTRATION=false` in `.env` and restart the server
-   (`docker compose up -d`, or restart the process for option E). Existing
-   accounts, logins and devices are unaffected.
-
-Initial sync starts right away. Large histories are uploaded in chunks in the
-background, so the first full sync of a big profile can take a while.
-
-## Using HelixSync
-
-**Extension popup.** The popup is the whole extension UI. It shows the sync
-status and when it last synced. The gear icon opens the settings once connected: which data to sync
-(bookmarks, history, tabs, tab groups), the tab restore policy (disabled, ask
-before restoring, or restore automatically), and history retention (7 days to
-unlimited). **Disconnect** revokes the device on the server and removes its
-local data. Under **Account**, **Change on the web** opens the dashboard's
-password form. When another browser or the dashboard asks to log in with this
-device, the toolbar icon shows **!** and the popup lists the request with its
-phrase, to approve or deny.
-
-**Restore points.** The clock icon in the popup lists the saved copies of your
-bookmarks. Your browsers make one daily, and before a restore, a first import,
-a full resync, or a large deletion; **Create restore point** makes one on
-demand. **Restore…** rolls back everything or one folder: *Merge* brings back
-what is missing and undoes edits without deleting anything, *Exact* also
-removes bookmarks the point doesn't have. A preview shows what would change,
-and a copy of your current bookmarks is saved first, so a restore can itself be
-undone. Only pinned points are kept for good: unpinned ones are removed
-oldest first when space runs out, and after 90 days. See
-[`docs/protocol.md`](docs/protocol.md) §16.
-
-**Web dashboard.**
-
-| Page | What you can do |
-|------|-----------------|
-| Dashboard | Connection and sync health, last sync, device count, how many bookmarks, history items and tabs are synced, storage used against your limit, and recent devices |
-| Vault | Read-only view of your bookmarks (folder tree), history (newest first) and open tabs (by device, window and tab group), with one search box. For a phone or a locked-down computer where the extension can't be installed; installable as an app (PWA). Decrypted in the browser's memory only: after a reload, 5 minutes idle or logout it asks for your password again. Nothing can be changed from it |
-| Devices | List, rename and revoke connected browsers |
-| Synchronization | The same sync settings as the popup, kept in one place |
-| Restore points | See, pin and delete your bookmark restore points, switch automatic ones off, and see the space they use. Restoring is done in the extension |
-| Security | Check encryption status, review and revoke web sessions, change your password, get a new recovery code, delete your account |
-
-**Changing your password** re-wraps your account key under the new password.
-Nothing already synced becomes unreadable; each browser simply signs in again
-with the new password.
-
-**Forgot your password?** On the sign-in page, enter your email, your
-recovery code and a new password. Your data stays readable, every web session
-is signed out, and you get a new recovery code (each one works once). To just
-get into the dashboard, **Log in with a device** lets a connected browser
-approve you. If you lost the recovery code as well, the server's operator can
-delete the account with `helixsync-server delete-account <email>` so you can
-register again; your browsers upload their bookmarks and history again when
-you reconnect them. See [`docs/encryption.md`](docs/encryption.md) §9.
-
-**Deleting your account** (Security → Danger zone) permanently removes the
-account and everything stored under it, and connected browsers stop syncing.
-It asks for your password and for you to type `DELETE`.
-
-## Configuration
-
-Compose reads these from `.env` (see [`.env.example`](.env.example), which
-documents each one; every setting the server reads is listed in
-[`docs/deployment.md`](docs/deployment.md#configuration-reference)). The ones
-you are most likely to touch:
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `POSTGRES_PASSWORD` | none, required | Database password |
-| `JWT_SIGNING_KEY` | none, required | Signs device access tokens; at least 32 characters, never a placeholder |
-| `HELIXSYNC_VERSION` | none, required for `docker-compose.prod.yml` | Released image version to run |
-| `CORS_ALLOWED_ORIGINS` | empty | Origins allowed to call the API from a different origin |
-| `ALLOW_REGISTRATION` | `true` | Set to `false` to close sign-ups once your accounts exist |
-| `REQUIRE_ENCRYPTION` | `true` | Reject unencrypted sync data. Leave it on for real data |
-| `MAX_ACCOUNT_STORAGE_BYTES` | 5 GiB | Cap on stored sync data per account |
-| `WEB_PORT` | `5173` | Host port the dashboard listens on |
-| `WEB_TRUSTED_PROXY_CIDRS` | private ranges | Proxies whose `X-Forwarded-For` is trusted; narrow it if `web` is published directly |
-| `LOG_FORMAT` | `text` | `json` writes one JSON object per log line, for a log collector |
-
-Running the server outside Docker uses the same names plus `DATABASE_URL`,
-`BIND_ADDR` (default `127.0.0.1:8080`) and `BEHIND_PROXY`; see
-[`server/.env.example`](server/.env.example) and
-[`docs/deployment.md`](docs/deployment.md). The server checks its settings at
-startup and refuses to start, naming the variable, when one is invalid.
-
-## Before you expose it to the internet
-
-- [ ] **HTTPS** through a reverse proxy in front of `web`. Nothing here works
-  properly over plain HTTP.
-- [ ] Strong, unique **`POSTGRES_PASSWORD`** and **`JWT_SIGNING_KEY`**.
-- [ ] **`REQUIRE_ENCRYPTION`** left at its default (`true`).
-- [ ] **`ALLOW_REGISTRATION=false`** once your accounts exist, or anyone who
-  finds the URL can sign up and store up to `MAX_ACCOUNT_STORAGE_BYTES` (5 GiB
-  by default) each on your server.
-- [ ] **Backups** of the database, copied off the host, with a tested restore
-  (see below). Backups don't help with a forgotten password; only the user's
-  recovery code does.
-- [ ] **`HELIXSYNC_VERSION`** pinned to a released version when using
-  `docker-compose.prod.yml`, and updated deliberately.
-- [ ] If `web` is published directly rather than reached only through your
-  proxy on the Docker network, narrow **`WEB_TRUSTED_PROXY_CIDRS`**, or bind
-  `WEB_PORT` to loopback.
-
-## Updating and backups
-
-Update by choosing a newer `HELIXSYNC_VERSION` in `.env` (prebuilt images) and
-restarting:
-
-```bash
-docker compose -f docker-compose.prod.yml pull
-docker compose -f docker-compose.prod.yml up -d
-```
-
-If you build from source, pull the repository and rebuild instead
-(`git pull && docker compose up -d --build`).
-
-Read the [changelog](CHANGELOG.md) first: a release can contain breaking
-changes, and its upgrade notes say what to do. Migrations run automatically.
-
-**Backups.** The server can write a scheduled, encrypted dump of the whole
-database into the `helix-backup` volume. It is on by default and starts as
-soon as you set a key in `.env` (until then the server logs a warning and
-writes nothing):
-
-```bash
-BACKUP_ENCRYPTION_KEY=...   # openssl rand -base64 48; keep a copy outside the server
-```
-
-By default it runs every day at 03:00 UTC and keeps the newest 7 scheduled
-files (`BACKUP_CRON`, `BACKUP_KEEP_LAST`; manual and pre-restore files are kept
-until you delete them). Copying the files off the host is up to
-you. Restore is a command on the host, with the server stopped:
-
-```bash
-docker compose stop server
-docker compose run --rm server restore-backup      # newest backup, or name a file
-docker compose up -d server
-```
-
-`backup-now` and `list-backups` work the same way. The files hold each
-account's key only in wrapped form, so they are useless without the account
-password, but they also contain account emails and device names: keep them as
-private as the database. Details, restore steps and a disaster recovery
-checklist are in [`docs/deployment.md`](docs/deployment.md#backups). Plain
-`pg_dump` (`docker compose exec postgres pg_dump -U helixsync helixsync`) still
-works too.
-
-## Troubleshooting
-
-| Symptom | Cause and fix |
-|---------|---------------|
-| `server` exits at startup mentioning `JWT_SIGNING_KEY` | The key is missing, shorter than 32 characters, or still contains `change-me` / `replace-me`. Generate one with `openssl rand -base64 48`. |
-| `server` exits at startup mentioning `DATABASE_URL` and a placeholder | `POSTGRES_PASSWORD` still has the `.env.example` value. Set it with `openssl rand -hex 32`. PostgreSQL keeps the password it was first started with, so if the stack already ran once, also run `docker compose exec postgres psql -U helixsync -c "ALTER ROLE helixsync PASSWORD '<the new value>'"`. |
-| `server` exits at startup naming another variable | Its value doesn't parse or is out of range; the message says what is expected. See [`docs/deployment.md`](docs/deployment.md#configuration-reference). |
-| `docker compose` says `HELIXSYNC_VERSION is missing a value` | `docker-compose.prod.yml` needs a released version in `.env`, for example `HELIXSYNC_VERSION=1.0.0`. |
-| The extension says the Server URL must use `https://` | Only `localhost`, `127.0.0.1` and `[::1]` may use plain HTTP. Put a TLS proxy in front of `web` (option D). |
-| The dashboard signs you out immediately, or warns that the page is not using HTTPS | Session cookies are `Secure`; load the dashboard over HTTPS (or from `localhost`). |
-| Registering returns `registration_disabled` | The server has `ALLOW_REGISTRATION=false`. Set it to `true` temporarily to add an account. |
-| A user forgot their password | They reset it with their recovery code (**Forgot your password?** on the sign-in page). Without the code, run `docker compose exec server /app/helixsync-server delete-account <email>` once you've checked who's asking, and they register again. |
-| The extension shows an "update the HelixSync extension" error | It met sync data written in a newer format. Update the extension; nothing is lost, and it retries automatically. |
-| Everyone gets `429` rate-limit errors after one client misbehaves | The rate limiter sees all clients as the proxy's address. Make sure your proxy sets `X-Forwarded-For`, and see [`docs/deployment.md`](docs/deployment.md#real-client-ips-behind-that-reverse-proxy). |
-
-For anything else, check `docker compose logs server` and the extension's
-service-worker console, then open an
-[issue](https://github.com/GhaziAlibi/helixsync/issues) (without secrets or
-synced data in it).
-
-## Limitations
-
-- **History from other devices arrives dated when it was synced, without a
-  title.** HelixSync adds each synced URL to the browser's own history, so it
-  shows up in `chrome://history` and address-bar suggestions. Chrome's
-  extension APIs can't write a visit with a historical timestamp or title
-  (`chrome.history.addUrl` can only add "visited now", with no title), so the
-  entry is dated when it was synced and stays untitled until you open the page.
-  Each distinct `http`/`https` URL is added once, and a URL your browser
-  already has is left alone. Every visit is read, including a whole first
-  import, so a large profile takes a while: the work is paced to keep CPU use
-  low.
-- **Retention buckets are hourly, not exact.** The dashboard's "History items
-  synced" count is tracked in per-hour buckets, so a visit right at the edge of
-  your retention window may count for up to an hour longer or shorter than the
-  exact cutoff.
-- **A URL whose only visits are hidden redirect hops can't always be
-  counted.** Chrome's history APIs don't expose every intermediate redirect
-  visit to extensions, so a small number of such visits may not be enumerable
-  during import.
-- **Losing both your password and your recovery code loses your data.** Your
-  data is encrypted with a random account key that only your password or your
-  recovery code can unlock; the server never sees either, so neither the
-  operator nor the developer can reset them or get your data back. The operator
-  can only delete the account so you can start over. Keep the recovery code
-  private: like the password, it unlocks everything. See
-  [`docs/encryption.md`](docs/encryption.md) §9.
-- **One server process per database.** Rate limits, short-lived auth caches
-  and WebSocket notifications are kept in the server's memory, so running
-  several replicas behind a load balancer isn't supported. See
-  [`docs/deployment.md`](docs/deployment.md).
-- **Use the web dashboard only on a server you trust.** Its code is served by
-  that server, so a compromised server could capture the password you type
-  there, and, since the Vault page decrypts your bookmarks, history and tabs in
-  the browser, read them too. The extension is installed separately and isn't
-  affected. See [`docs/security.md`](docs/security.md).
-- **The Vault can miss items changed before the server was updated.** The
-  snapshot now carries the earlier operations a bookmark or tab needs, so a
-  moved or renamed bookmark shows in full. Objects that were compacted into a
-  stored snapshot by an older server lost those earlier operations; the Vault
-  leaves such an item out and says how many.
-- **Tab groups need a permission in each browser.** Turning on Tab Groups in a
-  browser's popup asks for it; when the setting was turned on elsewhere, open
-  the popup's settings and press Save. Tab, tab group and restore behavior is
-  tested end to end in Chromium and Helium (`CONTRIBUTING.md`); reports from
-  other Chromium builds are welcome.
+Then put HTTPS in front of it, register in the dashboard, install the
+extension and connect. Full steps: [Installation](docs/installation.md).
 
 ## Documentation
 
 | Document | Contents |
 |----------|----------|
-| [`docs/deployment.md`](docs/deployment.md) | Operating a server: reverse proxy, real client IPs, configuration, backups, migrations, health checks, account removal |
-| [`docs/architecture.md`](docs/architecture.md) | Components, data flow and deployment topology |
-| [`docs/protocol.md`](docs/protocol.md) | The sync protocol and REST/WebSocket API, the source of truth for sync behavior |
-| [`docs/encryption.md`](docs/encryption.md) | Key hierarchy, key derivation, the encryption envelope and its limits |
-| [`docs/security.md`](docs/security.md) | Security model, threat model, hardening and known limitations |
-| [`docs/releasing.md`](docs/releasing.md) | How releases are built and published (maintainers) |
-| [`PRIVACY.md`](PRIVACY.md) | What the extension accesses and where data goes |
-| [`SECURITY.md`](SECURITY.md) | How to report a vulnerability privately |
-| [`ACCESSIBILITY.md`](ACCESSIBILITY.md) | Accessibility goals, known limitations, how to report a barrier |
-| [`CHANGELOG.md`](CHANGELOG.md) | Release notes and upgrade notes |
+| [Installation](docs/installation.md) | Server setup, account, extension, configuration, updates and backups |
+| [Usage](docs/usage.md) | Extension popup, restore points, rulesets, web dashboard, passwords |
+| [Troubleshooting](docs/troubleshooting.md) | Common errors and fixes |
+| [Limitations](docs/limitations.md) | Known limits |
+| [Deployment](docs/deployment.md) | Operating a server: proxy, config reference, backups, migrations |
+| [Architecture](docs/architecture.md) | Components, data flow, topology |
+| [Protocol](docs/protocol.md) | Sync protocol and REST/WebSocket API |
+| [Encryption](docs/encryption.md) | Key hierarchy and encryption envelope |
+| [Security](docs/security.md) | Threat model and hardening |
+| [Firefox](docs/firefox.md) · [Safari](docs/safari.md) | Browser-specific notes |
+| [Releasing](docs/releasing.md) | Release process (maintainers) |
+| [Privacy](PRIVACY.md) · [Changelog](CHANGELOG.md) · [Accessibility](ACCESSIBILITY.md) | |
 
 ## Contributing
 
-Contributions are welcome. [`CONTRIBUTING.md`](CONTRIBUTING.md) covers the
-development setup for each component, the checks CI runs, and how to propose a
-change; please also read the [Code of Conduct](CODE_OF_CONDUCT.md). Read the
-protocol and encryption documents before sending a pull request that touches
-sync behavior.
-
-Found a security problem? Please report it privately, as described in
-[`SECURITY.md`](SECURITY.md), rather than in a public issue.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
+[Code of Conduct](CODE_OF_CONDUCT.md). Report security issues privately as
+described in [`SECURITY.md`](SECURITY.md).
 
 ## License
 
-[MIT](LICENSE). Each build carries the licenses of the third-party code it
-includes, in `THIRD_PARTY_LICENSES.txt`: at `/app/` in the server image, at the
-root of the dashboard (`https://sync.example.com/THIRD_PARTY_LICENSES.txt`),
-and in the extension zip.
+[MIT](LICENSE). Third-party licenses ship in `THIRD_PARTY_LICENSES.txt` in
+each build.

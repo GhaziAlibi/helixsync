@@ -1,6 +1,6 @@
 # HelixSync Privacy Policy
 
-_Last updated: 2026-11-12_
+_Last updated: 2026-11-22_
 
 HelixSync is a self-hosted browser extension. There is no HelixSync-operated
 service, and the developer does not collect, receive, or have access to any
@@ -60,6 +60,15 @@ The server you configure stores the following in its PostgreSQL database:
   stored: the server passes it on only if the other device is connected at that
   moment, and keeps nothing afterwards (no record, no log entry). The server can
   see that one of your devices sent something to another, and when.
+- **Rulesets:** the selective-sync rulesets you make in the dashboard (folders
+  to keep out of sync, domains and address patterns to keep out of history). They
+  are encrypted in your browser before they are sent: the server cannot read a
+  ruleset's name or rules. It stores beside each one, unencrypted, its random
+  identifier, a revision number, when it changed, its size, whether it is the
+  account's default one, and which of your devices it is assigned to. Your devices
+  keep the rulesets assigned to them, still encrypted, in their local storage, and
+  apply them on the device. Rules only stop future data from being synced; they
+  delete nothing.
 - **Settings:** which data you sync, your tab restore policy, your history
   retention and whether automatic restore points are on.
 - **Audit log:** security events such as sign-ins, device changes and password

@@ -4,7 +4,7 @@ This guide covers running and operating a HelixSync server: deployment
 topologies, the reverse proxy, configuration, backups and day-to-day
 operations. The step-by-step install, including the choice between prebuilt
 images, building from source, Portainer and a non-Docker install, is in the
-[README](../README.md#getting-started).
+[installation guide](installation.md).
 
 ## Quick start (Docker Compose)
 
@@ -275,8 +275,8 @@ change a query, regenerate the cache with `cargo sqlx prepare` (see
 ## Running without Docker
 
 The server is a single binary and the dashboard is a folder of static files, so
-Docker is optional. The README walks through building both
-([option E](../README.md#e-without-docker)); this section covers keeping the
+Docker is optional. The installation guide walks through building both
+([option E](installation.md#e-without-docker)); this section covers keeping the
 server running and what the proxy in front of it has to do.
 
 **Server as a service.** Install the binary and keep its settings in a file only
@@ -333,7 +333,7 @@ so one proxy in front of both:
   when the proxy is the sole way to reach the server, and bind the server to
   loopback so that holds.
 
-The README has a Caddy example that does all of this. The `web` image's
+The [installation guide](installation.md#e-without-docker) has a Caddy example that does all of this. The `web` image's
 [`nginx.conf`](../web/nginx.conf) is a complete nginx equivalent: replace
 `server:8080` with your server's address.
 
