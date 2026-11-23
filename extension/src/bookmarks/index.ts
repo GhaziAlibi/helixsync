@@ -1231,6 +1231,23 @@ async function findUnlinkedMatch(parentChromiumId: string, p: BookmarkPayload): 
   return candidates.find((node) => !linked.has(node.id))?.id;
 }
 
+/** While linking is on, a create a folder rule leaves out of this device
+ * still links to a matching node this browser already has, without touching
+ * it. The first import then knows that node is the account's (excluded)
+ * folder and keeps it out rather than uploading a second one, and lifting the
+ * rule later merges the two instead of leaving both. */
+async function linkExcludedCreate(objectId: string, p: BookmarkPayload, prefetched?: Map<string, string>): Promise<void> {
+  if (!linkExistingBookmarks || !p.parent) return;
+  const ids = await chromiumIdsFor([objectId, p.parent]);
+  if (ids.has(objectId)) return;
+  const parentChromiumId = ids.get(p.parent);
+  if (!parentChromiumId) return;
+  const linkedId = await findUnlinkedMatch(parentChromiumId, p);
+  if (!linkedId) return;
+  await establishMapping(MAP_TYPE, linkedId, objectId);
+  prefetched?.set(objectId, linkedId);
+}
+
 function deferUntilParentMaterializes(objectId: string, objectType: ObjectType, parent: string): Promise<void> {
   return putDeferredMaterialization({
     objectId,
@@ -1737,6 +1754,7 @@ async function applyRemote(op: OperationOut, payload: unknown): Promise<void> {
       kind === "create" || kind === "move" ? ((payload as BookmarkPayload | BookmarkMove).parent ?? null) : undefined;
     if (await remoteExcluded(rr, op.objectId, target)) {
       await deleteDeferredMaterialization(op.objectId);
+      if (kind === "create" && res[0]?.applied) await linkExcludedCreate(op.objectId, payload as BookmarkPayload);
       return;
     }
   }
@@ -1874,6 +1892,7 @@ async function applyRemoteBatch(items: Array<{ op: OperationOut; payload: unknow
           // Left out of this device: recorded, not applied, and nothing local
           // is touched (a folder that was synced stays as it is).
           await deleteDeferredMaterialization(op.objectId);
+          if (kind === "create" && res[0]?.applied) await linkExcludedCreate(op.objectId, payload as BookmarkPayload, prefetched);
           await maybeYield();
           continue;
         }

@@ -43,6 +43,7 @@ export default function RulesetEditor({
   onChanged,
   onCreated,
   onDeleted,
+  justCreated = false,
 }: {
   ruleset: DecryptedRuleset | null;
   accountKey: Uint8Array;
@@ -54,6 +55,8 @@ export default function RulesetEditor({
   onChanged: () => Promise<void>;
   onCreated: (id: string) => void;
   onDeleted: () => void;
+  /** Mounted for a ruleset just created in the editor before it: shows "Saved.". */
+  justCreated?: boolean;
 }) {
   const { t } = useTranslation();
   const isNew = ruleset === null;
@@ -65,7 +68,7 @@ export default function RulesetEditor({
   const [selected, setSelected] = useState<Set<string>>(new Set(ruleset?.deviceIds ?? []));
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(justCreated ? t("rulesets.saved") : null);
   const [busy, setBusy] = useState(false);
 
   const [kind, setKind] = useState<RuleKind>("blockDomain");
@@ -79,7 +82,7 @@ export default function RulesetEditor({
     setSelected(new Set(ruleset?.deviceIds ?? []));
     setError(null);
     setConflict(false);
-    setStatus(null);
+    // Not the status: a save reloads the list, and its "Saved." must stay.
     setText("");
     setRuleError(null);
   }, [ruleset]);

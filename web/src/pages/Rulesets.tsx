@@ -21,6 +21,12 @@ function RulesetsView() {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("rulesets");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // The ruleset just created, whose editor opens showing "Saved.".
+  const [createdId, setCreatedId] = useState<string | null>(null);
+  const select = (id: string | null) => {
+    setCreatedId(null);
+    setSelectedId(id);
+  };
 
   // The folder picker reads the decrypted bookmarks.
   useEffect(() => {
@@ -100,7 +106,7 @@ function RulesetsView() {
                 <li key={r.id} className="border-t border-slate-100 first:border-t-0">
                   <button
                     type="button"
-                    onClick={() => setSelectedId(r.id)}
+                    onClick={() => select(r.id)}
                     aria-pressed={r.id === selectedId}
                     className={`block w-full px-4 py-3 text-start hover:bg-slate-50 ${r.id === selectedId ? "bg-slate-100" : ""}`}
                   >
@@ -116,7 +122,7 @@ function RulesetsView() {
             </ul>
             <button
               type="button"
-              onClick={() => setSelectedId(NEW)}
+              onClick={() => select(NEW)}
               className="rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50"
             >
               {t("rulesets.newRuleset")}
@@ -132,8 +138,12 @@ function RulesetsView() {
                 foldersLoading={vault.status === "idle" || vault.status === "loading"}
                 devices={devices}
                 onChanged={reload}
-                onCreated={setSelectedId}
-                onDeleted={() => setSelectedId(null)}
+                onCreated={(id) => {
+                  setCreatedId(id);
+                  setSelectedId(id);
+                }}
+                onDeleted={() => select(null)}
+                justCreated={createdId !== null && selectedId === createdId}
               />
             )}
           </div>

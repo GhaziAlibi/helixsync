@@ -499,6 +499,61 @@ describe("remote apply", () => {
   });
 });
 
+describe("first connect: a local folder like an excluded one", () => {
+  // B has its own "Personal" before connecting; the account's Personal is
+  // excluded on B. B's folder must stay out, and lifting the rule must leave
+  // one Personal, not two.
+  let personal: string;
+  let mine: string;
+  beforeEach(() => {
+    initialImportCompletedAt = undefined;
+    personal = fake.add("1", "Personal");
+    mine = fake.add(personal, "mine", "https://mine.test/");
+    rules = folderRules(exclude("O-personal"));
+  });
+
+  async function download(items: Array<{ op: OperationOut; payload: unknown }>) {
+    bookmarks.setLinkExistingBookmarks(true);
+    try {
+      await applyRemoteBatch(items);
+    } finally {
+      bookmarks.setLinkExistingBookmarks(false);
+    }
+  }
+
+  it("links the account's excluded folder to the local one, touching nothing", async () => {
+    const before = fake.count();
+    await download([remoteCreate("O-personal", "Personal", null, BAR_OBJ), remoteCreate("R-theirs", "theirs", "https://theirs.test/", "O-personal")]);
+    expect(mappings.get(personal)).toBe("O-personal");
+    expect(fake.count()).toBe(before);
+    expect(fake.titles(personal)).toEqual(["mine"]);
+  });
+
+  it("the first import then keeps the local folder out", async () => {
+    await download([remoteCreate("O-personal", "Personal", null, BAR_OBJ)]);
+    await bookmarks.backfillExisting();
+    expect(ops).toEqual([]);
+    expect(mappings.has(mine)).toBe(false);
+  });
+
+  it("lifting the rule merges into the one folder", async () => {
+    await download([remoteCreate("O-personal", "Personal", null, BAR_OBJ), remoteCreate("R-theirs", "theirs", "https://theirs.test/", "O-personal")]);
+    await bookmarks.backfillExisting();
+    initialImportCompletedAt = "2026-01-01T00:00:00Z";
+    appliedFolderRules = { excluded: ["O-personal"], included: [] };
+    rules = combineRulesets([]);
+    await bookmarks.reconcileFolderRules();
+    expect(fake.titles("1").filter((t) => t === "Personal")).toHaveLength(1);
+    expect(fake.titles(personal).sort()).toEqual(["mine", "theirs"]);
+    expect(ops.map((o) => [o.payload.title, o.payload.parent])).toEqual([["mine", "O-personal"]]);
+  });
+
+  it("links nothing outside a download (linking off)", async () => {
+    await applyRemoteBatch([remoteCreate("O-personal", "Personal", null, BAR_OBJ)]);
+    expect(mappings.has(personal)).toBe(false);
+  });
+});
+
 describe("rules changed", () => {
   it("lifting an exclusion creates what the account has there, linking to a matching local node, and uploads the rest", async () => {
     const personal = fake.add("1", "Personal");
