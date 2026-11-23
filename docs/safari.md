@@ -91,8 +91,8 @@ extension.
    [are not encrypted](https://support.apple.com/guide/safari/ibrwebf10132/mac),
    so delete the `.zip` and the unzipped folder once the import is done.
 4. **Install and connect HelixSync.** Follow
-   [Install the extension](../README.md#3-install-the-extension) and
-   [Connect your browser](../README.md#4-connect-your-browser-and-lock-the-server-down).
+   [Install the extension](installation.md#3-install-the-extension) and
+   [Connect your browser](installation.md#4-connect-your-browser-and-lock-the-server-down).
    Bookmarks already in the browser are uploaded on first connect, and any
    you import later are picked up as they're added.
 

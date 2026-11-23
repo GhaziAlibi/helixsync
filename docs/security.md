@@ -181,6 +181,7 @@ recovery-code regeneration,
 login-with-device requests and polling, sync upload, sync download,
 restore point upload, download, listing and changes,
 sending a tab to a device,
+rulesets (dashboard reads and writes, a device's own read),
 WebSocket connection attempts
 ```
 
@@ -243,7 +244,8 @@ per-minute cap tuned for login-sized traffic.
   (`auth_request_created`, `auth_request_approved`, `auth_request_denied`,
   `login_with_device_succeeded`), restore points
   (`restore_point_pinned`, `restore_point_unpinned`, `restore_point_deleted`,
-  `restore_point_applied`), settings changes. Rows reference the account and device with `ON DELETE SET NULL`,
+  `restore_point_applied`), rulesets (`ruleset_created`, `ruleset_updated`,
+  `ruleset_assigned`, `ruleset_deleted`), settings changes. Rows reference the account and device with `ON DELETE SET NULL`,
   so the trail survives an account's deletion with the identifiers removed.
 - No secrets (passwords, tokens, key material, decrypted payloads) are ever
   written to logs. Structured logging (`tracing`) uses explicit field
@@ -312,6 +314,14 @@ discover them:
   plaintext in memory only (no `localStorage`, `sessionStorage`, IndexedDB,
   cache or service worker), drops them after 5 minutes without input, on
   logout and on reload, and links only `http:`, `https:` and `ftp:` addresses.
+- **A hostile server can withhold rulesets.** It can serve a device none, or
+  unassign it, so the device syncs more than you asked (rulesets are
+  `docs/protocol.md` §17). It cannot read them, forge one, put one under another
+  id, or roll a device back to an older revision it has already seen (the
+  revision is authenticated and a device never accepts a lower one), but a device
+  that has never fetched its rulesets applies none, and rules only stop future
+  data: nothing already uploaded is removed. Extensions older than the first
+  release with rulesets ignore them.
 - **A hostile server can withhold or delete data.** It controls the operation
   log, so it can drop operations or serve incomplete history. What it cannot do
   is read the data, forge content that was never encrypted under the account

@@ -13,11 +13,14 @@ import {
   getFieldStatesForObjects,
   getMappedChromiumIdsByType,
   getMappingsByLocalIds,
+  getAllMoveStates,
   getMappingsByObjectIds,
+  getRulesetsRecord,
   mappingKey,
   putDeferredMaterialization,
   putDeferredMaterializationsBatch,
   putMappingsBatch,
+  putRulesetsRecord,
   recordConflict,
   type FieldStateRecord,
   type ObjectMappingRecord,
@@ -44,6 +47,17 @@ import { fetchSettings } from "../api/client";
 import { createMicroBatchQueue, flushAllMicroBatchQueuesAndWait } from "../sync/micro-batch";
 import { createSuppressionGuard } from "../sync/suppress";
 import {
+  NO_RULES,
+  foldersWidened,
+  folderRulesOf,
+  getEffectiveRules,
+  hasFolderRules,
+  isFolderExcluded,
+  sameFolderRules,
+  type EffectiveRules,
+} from "../rulesets";
+import {
+  ROOT_OBJECT_IDS,
   bookmarkRoots,
   ensureStandInRoot,
   invalidateBookmarkRoots,
@@ -58,6 +72,7 @@ import type { BookmarkNodeLike } from "../platform";
 import { chunk } from "../util/chunk";
 import { keyBetween } from "../util/fractional-index";
 import { uuidv7 } from "../util/uuid";
+import { singleFlight } from "../util/single-flight";
 import { yieldToEventLoop } from "../util/yield";
 import type { BookmarkPayload, ObjectType, OperationOut, OperationType } from "../sync/types";
 import type { BookmarkChangeInfo, BookmarkMoveInfo, BookmarkRemoveInfo } from "../util/chrome-types";
@@ -220,6 +235,182 @@ function opKey(lamportTimestamp: number, deviceId: string, operationId: string, 
   return { lamportTimestamp, deviceId, operationId, operationType };
 }
 
+// --- Rulesets: folders this device keeps out of sync ----------------------
+// docs/protocol.md §17. An excluded folder (and everything under it) is
+// local-only on this device: nothing in it is uploaded, and the account's
+// changes to it are recorded but not applied. With any `includeFolder` rule,
+// only the included folders (and what is under them) sync. Nothing is ever
+// deleted by a rule: a folder that is already synced is frozen where it is.
+
+/** The folder rules as the browser's tree sees them: the rules' objectIds
+ * resolved to this browser's node ids. A folder that isn't here (not
+ * materialized yet) can't be matched, and nothing under it exists to match. */
+interface LocalRules {
+  rules: EffectiveRules;
+  active: boolean;
+  /** Any `includeFolder` rule exists. */
+  includeMode: boolean;
+  excluded: ReadonlySet<string>;
+  included: ReadonlySet<string>;
+}
+
+const INACTIVE_LOCAL_RULES: LocalRules = {
+  rules: NO_RULES,
+  active: false,
+  includeMode: false,
+  excluded: new Set(),
+  included: new Set(),
+};
+
+async function localRules(): Promise<LocalRules> {
+  const rules = await getEffectiveRules();
+  if (!hasFolderRules(rules)) return INACTIVE_LOCAL_RULES;
+  const resolved = await chromiumIdsFor([...rules.excludedFolders, ...rules.includedFolders]);
+  const pick = (ids: ReadonlySet<string>) => new Set([...ids].map((id) => resolved.get(id)).filter((id): id is string => !!id));
+  return {
+    rules,
+    active: true,
+    includeMode: rules.includedFolders.size > 0,
+    excluded: pick(rules.excludedFolders),
+    included: pick(rules.includedFolders),
+  };
+}
+
+/** Whether a node is left out, given the browser ids from the node itself up
+ * to the root. Exclude wins over include. */
+function chainExcluded(lr: LocalRules, chain: readonly string[]): boolean {
+  if (!lr.active) return false;
+  if (chain.some((id) => lr.excluded.has(id))) return true;
+  return lr.includeMode && !chain.some((id) => lr.included.has(id));
+}
+
+/** Browser ids from `id` up to the root, cached for one flush. A node that
+ * can't be read (already removed) ends the chain at itself. */
+type ChainReader = (id: string) => Promise<readonly string[]>;
+
+function createChainReader(nodeCache?: ReadonlyMap<string, chrome.bookmarks.BookmarkTreeNode>): ChainReader {
+  const cache = new Map<string, readonly string[]>();
+  return async (id: string) => {
+    const pending: string[] = [];
+    let current: string | undefined = id;
+    let tail: readonly string[] = [];
+    while (current !== undefined) {
+      const known = cache.get(current);
+      if (known) {
+        tail = known;
+        break;
+      }
+      pending.push(current);
+      let parentId: string | undefined;
+      try {
+        parentId = (nodeCache?.get(current) ?? (await chrome.bookmarks.get(current))[0])?.parentId;
+      } catch {
+        parentId = undefined;
+      }
+      current = parentId;
+    }
+    for (let i = pending.length - 1; i >= 0; i--) {
+      tail = [pending[i], ...tail];
+      cache.set(pending[i], tail);
+    }
+    return cache.get(id) ?? [id];
+  };
+}
+
+/** The objectId a synced node's parent is recorded as. In include mode the
+ * parent may be a folder this device doesn't sync (an included folder inside
+ * an unsynced one), which no other device could place the node under. It goes
+ * under the nearest synced folder or root instead. */
+async function syncedParentObjectId(
+  parentChromiumId: string,
+  rc: RuleRuntime | undefined,
+  mappingCache?: Map<string, string>,
+  newMappings?: NewMappingCollector,
+  overlay?: Map<string, unknown>,
+): Promise<string> {
+  if (rc?.lr.includeMode) {
+    const { objectIdByChromiumId } = await roots();
+    let current: string | undefined = parentChromiumId;
+    while (current !== undefined && !objectIdByChromiumId.has(current)) {
+      if (!chainExcluded(rc.lr, await rc.chainOf(current))) break;
+      let up: string | undefined;
+      try {
+        up = (await chrome.bookmarks.get(current))[0]?.parentId;
+      } catch {
+        up = undefined;
+      }
+      if (up === undefined) break;
+      current = up;
+    }
+    if (current !== undefined) return objectIdFor(current, mappingCache, newMappings, overlay);
+  }
+  return objectIdFor(parentChromiumId, mappingCache, newMappings, overlay);
+}
+
+/** What one capture flush needs to apply folder rules. */
+interface RuleRuntime {
+  lr: LocalRules;
+  chainOf: ChainReader;
+}
+
+/** The objectIds, as the account has them, a remote operation's object sits
+ * under: itself first, then its parent, the parent's parent, and so on, read
+ * from recorded field state so it works for objects this device never made a
+ * node for. */
+interface RemoteRuleRuntime {
+  rules: EffectiveRules;
+  active: boolean;
+  includeMode: boolean;
+  parentCache: Map<string, string | null>;
+}
+
+function createRemoteRuleRuntime(rules: EffectiveRules): RemoteRuleRuntime {
+  return { rules, active: hasFolderRules(rules), includeMode: rules.includedFolders.size > 0, parentCache: new Map() };
+}
+
+const ROOT_OBJECT_ID_SET: ReadonlySet<string> = new Set(Object.values(ROOT_OBJECT_IDS));
+const MAX_REMOTE_CHAIN_DEPTH = 256;
+
+async function remoteParentOf(rr: RemoteRuleRuntime, objectId: string): Promise<string | null> {
+  const cached = rr.parentCache.get(objectId);
+  if (cached !== undefined) return cached;
+  const state = await getFieldState(objectId, "move");
+  const parent = (state?.value as RecordedMove | undefined)?.parent ?? null;
+  rr.parentCache.set(objectId, parent);
+  return parent;
+}
+
+/** True when an operation on `objectId`, whose parent is `parent` (or, when
+ * undefined, whatever the account last recorded), is left out of this device. */
+async function remoteExcluded(rr: RemoteRuleRuntime, objectId: string, parent?: string | null): Promise<boolean> {
+  if (!rr.active) return false;
+  const chain = [objectId];
+  const seen = new Set(chain);
+  let next = parent !== undefined ? parent : await remoteParentOf(rr, objectId);
+  while (next && !seen.has(next) && chain.length < MAX_REMOTE_CHAIN_DEPTH) {
+    chain.push(next);
+    seen.add(next);
+    next = await remoteParentOf(rr, next);
+  }
+  return isFolderExcluded(chain, rr.rules);
+}
+
+/** In include mode, the nearest folder this device syncs at or above
+ * `parentObjectId` (a root at worst): where a node whose real parent isn't
+ * synced here goes. */
+async function remoteAnchor(rr: RemoteRuleRuntime, parentObjectId: string): Promise<string> {
+  if (!rr.includeMode) return parentObjectId;
+  let current = parentObjectId;
+  for (let depth = 0; depth < MAX_REMOTE_CHAIN_DEPTH; depth++) {
+    if (ROOT_OBJECT_ID_SET.has(current)) return current;
+    if (!(await remoteExcluded(rr, current))) return current;
+    const up = await remoteParentOf(rr, current);
+    if (!up) return current;
+    current = up;
+  }
+  return current;
+}
+
 // --- Local capture: browser event -> operation --------------------------
 // Listeners only do the synchronous guard check (it must run at event-fire
 // time) and queue the event. `flushBookmarkEvents` turns each burst into one
@@ -246,13 +437,16 @@ async function stageCreated(
   siblingCache?: Map<string, chrome.bookmarks.BookmarkTreeNode[]>,
   mappingCache?: Map<string, string>,
   newMappings?: NewMappingCollector,
+  rc?: RuleRuntime,
 ): Promise<StagedBookmarkOp> {
   let objectId = mappingCache?.get(id);
   if (!objectId) {
     objectId = await objectIdFor(id, mappingCache, newMappings, overlay);
   }
   const objectType = bookmarkObjectType(node);
-  const parentObjectId = node.parentId ? await objectIdFor(node.parentId, mappingCache, newMappings, overlay) : null;
+  const parentObjectId = node.parentId
+    ? await syncedParentObjectId(node.parentId, rc, mappingCache, newMappings, overlay)
+    : null;
   const position = node.parentId
     ? await computePosition(node.parentId, node.index ?? 0, overlay, siblingCache, mappingCache, newMappings)
     : keyBetween(null, null);
@@ -370,13 +564,14 @@ async function stageMoved(
   mappingCache?: Map<string, string>,
   nodeCache?: ReadonlyMap<string, chrome.bookmarks.BookmarkTreeNode>,
   newMappings?: NewMappingCollector,
+  rc?: RuleRuntime,
 ): Promise<StagedBookmarkOp | null> {
   const objectId = await cachedObjectId(id, mappingCache);
   if (!objectId) return null;
   const node = nodeCache?.get(id) ?? (await chrome.bookmarks.get(id))[0];
   const objectType = bookmarkObjectType(node);
 
-  const parentObjectId = await objectIdFor(moveInfo.parentId, mappingCache, newMappings, overlay);
+  const parentObjectId = await syncedParentObjectId(moveInfo.parentId, rc, mappingCache, newMappings, overlay);
   const position = await computePosition(moveInfo.parentId, moveInfo.index, overlay, siblingCache, mappingCache, newMappings);
   const payload = { parent: parentObjectId, position };
 
@@ -393,6 +588,57 @@ async function stageMoved(
     payload,
     fields: [{ field: "move", value: payload }],
   };
+}
+
+/** What a rule makes of one capture event. */
+type RuleDecision = "normal" | "skip" | "subtree";
+
+/** `skip`: the node is, or stays, left out of sync. `subtree`: a node moved
+ * out of an excluded folder into a synced one, so it and what is under it join
+ * the account. */
+async function decideForRules(event: QueuedBookmarkEvent, rc: RuleRuntime): Promise<RuleDecision> {
+  const { lr, chainOf } = rc;
+  const excludedFrom = async (parentId: string | undefined): Promise<boolean> =>
+    chainExcluded(lr, [event.id, ...(parentId !== undefined ? await chainOf(parentId) : [])]);
+  switch (event.kind) {
+    case "created":
+      return (await excludedFrom(event.node.parentId)) ? "skip" : "normal";
+    case "removed":
+      return (await excludedFrom(event.removeInfo.parentId)) ? "skip" : "normal";
+    case "changed":
+      return chainExcluded(lr, await chainOf(event.id)) ? "skip" : "normal";
+    case "moved": {
+      const was = await excludedFrom(event.moveInfo.oldParentId);
+      const now = await excludedFrom(event.moveInfo.parentId);
+      if (now) return "skip"; // moved into (or inside) an excluded folder: stop tracking
+      return was ? "subtree" : "normal";
+    }
+  }
+}
+
+/** Creates for a node that just left an excluded folder and everything under
+ * it, minus folders that are themselves excluded. A node the account already
+ * has keeps its objectId (its mapping), so this is an upsert, not a copy. */
+async function stageSubtree(
+  rootId: string,
+  rc: RuleRuntime,
+  overlay: Map<string, unknown>,
+  siblingCache: Map<string, chrome.bookmarks.BookmarkTreeNode[]>,
+  mappingCache: Map<string, string>,
+  newMappings: NewMappingCollector,
+): Promise<StagedBookmarkOp[]> {
+  const [top] = await chrome.bookmarks.getSubTree(rootId);
+  if (!top) return [];
+  const out: StagedBookmarkOp[] = [];
+  const stack: chrome.bookmarks.BookmarkTreeNode[] = [top];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (rc.lr.excluded.has(node.id)) continue;
+    out.push(await stageCreated(node.id, node, overlay, siblingCache, mappingCache, newMappings, rc));
+    const children = node.children ?? [];
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+  }
+  return out;
 }
 
 // Overlaps Chromium IPC latency without flooding the browser process.
@@ -559,12 +805,32 @@ export async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promis
   const deletedLocalIds: string[] = [];
   const removedEvents: Array<Extract<QueuedBookmarkEvent, { kind: "removed" }>> = [];
 
+  // Folder rules (docs/protocol.md §17). Without any, none of this runs.
+  const lr = await localRules();
+  const rc: RuleRuntime | undefined = lr.active ? { lr, chainOf: createChainReader(nodeCache) } : undefined;
+
   for (const event of events) {
     try {
       let op: StagedBookmarkOp | null;
+      const decision = rc ? await decideForRules(event, rc) : "normal";
+      if (decision === "skip") {
+        // Left out of sync: no operation. A removed node's mapping still goes,
+        // as it would have.
+        if (event.kind === "removed") {
+          for (const id of [event.id, ...descendantIds(event.removeInfo.node)]) {
+            mappingCache.delete(id);
+            deletedLocalIds.push(id);
+          }
+        }
+        continue;
+      }
+      if (decision === "subtree") {
+        staged.push(...(await stageSubtree(event.id, rc!, overlay, siblingCache, mappingCache, newMappings)));
+        continue;
+      }
       switch (event.kind) {
         case "created":
-          op = await stageCreated(event.id, event.node, overlay, siblingCache, mappingCache, newMappings);
+          op = await stageCreated(event.id, event.node, overlay, siblingCache, mappingCache, newMappings, rc);
           break;
         case "removed":
           op = await stageRemoved(event.id, event.removeInfo, mappingCache, deletedLocalIds);
@@ -573,7 +839,7 @@ export async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promis
           op = await stageChanged(event.id, event.changeInfo, overlay, mappingCache, nodeCache);
           break;
         case "moved":
-          op = await stageMoved(event.id, event.moveInfo, overlay, siblingCache, mappingCache, nodeCache, newMappings);
+          op = await stageMoved(event.id, event.moveInfo, overlay, siblingCache, mappingCache, nodeCache, newMappings, rc);
           break;
       }
       if (op) {
@@ -585,7 +851,11 @@ export async function flushBookmarkEvents(events: QueuedBookmarkEvent[]): Promis
       console.error(`HelixSync bookmarks capture (${event.kind})`, event.id, e);
     }
   }
-  if (staged.length === 0) return;
+  if (staged.length === 0) {
+    // Only left-out nodes were removed: their mappings still have to go.
+    if (deletedLocalIds.length > 0) await deleteMappingsBatch(MAP_TYPE, [...new Set(deletedLocalIds)]);
+    return;
+  }
 
   // Read before the mappings of the removed nodes are deleted below.
   const massDelete = await detectLocalMassDelete(removedEvents);
@@ -658,12 +928,18 @@ async function flattenForBackfill(
   mappingsForAlreadyMapped: Map<string, { objectId: string }>,
   positionsForAlreadyMapped: Map<string, string>,
   emit: (mapping: BackfillMapping, node: BackfillNode) => Promise<void>,
+  lr: LocalRules = INACTIVE_LOCAL_RULES,
 ): Promise<void> {
   let visited = 0;
 
+  // `parentObjectId` is the nearest folder that syncs: the node's parent, or
+  // above it when include rules leave the parent out. `excludedAbove` and
+  // `includedAbove` say whether an excluded / included folder is above.
   async function processChildren(
     children: chrome.bookmarks.BookmarkTreeNode[] | undefined,
     parentObjectId: string | null,
+    excludedAbove = false,
+    includedAbove = false,
   ): Promise<void> {
     const siblings = children ?? [];
     const existingPositionOf = (node: chrome.bookmarks.BookmarkTreeNode): string | undefined => {
@@ -686,6 +962,17 @@ async function flattenForBackfill(
       if (++visited % BACKFILL_WALK_YIELD_CHUNK === 0) await yieldToEventLoop();
       const rootObjectId = rootObjectIdByChromiumId.get(child.id);
       const isAlreadyMapped = !rootObjectId && alreadyMapped.has(child.id);
+
+      // Folder rules: an excluded folder and everything under it stays out.
+      // With include rules only what is under an included folder goes in, but
+      // the walk still looks inside the rest for included folders.
+      const excluded = !rootObjectId && (excludedAbove || lr.excluded.has(child.id));
+      const included = !rootObjectId && (includedAbove || lr.included.has(child.id));
+      if (excluded) continue;
+      if (!rootObjectId && lr.includeMode && !included) {
+        await processChildren(child.children, parentObjectId, false, false);
+        continue;
+      }
 
       let ownObjectId: string;
       if (rootObjectId) {
@@ -711,7 +998,7 @@ async function flattenForBackfill(
         );
       }
 
-      await processChildren(child.children, ownObjectId);
+      await processChildren(child.children, ownObjectId, excluded, included);
     }
   }
 
@@ -730,6 +1017,7 @@ export async function backfillExisting(): Promise<void> {
   await flushAllMicroBatchQueuesAndWait();
   // Before the tree is read, so stand-in roots it creates are in it.
   const { objectIdByChromiumId: rootObjectIdByChromiumId } = await roots();
+  const lr = await localRules();
   const [root] = await chrome.bookmarks.getTree();
   const rawMapped = await getMappedChromiumIdsByType(MAP_TYPE);
   const mappingsForAlreadyMapped = await getMappingsByLocalIds(MAP_TYPE, [...rawMapped]);
@@ -818,7 +1106,7 @@ export async function backfillExisting(): Promise<void> {
     pendingMappings.push(mapping);
     pendingNodes.push(node);
     if (pendingNodes.length >= BACKFILL_FLUSH_CHUNK) await flushBackfillChunk();
-  });
+  }, lr);
   await flushBackfillChunk();
 }
 
@@ -941,6 +1229,23 @@ async function findUnlinkedMatch(parentChromiumId: string, p: BookmarkPayload): 
     candidates.map((node) => node.id),
   );
   return candidates.find((node) => !linked.has(node.id))?.id;
+}
+
+/** While linking is on, a create a folder rule leaves out of this device
+ * still links to a matching node this browser already has, without touching
+ * it. The first import then knows that node is the account's (excluded)
+ * folder and keeps it out rather than uploading a second one, and lifting the
+ * rule later merges the two instead of leaving both. */
+async function linkExcludedCreate(objectId: string, p: BookmarkPayload, prefetched?: Map<string, string>): Promise<void> {
+  if (!linkExistingBookmarks || !p.parent) return;
+  const ids = await chromiumIdsFor([objectId, p.parent]);
+  if (ids.has(objectId)) return;
+  const parentChromiumId = ids.get(p.parent);
+  if (!parentChromiumId) return;
+  const linkedId = await findUnlinkedMatch(parentChromiumId, p);
+  if (!linkedId) return;
+  await establishMapping(MAP_TYPE, linkedId, objectId);
+  prefetched?.set(objectId, linkedId);
 }
 
 function deferUntilParentMaterializes(objectId: string, objectType: ObjectType, parent: string): Promise<void> {
@@ -1102,6 +1407,7 @@ async function retryDeferredParent(parentObjectId: string): Promise<void> {
     byPosition({ position: positionOfRecord(a.objectId) }, { position: positionOfRecord(b.objectId) }),
   );
 
+  const rr = createRemoteRuleRuntime(await getEffectiveRules());
   let sinceYield = 0;
   for (const record of ordered) {
     if (++sinceYield >= DEFERRED_RETRY_YIELD_CHUNK) {
@@ -1113,6 +1419,8 @@ async function retryDeferredParent(parentObjectId: string): Promise<void> {
 
     const moveState = moveByObjectId.get(record.objectId);
     const move = moveState?.value as RecordedMove | undefined;
+    // Parked before a folder rule left it out of this device.
+    if (rr.active && (await remoteExcluded(rr, record.objectId, move?.parent ?? null))) continue;
 
     if (chromiumIdByObjectId.has(record.objectId)) {
       // Already materialized: this was a move waiting on its destination.
@@ -1439,6 +1747,18 @@ async function applyRemote(op: OperationOut, payload: unknown): Promise<void> {
   let next = 0;
   const res = fields.map((f) => (f ? resolved[next++] : undefined));
 
+  // Folder rules: recorded above, not applied (see applyRemoteBatch).
+  const rr = createRemoteRuleRuntime(await getEffectiveRules());
+  if (rr.active) {
+    const target =
+      kind === "create" || kind === "move" ? ((payload as BookmarkPayload | BookmarkMove).parent ?? null) : undefined;
+    if (await remoteExcluded(rr, op.objectId, target)) {
+      await deleteDeferredMaterialization(op.objectId);
+      if (kind === "create" && res[0]?.applied) await linkExcludedCreate(op.objectId, payload as BookmarkPayload);
+      return;
+    }
+  }
+
   switch (kind) {
     case "create":
       if (res[0]!.applied) {
@@ -1552,19 +1872,44 @@ async function applyRemoteBatch(items: Array<{ op: OperationOut; payload: unknow
     }
   };
 
+  // Folder rules (docs/protocol.md §17). The operations of a slice are
+  // resolved, and so recorded in field state, before any is applied: what is
+  // left out of this device is still known, for when a rule is lifted.
+  const rulesAtStart = await getEffectiveRules();
+
   for (let start = 0; start < items.length; start += REMOTE_RESOLVE_SLICE) {
     const slice = items.slice(start, start + REMOTE_RESOLVE_SLICE);
     const resolved = await resolveRemoteSlice(slice);
+    const rr = createRemoteRuleRuntime(rulesAtStart);
 
     for (let k = 0; k < slice.length; k++) {
       const { op, payload } = slice[k];
       const { kind, res } = resolved[k];
+      if (rr.active && kind !== "unknown") {
+        const target =
+          kind === "create" || kind === "move" ? ((payload as BookmarkPayload | BookmarkMove).parent ?? null) : undefined;
+        if (await remoteExcluded(rr, op.objectId, target)) {
+          // Left out of this device: recorded, not applied, and nothing local
+          // is touched (a folder that was synced stays as it is).
+          await deleteDeferredMaterialization(op.objectId);
+          if (kind === "create" && res[0]?.applied) await linkExcludedCreate(op.objectId, payload as BookmarkPayload, prefetched);
+          await maybeYield();
+          continue;
+        }
+      }
       switch (kind) {
         case "create": {
           await flushMoves();
           await flushTitleUrl();
           if (res[0]!.applied) {
-            await materialize(op.objectId, op.objectType, payload as BookmarkPayload, prefetched);
+            let toMaterialize = payload as BookmarkPayload;
+            // Include rules: a node whose parent isn't synced here goes under
+            // the nearest folder that is.
+            if (rr.includeMode && toMaterialize.parent) {
+              const anchor = await remoteAnchor(rr, toMaterialize.parent);
+              if (anchor !== toMaterialize.parent) toMaterialize = { ...toMaterialize, parent: anchor };
+            }
+            await materialize(op.objectId, op.objectType, toMaterialize, prefetched);
             // As in applyRemote: restored nodes go where the point had them.
             const restored = payload as BookmarkPayload;
             if (op.operationType === "restore" && restored.parent) {
@@ -1593,7 +1938,9 @@ async function applyRemoteBatch(items: Array<{ op: OperationOut; payload: unknow
         }
         case "move": {
           if (res[0]!.applied && res[1]!.value === "live") {
-            pendingMoves.push({ objectId: op.objectId, objectType: op.objectType, ...(payload as BookmarkMove) });
+            const move = { ...(payload as BookmarkMove) };
+            if (rr.includeMode && move.parent) move.parent = await remoteAnchor(rr, move.parent);
+            pendingMoves.push({ objectId: op.objectId, objectType: op.objectType, ...move });
           }
           break;
         }
@@ -1621,6 +1968,106 @@ async function applyRemoteBatch(items: Array<{ op: OperationOut; payload: unknow
   await flushMoves();
   await applyMovesBatch(restorePlacements);
 }
+
+// --- Folder rules changed ---------------------------------------------------
+
+async function markFolderRulesApplied(next: { excluded: string[]; included: string[] }): Promise<void> {
+  const record = (await getRulesetsRecord()) ?? { id: "self" as const, rulesets: [], fetchedAt: new Date().toISOString() };
+  await putRulesetsRecord({ ...record, appliedFolderRules: next });
+}
+
+/** Brings this device's bookmarks in line after folder rules widened what it
+ * syncs (an excluded folder lifted, an include rule added, include mode off).
+ * First the account's bookmarks that are now in scope but have no node here
+ * are made, linking to a node this browser already has with the same folder,
+ * title and URL rather than creating a second one; then whatever is left
+ * locally and unlinked is uploaded. Same order as the first import. */
+async function catchUpWidenedFolderRules(): Promise<void> {
+  await flushAllMicroBatchQueuesAndWait();
+  const rr = createRemoteRuleRuntime(await getEffectiveRules());
+  const moveStates = await getAllMoveStates();
+  for (const [objectId, state] of moveStates) rr.parentCache.set(objectId, state.parent);
+
+  // Parents before children, from the roots down.
+  const childrenOf = new Map<string, string[]>();
+  for (const [objectId, state] of moveStates) {
+    if (!state.parent) continue;
+    const list = childrenOf.get(state.parent);
+    if (list) list.push(objectId);
+    else childrenOf.set(state.parent, [objectId]);
+  }
+  const order: string[] = [];
+  const queue = [...ROOT_OBJECT_ID_SET];
+  const visited = new Set<string>(queue);
+  for (let i = 0; i < queue.length; i++) {
+    for (const child of childrenOf.get(queue[i]) ?? []) {
+      if (visited.has(child)) continue;
+      visited.add(child);
+      queue.push(child);
+      order.push(child);
+    }
+  }
+
+  setLinkExistingBookmarks(true);
+  try {
+    for (const batch of chunk(order, 200)) {
+      const mapped = await chromiumIdsFor(batch);
+      const candidates: string[] = [];
+      for (const objectId of batch) {
+        if (mapped.has(objectId)) continue;
+        if (await remoteExcluded(rr, objectId)) continue;
+        candidates.push(objectId);
+      }
+      if (candidates.length === 0) {
+        await yieldToEventLoop();
+        continue;
+      }
+      const [liveness, titles, urls] = await Promise.all([
+        getFieldStatesForObjects(candidates, "liveness"),
+        getFieldStatesForObjects(candidates, "title"),
+        getFieldStatesForObjects(candidates, "url"),
+      ]);
+      for (const objectId of candidates) {
+        if (liveness.get(objectId)?.value !== "live") continue;
+        const move = moveStates.get(objectId)!;
+        const url = (urls.get(objectId)?.value as string | null | undefined) ?? null;
+        // A parent this device doesn't sync (include rules) is replaced by the
+        // nearest one it does.
+        const parent = move.parent ? await remoteAnchor(rr, move.parent) : null;
+        await materialize(objectId, url ? "bookmark" : "bookmarkFolder", {
+          title: (titles.get(objectId)?.value as string | undefined) ?? "",
+          url,
+          parent,
+          position: move.position,
+        });
+      }
+      await yieldToEventLoop();
+    }
+  } finally {
+    setLinkExistingBookmarks(false);
+  }
+
+  await backfillExisting();
+}
+
+/** Catches the bookmarks up with the folder rules in force. A no-op while they
+ * are what the bookmarks were last caught up with. Narrowing needs nothing
+ * (nothing is deleted; what is left out is frozen), so it is only recorded;
+ * widening is caught up first and recorded after, so an interrupted run is
+ * repeated. Before the first import the import itself follows the rules. */
+export const reconcileFolderRules = singleFlight(async (): Promise<void> => {
+  const device = await getDevice();
+  if (!device) return;
+  const next = folderRulesOf(await getEffectiveRules());
+  const applied = (await getRulesetsRecord())?.appliedFolderRules ?? { excluded: [], included: [] };
+  if (sameFolderRules(applied, next)) return;
+  if (device.initialImportCompletedAt && foldersWidened(applied, next)) {
+    if (!(await isBookmarkSyncEnabled())) return; // retried when it is on again
+    await catchUpWidenedFolderRules();
+  }
+  if (!(await getDevice())) return;
+  await markFolderRulesApplied(next);
+});
 
 // --- Restore points: reading and applying the tree -------------------------
 
@@ -1725,8 +2172,11 @@ async function countRemoteDeletes(
   prefetched: ReadonlyMap<string, string>,
 ): Promise<number> {
   let count = 0;
+  const rr = createRemoteRuleRuntime(await getEffectiveRules());
   for (const { op } of items) {
     if (op.operationType !== "delete") continue;
+    // A delete of something left out of this device is not applied.
+    if (await remoteExcluded(rr, op.objectId)) continue;
     if (op.objectType !== "bookmarkFolder") {
       count++;
     } else {
@@ -1787,11 +2237,30 @@ export async function readLiveBookmarks(): Promise<LiveBookmarkTree> {
   const nodes: LiveBookmarkNode[] = [];
   const objectIdOf = new Map<string, string>(); // chromium id -> objectId, for kept nodes
   let unmapped = 0;
+  // Folder rules: what is left out of sync is not part of a restore point
+  // (which is uploaded) and is never planned for removal by a restore. Under
+  // include rules a node under an unsynced folder is recorded under the
+  // nearest synced one, as it is everywhere else.
+  const lr = await localRules();
+  const excludedAbove = new Set<string>();
+  const includedAbove = new Set<string>();
   for (const { node, parentChromiumId } of walk) {
     const rootObjectId = rootObjectIds.get(node.id);
     if (rootObjectId) {
       objectIdOf.set(node.id, rootObjectId);
       continue;
+    }
+    if (lr.active) {
+      const excluded = excludedAbove.has(parentChromiumId) || lr.excluded.has(node.id);
+      const included = includedAbove.has(parentChromiumId) || lr.included.has(node.id);
+      if (excluded) excludedAbove.add(node.id);
+      if (included) includedAbove.add(node.id);
+      if (excluded || (lr.includeMode && !included)) {
+        // Its children look up their parent: the nearest synced ancestor.
+        const anchor = objectIdOf.get(parentChromiumId);
+        if (anchor && !excluded) objectIdOf.set(node.id, anchor);
+        continue;
+      }
     }
     const parentObjectId = objectIdOf.get(parentChromiumId);
     // Under a root of the tree itself ("0" holds the roots), or under a

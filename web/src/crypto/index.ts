@@ -4,7 +4,8 @@
 // account created on one side is usable from the other — but only the
 // subset the dashboard actually needs (no base64-perf code). The dashboard
 // decrypts synced records for the read-only vault (see "Record decryption"
-// below) and never encrypts them: there are no encrypt functions here.
+// below) and never writes them. Its only encryption is of rulesets
+// (`encryptBytesWithSdek`, docs/encryption.md §6.5).
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { argon2idAsync } from "@noble/hashes/argon2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
@@ -407,8 +408,8 @@ export async function unsealRecoveryCode(
 }
 
 // --- Record decryption (read-only vault, docs/encryption.md §6) ------------
-// Port of the decrypt side of extension/src/crypto/index.ts, same behavior.
-// The dashboard only reads synced records, so nothing here encrypts them.
+// Port of extension/src/crypto/index.ts, same behavior. The dashboard only
+// reads synced records; `encryptBytesWithSdek` exists for rulesets.
 
 /** Format version of every AAD-bound ciphertext envelope (docs/encryption.md
  * §6). Same value as the extension's `ENVELOPE_VERSION`; it is not the version
@@ -479,4 +480,39 @@ const sharedTextDecoder = new TextDecoder();
 /** Throws on authentication failure, including a mismatched `aad`. */
 export function decryptWithSdek(envelope: EncryptionEnvelope, sdek: Uint8Array, aad: Uint8Array): unknown {
   return JSON.parse(sharedTextDecoder.decode(decryptBytesWithSdek(envelope, sdek, aad)));
+}
+
+/** AAD of a ruleset envelope (docs/encryption.md §6.5). The "syncRuleset" tag
+ * is not an object type, so a ruleset ciphertext can't be replayed as a sync
+ * operation or the reverse. The id stops the server swapping one ruleset's
+ * ciphertext onto another id, and the revision stops it presenting an older
+ * revision as the current one. Must match the extension byte for byte. */
+export function buildRulesetAad(rulesetId: string, revision: number): Uint8Array {
+  return sharedTextEncoder.encode(JSON.stringify(["syncRuleset", rulesetId, revision]));
+}
+
+/** Encrypts already-serialized bytes into a §6 envelope. Byte-exact port of
+ * the extension's `encryptBytesWithSdek`: a fresh 24-byte nonce, XChaCha20-
+ * Poly1305 with `aad`, base64url without padding. `aad` must be the same bytes
+ * passed to the matching `decryptBytesWithSdek` call, or decryption fails. */
+export function encryptBytesWithSdek(
+  plaintext: Uint8Array,
+  sdek: Uint8Array,
+  keyVersion: number,
+  aad: Uint8Array,
+): EncryptionEnvelope {
+  const nonce = randomBytes(24);
+  const ciphertext = xchacha20poly1305(sdek, nonce, aad).encrypt(plaintext);
+  return {
+    v: ENVELOPE_VERSION,
+    keyVersion,
+    alg: "xchacha20poly1305",
+    nonce: toB64(nonce),
+    ciphertext: toB64(ciphertext),
+  };
+}
+
+/** JSON-encodes `plaintext`, then `encryptBytesWithSdek`. */
+export function encryptWithSdek(plaintext: unknown, sdek: Uint8Array, keyVersion: number, aad: Uint8Array): EncryptionEnvelope {
+  return encryptBytesWithSdek(sharedTextEncoder.encode(JSON.stringify(plaintext)), sdek, keyVersion, aad);
 }

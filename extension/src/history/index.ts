@@ -12,6 +12,7 @@ import { createLocalOperationsBatch, registerApplier, registerBatchApplier } fro
 import type { PendingLocalOperation } from "../sync/engine";
 import { fetchSettings } from "../api/client";
 import { getDevice, putDevice } from "../storage/db";
+import { getEffectiveRules, isUrlBlocked } from "../rulesets";
 import { createMicroBatchQueue } from "../sync/micro-batch";
 import { hourKey } from "../util/hour";
 import { retentionCutoffMs } from "../util/retention";
@@ -68,9 +69,15 @@ async function flushVisitEvents(items: QueuedVisitEvent[]): Promise<void> {
       : items;
   if (fresh.length === 0) return;
 
+  // Rulesets (docs/protocol.md §17): a URL a rule blocks is never captured.
+  // Forward only: what was uploaded before the rule stays.
+  const rules = await getEffectiveRules();
+  const allowed = fresh.filter((item) => !isUrlBlocked(item.url, rules));
+  if (allowed.length === 0) return;
+
   const pending: PendingLocalOperation[] = [];
-  for (let i = 0; i < fresh.length; i += VISIT_UUID_CONCURRENCY) {
-    const slice = fresh.slice(i, i + VISIT_UUID_CONCURRENCY);
+  for (let i = 0; i < allowed.length; i += VISIT_UUID_CONCURRENCY) {
+    const slice = allowed.slice(i, i + VISIT_UUID_CONCURRENCY);
     const sliceOps = await Promise.all(
       slice.map((item) => makeVisitOperation(item.url, item.title, item.visitTime, device.deviceId)),
     );
@@ -177,7 +184,12 @@ async function replayIntoBrowserHistory(newestByUrl: NewestVisitByUrl): Promise<
   try {
     if (!(await isHistorySyncEnabled())) return;
     await ensureHistoryBulkBoundary();
-    const added = await replayVisitsIntoBrowserHistory(newestByUrl, async () => !(await getDevice()));
+    const rules = await getEffectiveRules();
+    const added = await replayVisitsIntoBrowserHistory(
+      newestByUrl,
+      async () => !(await getDevice()),
+      (url) => isUrlBlocked(url, rules),
+    );
     console.log("HelixSync: history replay finished", { candidates: newestByUrl.size, added });
   } catch (e) {
     console.error("HelixSync: history replay failed", e);

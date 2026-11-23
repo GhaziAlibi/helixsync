@@ -242,6 +242,9 @@ async fn register(
         .execute(&mut *tx)
         .await?;
 
+    // Every account has a Default ruleset (docs/protocol.md §17).
+    crate::rulesets::create_default(&mut tx, user.id).await?;
+
     tx.commit().await?;
 
     crate::audit::log(&state, Some(user.id), None, "account_registered").await;

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO sync_rulesets (user_id, is_default) VALUES ($1, true)\n         ON CONFLICT (user_id) WHERE is_default DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cfdfe1840eb8149d47b6ee359ef91b8011b74b3daa60e71fe78e020a32ae79a8"
+}

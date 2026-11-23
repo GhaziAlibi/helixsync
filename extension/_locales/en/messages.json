@@ -173,6 +173,15 @@
   "statusview_lastSync": {
     "message": "Last sync: {time} · Pending: {pending}"
   },
+  "statusview_rulesets": {
+    "message": "Rulesets: {names} (managed from the dashboard)"
+  },
+  "statusview_rulesetsDefault": {
+    "message": "Default"
+  },
+  "statusview_rulesetsUnreadable": {
+    "message": "Some rulesets couldn't be read. Their last known rules still apply."
+  },
   "statusview_syncNow": {
     "message": "Sync Now"
   },

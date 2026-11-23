@@ -14,6 +14,7 @@ import {
   parseRecoveryCode,
   unwrapAccountKey,
   wrapAccountKey,
+  type EncryptionEnvelope,
   type KdfParams,
 } from "../crypto";
 import { lockVault, setAccountKey } from "../vault/keyring";
@@ -397,6 +398,9 @@ export interface ServerVersion {
   /** True once the server has the read-only Backups page. Missing on an
    * older server; read as false. */
   backups?: boolean;
+  /** True once the server has rulesets. Missing on an older server; read as
+   * false. */
+  rulesets?: boolean;
   /** False when the operator has set `ALLOW_REGISTRATION=false`. Optional
    * because servers from before the switch existed don't send it; treat a
    * missing value as "registration open". */
@@ -614,4 +618,67 @@ export async function deleteRestorePoint(id: string): Promise<void> {
     method: "DELETE",
     headers: PROTOCOL_VERSION_HEADERS,
   });
+}
+
+// --- Rulesets (docs/protocol.md §17) ---
+
+
+export interface RulesetEntry {
+  id: string;
+  revision: number;
+  isDefault: boolean;
+  /** `null` only for a Default nobody has edited yet: no rules. */
+  envelope: EncryptionEnvelope | null;
+  deviceIds: string[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RulesetMeta {
+  id: string;
+  revision: number;
+  isDefault: boolean;
+  envelope: EncryptionEnvelope | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export async function listRulesets(): Promise<RulesetEntry[]> {
+  return (await request<{ rulesets: RulesetEntry[] }>("/api/v1/rulesets")).rulesets;
+}
+
+/** `id` is chosen here: the envelope's AAD binds it, so it must be known
+ * before encrypting. The envelope is revision 1. */
+export async function createRuleset(id: string, envelope: EncryptionEnvelope): Promise<RulesetMeta> {
+  return request("/api/v1/rulesets", { method: "POST", body: JSON.stringify({ id, envelope }) });
+}
+
+/** Replaces the envelope. `ifMatch` is the revision this edit started from; the
+ * envelope must have been encrypted as `ifMatch + 1`. A 409 with code
+ * `revision_conflict` means someone saved in between. */
+export async function updateRuleset(id: string, ifMatch: number, envelope: EncryptionEnvelope): Promise<RulesetMeta> {
+  return request(`/api/v1/rulesets/${id}`, {
+    method: "PUT",
+    headers: { "If-Match": String(ifMatch) },
+    body: JSON.stringify({ envelope }),
+  });
+}
+
+export async function deleteRuleset(id: string): Promise<void> {
+  return request(`/api/v1/rulesets/${id}`, { method: "DELETE" });
+}
+
+/** Replaces the ruleset's device list with exactly `deviceIds`. */
+export async function setRulesetDevices(id: string, deviceIds: string[]): Promise<string[]> {
+  return (
+    await request<{ deviceIds: string[] }>(`/api/v1/rulesets/${id}/devices`, {
+      method: "PUT",
+      body: JSON.stringify({ deviceIds }),
+    })
+  ).deviceIds;
+}
+
+/** The account key's version, which an envelope's `keyVersion` must match. */
+export async function getAccountKeyVersion(): Promise<number> {
+  return (await currentKeyMaterial()).accountKeyVersion;
 }

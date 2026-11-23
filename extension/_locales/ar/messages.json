@@ -173,6 +173,15 @@
   "statusview_lastSync": {
     "message": "آخر مزامنة: {time} · قيد الانتظار: {pending}"
   },
+  "statusview_rulesets": {
+    "message": "مجموعات القواعد: {names} (تُدار من لوحة التحكم)"
+  },
+  "statusview_rulesetsDefault": {
+    "message": "الافتراضية"
+  },
+  "statusview_rulesetsUnreadable": {
+    "message": "تعذّرت قراءة بعض مجموعات القواعد. لا تزال آخر قواعدها المعروفة سارية."
+  },
   "statusview_syncNow": {
     "message": "المزامنة الآن"
   },

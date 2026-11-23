@@ -173,6 +173,15 @@
   "statusview_lastSync": {
     "message": "上次同步：{time} · 待处理：{pending}"
   },
+  "statusview_rulesets": {
+    "message": "规则集：{names}（在仪表板中管理）"
+  },
+  "statusview_rulesetsDefault": {
+    "message": "默认"
+  },
+  "statusview_rulesetsUnreadable": {
+    "message": "部分规则集无法读取，仍沿用其最近已知的规则。"
+  },
   "statusview_syncNow": {
     "message": "立即同步"
   },

@@ -6,6 +6,33 @@ All notable changes to HelixSync are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Selective sync: rulesets.** In the web dashboard (new **Rulesets** page, needs
+  the Vault unlocked) you create rulesets, named lists of rules, and assign devices
+  to them; each device enforces the combined rules of all its rulesets. Rules: don't
+  sync a bookmark folder, only sync chosen folders, block a domain (and its
+  subdomains), block addresses matching a regular expression, block local and
+  development addresses. Folders are picked from your decrypted bookmarks. The page
+  also shows, per device, its rulesets and which rule blocks an address you type.
+  Every account has a **Default** ruleset (empty, can't be deleted) that every new
+  device joins; existing accounts and devices get it from the migration, so nothing
+  changes until you add rules. Rulesets are end to end encrypted with the account key
+  (new AAD, `docs/encryption.md` §6.5); the server stores ciphertext and which devices
+  are assigned. This is the first time the dashboard encrypts anything. History
+  filtering covers live capture, the first import (with a resume guard that restarts
+  the scope when the rules changed) and replay of other devices' visits; bookmark
+  filtering covers capture, the first import, remote apply, moves in and out of an
+  excluded folder, bookmark restore points and mass-delete detection. Excluding a
+  folder that already syncs freezes it on that device; nothing is deleted, and rules
+  are forward-only. Lifting a rule catches the device up without creating duplicates.
+  The popup shows the device's rulesets, read-only. Extensions older than this
+  release ignore rulesets; the dashboard flags assigned devices that are too old. New
+  migration `0004_rulesets.sql` (additive: two tables and a backfill), new endpoints
+  under `/api/v1/rulesets`, a `ruleset_changed` WebSocket frame and `"rulesets": true`
+  in `GET /api/v1/version`. See `docs/protocol.md` §17, `docs/encryption.md` §6.5 and
+  `PRIVACY.md`.
+
 ## [1.1.0] - 2026-11-17
 
 ### Added

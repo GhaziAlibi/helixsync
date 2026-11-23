@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM sync_ruleset_assignments\n         WHERE ruleset_id = $1 AND device_id <> ALL($2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ea8ee4c1760ad9731c0dca127fc9edc7086228f6c9e0cea336f94712b7edb155"
+}

@@ -627,6 +627,27 @@ pub const RESTORE_POINT_WRITE_LIMIT: RateLimitConfig = RateLimitConfig {
     partition: RateLimitPartition::Authenticated,
 };
 
+// Selective-sync rulesets (docs/protocol.md §17). The dashboard's reads and
+// writes are keyed by user; a device's own read by device id.
+pub const RULESET_READ_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "ruleset_read",
+    limit: 60,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
+pub const RULESET_WRITE_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "ruleset_write",
+    limit: 60,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
+pub const RULESET_DEVICE_READ_LIMIT: RateLimitConfig = RateLimitConfig {
+    bucket: "ruleset_device_read",
+    limit: 60,
+    window: Duration::from_secs(60),
+    partition: RateLimitPartition::Authenticated,
+};
+
 /// Checks a rate limit and returns `AppError::RateLimited` (with retry
 /// time) if exceeded. Called from handlers since limits differ per route.
 pub fn enforce(limiter: &RateLimiter, config: RateLimitConfig, key: &str) -> Result<(), AppError> {

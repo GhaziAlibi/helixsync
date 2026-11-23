@@ -21,8 +21,9 @@ implementations of the primitives below may be used:
   implementations. Both clients implement the same derive/wrap/unwrap
   primitives (`extension/src/crypto/index.ts`, `web/src/crypto/index.ts`),
   so an account created on one is fully usable from the other. The dashboard
-  also derives SDEKs and decrypts records (§6) for its read-only Vault page; it
-  has no encrypt functions for synced records.
+  also derives SDEKs and decrypts records (§6) for its read-only Vault page. It
+  has no encrypt function for synced records; its only encryption is of
+  rulesets (§6.5).
 
 ---
 
@@ -481,6 +482,39 @@ ephemeral.
 
 **What the server sees.** That a device sent something to another at a given
 time, and the envelope's size. The URL and title are inside the ciphertext.
+
+### 6.5 Rulesets
+
+A selective-sync ruleset (`docs/protocol.md` §17) is one §6 envelope under the
+current SDEK. Its plaintext is `{ "v": 1, "name", "rules": [...] }`, and the
+envelope's AAD is
+
+```text
+["syncRuleset", "<rulesetId>", <revision>]
+```
+
+`syncRuleset` is not an object type, so a ruleset can never be replayed as an
+operation payload (or the reverse). Binding the id stops the server putting one
+ruleset's ciphertext under another id; binding the revision (a JSON number)
+stops it presenting an older revision's ciphertext as a newer one. A device
+also never accepts a lower revision than the one it holds for the same id, since
+an older (revision, envelope) pair is itself a valid ruleset, and replaying one
+would silently lift a rule. The `rulesetId` is chosen by the dashboard, the revision is the one
+the server will store (`1` for a new ruleset, the previous revision plus one for
+an update), and the server checks it with `If-Match`. The envelope format is
+unchanged (`v: 2`).
+
+The dashboard is the only writer: it is the first place the web code encrypts
+(`encryptBytesWithSdek`, a byte-exact port of the extension's, tested against
+`web/src/vault/fixtures/extension-vectors.json` and a ruleset vector shared with
+the extension). Extensions only read. An extension that cannot decrypt a ruleset
+(wrong key, tampered or replayed envelope) keeps the version it last verified.
+
+**What the server sees.** That a ruleset exists, its id, its revision, when it
+changed, its envelope's size, whether it is the account's Default, and which
+devices are assigned to it. The name, the folders, domains and patterns are
+inside the ciphertext. The server also learns, from the assignments, that some
+devices have one ruleset in common.
 
 ---
 

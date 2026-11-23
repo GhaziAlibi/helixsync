@@ -979,6 +979,23 @@ async function renderStatusView(device: DeviceRecord): Promise<void> {
     <button id="sync-now" class="primary">${th("statusview_syncNow")}</button>
   `;
 
+  // Read-only: rulesets are managed from the dashboard (docs/protocol.md §17).
+  const rulesetInfo = response.rulesets as { names: Array<string | null>; unreadable: number } | undefined;
+  if (rulesetInfo && (rulesetInfo.names.length > 0 || rulesetInfo.unreadable > 0)) {
+    const line = document.createElement("div");
+    line.id = "rulesets-line";
+    line.className = "status-message";
+    const names = rulesetInfo.names.map((name) => name ?? t("statusview_rulesetsDefault")).join(", ");
+    // Ruleset names are the account owner's text: textContent, never markup.
+    line.textContent = [
+      rulesetInfo.names.length > 0 ? t("statusview_rulesets", { names }) : "",
+      rulesetInfo.unreadable > 0 ? t("statusview_rulesetsUnreadable") : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
+    document.querySelector(".status-card")!.insertAdjacentElement("afterend", line);
+  }
+
   // The detail is an error message that can echo server text, so it's set
   // as textContent, never markup.
   if ((response.status === "error" || response.status === "needs_reauth") && response.errorDetail) {

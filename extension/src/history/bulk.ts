@@ -10,6 +10,7 @@
 // 2 = grouped by URL). The latter two describe data layout and have nothing
 // to do with the envelope version.
 import { uploadOperations } from "../api/client";
+import { NO_RULES, getEffectiveRules, isUrlBlocked, type EffectiveRules } from "../rulesets";
 import {
   buildOperationAad,
   decryptBytesWithSdek,
@@ -111,11 +112,17 @@ export async function deterministicBulkIds(
   deviceId: string,
   cutoffMs: number,
   chunkIndex: number,
+  // The hash of the rulesets the import runs under (rulesets/effective.ts).
+  // Chunks of the same scope under other rules hold other visits, so they must
+  // not share ids with an earlier run's: the server would drop them as
+  // duplicates. Empty (no rules) leaves the ids as they always were.
+  rulesHash: string = "",
 ): Promise<{ operationId: string; objectId: string }> {
   const cutoff = String(cutoffMs);
   const chunk = String(chunkIndex);
-  const operationId = await deterministicUuid("HISTORY_BULK", deviceId, "bulkImport", cutoff, chunk);
-  const objectId = await deterministicUuid("HISTORY_BULK", deviceId, "bulkImport", cutoff, chunk, "object");
+  const salt = rulesHash === "" ? [] : [rulesHash];
+  const operationId = await deterministicUuid("HISTORY_BULK", deviceId, "bulkImport", cutoff, chunk, ...salt);
+  const objectId = await deterministicUuid("HISTORY_BULK", deviceId, "bulkImport", cutoff, chunk, "object", ...salt);
   return { operationId, objectId };
 }
 
@@ -144,6 +151,20 @@ function largestBelow(sorted: Float64Array, bound: number): number | undefined {
   return result;
 }
 
+/** The in-window visit times of one URL, ascending, for the paging cursor of
+ * a URL that is not imported. */
+async function blockedUrlTimes(url: string, cutoffMs: number, endMs: number): Promise<Float64Array> {
+  const times: number[] = [];
+  for (const visit of await chrome.history.getVisits({ url })) {
+    if (visit.visitTime === undefined) continue;
+    if (visit.visitTime < cutoffMs || visit.visitTime >= endMs) continue;
+    if (NON_USER_VISIT_TRANSITIONS.has(visit.transition ?? "")) continue;
+    times.push(visit.visitTime);
+  }
+  times.sort((a, b) => a - b);
+  return Float64Array.from(times);
+}
+
 /** Streams every visit in `[cutoffMs, endMs)` into segments of
  * BULK_SEGMENT_VISITS. Returns aborted:true if the device disconnects.
  *
@@ -159,6 +180,7 @@ async function enumerateVisits(
   endMs: number,
   skipState: { remaining: number },
   onSegment: (groups: CollectedGroup[]) => Promise<void>,
+  rules: EffectiveRules = NO_RULES,
 ): Promise<{ total: number; aborted: boolean }> {
   let total = 0;
   let pending: CollectedGroup[] = [];
@@ -223,14 +245,26 @@ async function enumerateVisits(
     });
     pageIndex++;
 
+    // A URL a ruleset blocks is never read (no getVisits) or sent. The page's
+    // last item is the exception: the next page starts below its newest
+    // in-window visit, so its times are looked up, and then dropped.
+    const lastOfPage = items[items.length - 1];
+    const blockedUrls = new Set<string>();
+
     for (let i = 0; i < items.length; i += BULK_URL_CONCURRENCY) {
       const slice = items.slice(i, i + BULK_URL_CONCURRENCY);
-      const inWindow = slice.filter(
-        (item) =>
-          item.url &&
-          !urlTimes.has(item.url) &&
-          (item.lastVisitTime ?? Number.POSITIVE_INFINITY) >= cutoffMs,
-      );
+      const inWindow = slice.filter((item) => {
+        if (!item.url || urlTimes.has(item.url)) return false;
+        if ((item.lastVisitTime ?? Number.POSITIVE_INFINITY) < cutoffMs) return false;
+        if (isUrlBlocked(item.url, rules)) {
+          blockedUrls.add(item.url);
+          if (item !== lastOfPage) {
+            urlTimes.set(item.url, new Float64Array(0));
+            return false;
+          }
+        }
+        return true;
+      });
       if (inWindow.length === 0) continue;
       // Reserved before the async getVisits calls so a URL resurfacing in
       // the next slice is never enumerated twice.
@@ -258,7 +292,7 @@ async function enumerateVisits(
         await paceForWork(Date.now() - subBatchStartedAt);
         for (const g of groupsPerUrl) {
           urlTimes.set(g.url, Float64Array.from(g.times));
-          if (g.times.length === 0) continue;
+          if (g.times.length === 0 || blockedUrls.has(g.url)) continue;
           await pushGroup(g.url, g.title, g.times);
         }
       }
@@ -268,7 +302,13 @@ async function enumerateVisits(
     if (items.length < BULK_SEARCH_PAGE_SIZE) break;
 
     const lastItem = items[items.length - 1];
-    const lastItemTimes = (lastItem.url && urlTimes.get(lastItem.url)) || new Float64Array(0);
+    let lastItemTimes = (lastItem.url && urlTimes.get(lastItem.url)) || new Float64Array(0);
+    if (lastItem.url && lastItemTimes.length === 0 && isUrlBlocked(lastItem.url, rules)) {
+      // Blocked on an earlier page, so never read: read its times now, for
+      // the cursor only.
+      lastItemTimes = await blockedUrlTimes(lastItem.url, cutoffMs, endMs);
+      urlTimes.set(lastItem.url, lastItemTimes);
+    }
     let nextQueryEndTime = largestBelow(lastItemTimes, queryEndTime);
     if (nextQueryEndTime === undefined) {
       console.warn("HelixSync: bulk history page cursor found no in-window time below the current bound", {
@@ -300,6 +340,7 @@ export interface BulkScopeFields {
   end: "historyBulkEndMs" | "historyOlderEndMs";
   uploadedChunks: "historyBulkUploadedChunks" | "historyOlderUploadedChunks";
   uploadedVisits: "historyBulkUploadedVisits" | "historyOlderUploadedVisits";
+  rulesetHash: "historyBulkRulesetHash" | "historyOlderRulesetHash";
 }
 
 const INITIAL_SCOPE: BulkScopeFields = {
@@ -307,6 +348,7 @@ const INITIAL_SCOPE: BulkScopeFields = {
   end: "historyBulkEndMs",
   uploadedChunks: "historyBulkUploadedChunks",
   uploadedVisits: "historyBulkUploadedVisits",
+  rulesetHash: "historyBulkRulesetHash",
 };
 
 const OLDER_SCOPE: BulkScopeFields = {
@@ -314,6 +356,7 @@ const OLDER_SCOPE: BulkScopeFields = {
   end: "historyOlderEndMs",
   uploadedChunks: "historyOlderUploadedChunks",
   uploadedVisits: "historyOlderUploadedVisits",
+  rulesetHash: "historyOlderRulesetHash",
 };
 
 export interface BulkCollectResult {
@@ -347,6 +390,30 @@ export async function collectHistoryBulk(
 
   let uploadedChunks = device[fields.uploadedChunks] ?? 0;
   let uploadedVisits = device[fields.uploadedVisits] ?? 0;
+
+  // Rulesets filter what is enumerated, so a resume that skips the first N
+  // visits is only right under the rules the N were counted under. Under
+  // other rules the scope restarts from its first chunk, in chunk ids of its
+  // own (`deterministicBulkIds`), so nothing it sends is mistaken for a
+  // duplicate of the earlier run. Visits that run already sent stay.
+  const rules = await getEffectiveRules();
+  const rulesHash = rules.hash;
+  if ((device[fields.rulesetHash] ?? "") !== rulesHash) {
+    if (uploadedChunks > 0 || uploadedVisits > 0) {
+      console.log("HelixSync: bulk history rules changed since the checkpoint, restarting the scope", {
+        uploadedChunks,
+        uploadedVisits,
+      });
+    }
+    uploadedChunks = 0;
+    uploadedVisits = 0;
+    await putDevice({
+      ...device,
+      [fields.rulesetHash]: rulesHash === "" ? undefined : rulesHash,
+      [fields.uploadedChunks]: undefined,
+      [fields.uploadedVisits]: undefined,
+    });
+  }
 
   const startedAt = Date.now();
   console.log("HelixSync: bulk history collect starting", {
@@ -398,7 +465,7 @@ export async function collectHistoryBulk(
     for (let more = true; more; ) {
       more = await uploadPending();
     }
-    const { operationId, objectId } = await deterministicBulkIds(device.deviceId, effectiveCutoff, chunkIndex);
+    const { operationId, objectId } = await deterministicBulkIds(device.deviceId, effectiveCutoff, chunkIndex, rulesHash);
     const { startDeviceSequence, startLamport } = await reserveSequenceBatch(1);
     const container: BulkHistoryContainer = {
       v: 1,
@@ -491,7 +558,7 @@ export async function collectHistoryBulk(
         const plaintextBytes = codec === "deflate-raw" ? await deflateRaw(jsonBytes) : jsonBytes;
         if (currentChunkObjectId === undefined) {
           currentChunkObjectId = (
-            await deterministicBulkIds(device.deviceId, effectiveCutoff, chunkIndex)
+            await deterministicBulkIds(device.deviceId, effectiveCutoff, chunkIndex, rulesHash)
           ).objectId;
         }
         const envelope = encryptBytesWithSdek(
@@ -516,6 +583,7 @@ export async function collectHistoryBulk(
         await yieldToEventLoop();
         await paceForWork(encryptMs);
       },
+      rules,
     ));
 
     if (!aborted) {

@@ -1,0 +1,498 @@
+{
+ "_comment": "Shared by web/src/rulesets and extension/src/rulesets: both matchers must agree on every case. Keep the two copies identical.",
+ "cases": [
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "https://example.com/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "https://www.example.com/a?b=1",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "https://a.b.example.com/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "https://notexample.com/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "https://example.com.evil.org/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "https://evil.org/example.com",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "https://example.com:8443/x",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "https://user:pw@example.com/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "HTTPS://EXAMPLE.COM./",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "sub.example.com"
+   },
+   "url": "https://example.com/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "sub.example.com"
+   },
+   "url": "https://x.sub.example.com/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "*.example.com"
+   },
+   "url": "https://example.com/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "https://www.Example.com/some/path"
+   },
+   "url": "https://www.example.com/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com:8080"
+   },
+   "url": "https://example.com/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "bücher.de"
+   },
+   "url": "https://bücher.de/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "bücher.de"
+   },
+   "url": "https://shop.xn--bcher-kva.de/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "xn--bcher-kva.de"
+   },
+   "url": "https://bücher.de/x",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "192.168.1.10"
+   },
+   "url": "http://192.168.1.10:3000/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "192.168.1.10"
+   },
+   "url": "http://192.168.1.100/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "[::1]"
+   },
+   "url": "http://[::1]:8080/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "::1"
+   },
+   "url": "http://[::1]/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "settings"
+   },
+   "url": "chrome://settings",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "about:blank",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "not a url",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": ""
+   },
+   "url": "https://example.com/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "exa mple.com"
+   },
+   "url": "https://example.com/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockDomain",
+    "domain": "example.com"
+   },
+   "url": "ftp://files.example.com/x",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://localhost/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://localhost:3000/x",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://app.localhost:3000/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://foo.local/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "https://x.test/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "https://deep.x.internal/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://127.0.0.1/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://127.255.0.3:80/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://0x7f.1/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://10.1.2.3/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://172.16.0.1/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://172.31.255.255/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://172.32.0.1/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://172.15.0.1/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://192.168.0.1/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://192.169.0.1/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://11.0.0.1/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://[::1]/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "http://[::2]/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "https://example.com/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "https://localhost.example.com/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "https://notlocal/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "https://mylocal.com/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "https://attest.com/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "https://8.8.8.8/",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "chrome://settings",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockLocal"
+   },
+   "url": "file:///etc/hosts",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockPattern",
+    "pattern": "\\.pdf($|\\?)"
+   },
+   "url": "https://x.com/a.pdf",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockPattern",
+    "pattern": "\\.pdf($|\\?)"
+   },
+   "url": "https://x.com/a.pdf?dl=1",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockPattern",
+    "pattern": "\\.pdf($|\\?)"
+   },
+   "url": "https://x.com/a.pdfx",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockPattern",
+    "pattern": "^https://[^/]*\\.ads\\."
+   },
+   "url": "https://cdn.ads.example.com/x",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockPattern",
+    "pattern": "^https://[^/]*\\.ads\\."
+   },
+   "url": "http://cdn.ads.example.com/x",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockPattern",
+    "pattern": "EXAMPLE"
+   },
+   "url": "https://example.com/",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockPattern",
+    "pattern": "/admin/"
+   },
+   "url": "https://example.com/Admin/x",
+   "blocked": true
+  },
+  {
+   "rule": {
+    "kind": "blockPattern",
+    "pattern": "("
+   },
+   "url": "https://example.com/(",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockPattern",
+    "pattern": "["
+   },
+   "url": "https://example.com/[",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockPattern",
+    "pattern": "a{2,1}"
+   },
+   "url": "https://example.com/aa",
+   "blocked": false
+  },
+  {
+   "rule": {
+    "kind": "blockPattern",
+    "pattern": "secret"
+   },
+   "url": "chrome://secret",
+   "blocked": true
+  }
+ ]
+}

@@ -173,6 +173,15 @@
   "statusview_lastSync": {
     "message": "Dernière synchronisation : {time} · En attente : {pending}"
   },
+  "statusview_rulesets": {
+    "message": "Jeux de règles : {names} (gérés depuis le tableau de bord)"
+  },
+  "statusview_rulesetsDefault": {
+    "message": "Par défaut"
+  },
+  "statusview_rulesetsUnreadable": {
+    "message": "Certains jeux de règles n'ont pas pu être lus. Leurs dernières règles connues s'appliquent toujours."
+  },
   "statusview_syncNow": {
     "message": "Synchroniser maintenant"
   },

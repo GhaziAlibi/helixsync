@@ -173,6 +173,15 @@
   "statusview_lastSync": {
     "message": "Última sincronización: {time} · Pendientes: {pending}"
   },
+  "statusview_rulesets": {
+    "message": "Conjuntos de reglas: {names} (se gestionan desde el panel)"
+  },
+  "statusview_rulesetsDefault": {
+    "message": "Predeterminado"
+  },
+  "statusview_rulesetsUnreadable": {
+    "message": "No se pudieron leer algunos conjuntos de reglas. Siguen aplicándose sus últimas reglas conocidas."
+  },
   "statusview_syncNow": {
     "message": "Sincronizar ahora"
   },

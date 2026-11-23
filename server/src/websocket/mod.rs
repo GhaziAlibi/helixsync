@@ -130,6 +130,24 @@ impl ConnectionRegistry {
             .unwrap_or_default()
     }
 
+    /// Tells the given devices of the user that a ruleset they depend on
+    /// changed (docs/protocol.md §17). Only a hint, like `changes_available`:
+    /// devices also compare their ruleset revisions each sync cycle.
+    pub fn notify_ruleset_changed(&self, user_id: Uuid, device_ids: &[Uuid]) {
+        if device_ids.is_empty() {
+            return;
+        }
+        let targets: std::collections::HashSet<&Uuid> = device_ids.iter().collect();
+        if let Some(conns) = self.connections.get(&user_id) {
+            let msg = serde_json::json!({ "type": "ruleset_changed" }).to_string();
+            for conn in conns.iter() {
+                if targets.contains(&conn.device_id) {
+                    let _ = conn.sender.try_send(msg.clone());
+                }
+            }
+        }
+    }
+
     /// Tells every connected device of the user that a login-with-device
     /// request is waiting (docs/protocol.md §7.4). Only a hint, like
     /// `changes_available`: extensions also check on their periodic sync.
