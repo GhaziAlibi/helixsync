@@ -16,12 +16,16 @@ Nothing is tagged, pushed or published until the CI workflow
    push itself changed `VERSION` (a deliberate minor or major bump), that value
    is used as-is. Otherwise the workflow bumps the patch number and commits it
    to `main`. It then copies the version into `extension/chrome/manifest.json`
-   and `extension/firefox/manifest.json` and tags `vX.Y.Z`.
+   and `extension/firefox/manifest.json` and tags `vX.Y.Z`. A manual run
+   (Actions → Release → Run workflow, on `main`) does the same, but bumps the
+   patch number only when `VERSION` is already tagged, so a re-release never
+   reuses a version the stores have already seen.
 2. **Images.** The `server` and `web` images are built and pushed to GitHub
    Container Registry as `ghcr.io/<owner>/helixsync-server` and
    `ghcr.io/<owner>/helixsync-web`, tagged `latest` and with the release
    version. Deployments should pin the version rather than follow `latest`.
-3. **Extension.** The extension is built and tested, zipped as
+3. **Extension.** On every run, whatever the push changed, the extension is
+   built and tested, zipped as
    `helixsync-extension-<version>.zip` (Chromium) and
    `helixsync-extension-firefox-<version>.zip` (Firefox, unsigned).
    Each zip is compared with the same browser's zip in the last release that

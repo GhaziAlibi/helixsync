@@ -34,6 +34,9 @@ jobs:
   #     value is used as-is and tagged.
   #   - otherwise the patch component is bumped automatically, committed
   #     back to main, and tagged.
+  # On a manual run, the patch component is bumped the same way when VERSION
+  # is already tagged, so re-releasing never reuses a version the stores
+  # have seen (they reject one); an untagged VERSION is used as-is.
   # On pull requests, nothing is committed/tagged — VERSION is only read,
   # for build-only validation. On pushes this runs after `ci`, so a tag and
   # a bump commit only ever follow a green build.
@@ -51,7 +54,6 @@ jobs:
       owner: ${{ steps.owner.outputs.lc }}
       server_changed: ${{ steps.changes.outputs.server }}
       web_changed: ${{ steps.changes.outputs.web }}
-      extension_changed: ${{ steps.changes.outputs.extension }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -79,15 +81,18 @@ jobs:
             pull_request) base="$BASE_SHA" ;;
             *) base="" ;;
           esac
+          # The extension is not filtered here: it is built on every run, and
+          # `extension-changes` decides by content what to publish, so changes
+          # a failed run never released are picked up by the next green run.
           # A new branch, a force push or a manual run leaves no usable base
           # (a manual run is a deliberate request to build everything).
           if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
             || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            for area in server web extension; do
+            for area in server web; do
               echo "$area=true" >> "$GITHUB_OUTPUT"
             done
           else
-            for area in server web extension; do
+            for area in server web; do
               if area_changed "$area"; then
                 echo "$area=true" >> "$GITHUB_OUTPUT"
               else
@@ -113,8 +118,20 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Check whether VERSION is already tagged (manual run)
+        id: tagged
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          tag="v$(tr -d '[:space:]' < VERSION)"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null \
+            || git ls-remote --exit-code --tags origin "$tag" >/dev/null 2>&1; then
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Auto-bump patch version
-        if: github.event_name == 'push' && steps.diff.outputs.changed == 'false'
+        if: (github.event_name == 'push' && steps.diff.outputs.changed == 'false') || (github.event_name == 'workflow_dispatch' && steps.tagged.outputs.tagged == 'true')
         run: |
           current=$(tr -d '[:space:]' < VERSION)
           IFS='.' read -r major minor patch <<< "$current"
@@ -127,7 +144,7 @@ jobs:
           git push origin HEAD:main
 
       - name: Sync manifest and Cargo versions with VERSION
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
           version=$(tr -d '[:space:]' < VERSION)
           changed=false
@@ -153,7 +170,7 @@ jobs:
           fi
 
       - name: Tag release
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -252,7 +269,7 @@ jobs:
   # are separate jobs that never install or build anything.
   extension:
     needs: [ci, version]
-    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.ci.result == 'success' || github.event_name == 'pull_request') && needs.version.outputs.extension_changed == 'true' }}
+    if: ${{ !cancelled() && needs.version.result == 'success' && (needs.ci.result == 'success' || github.event_name == 'pull_request') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
