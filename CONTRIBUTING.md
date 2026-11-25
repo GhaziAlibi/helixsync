@@ -88,9 +88,9 @@ Queries in `server/tests/` use the live database and are deliberately not cached
 
 #### Schema changes
 
-Migrations are append-only: the app is live, so never edit an applied
-migration. Add the next numbered file in `server/migrations/` (for example
-`0003_….sql`), keep it additive and backward compatible, then regenerate
+Migrations are append-only: deployed servers have already applied them, so
+never edit an existing migration. Add the next numbered file in
+`server/migrations/` (for example `0005_….sql`), keep it additive and backward compatible, then regenerate
 `server/.sqlx/` as above. SQLx records a checksum of each applied migration and
 the server refuses to start when it no longer matches, so editing an old one
 breaks every existing database.

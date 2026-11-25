@@ -34,7 +34,7 @@ For any user-facing change to `web/` or `extension/`:
 - Keep every control reachable and operable by keyboard, with visible focus.
 - Don't rely on colour alone; check contrast for new colours.
 - Route all new visible text and accessible names through the i18n catalogs
-  (see [i18n.md](i18n.md)) so they're translated, and check the layout in
+  (see [Translations](CONTRIBUTING.md#translations)) so they're translated, and check the layout in
   Arabic (right-to-left).
 - Announce dynamic errors and status changes (for example `role="alert"` or
   `role="status"`).
@@ -89,9 +89,10 @@ named here.
 ## Supported environments
 
 HelixSync has not been systematically tested with specific browser and
-assistive-technology combinations. It targets current Chromium-based browsers
-(the extension is on the Chrome Web Store), with Safari described in
-[docs/safari.md](docs/safari.md). The dashboard is a web page and runs in
+assistive-technology combinations. The extension targets current
+Chromium-based browsers (it is on the Chrome Web Store) and Firefox desktop
+(see [docs/firefox.md](docs/firefox.md)); Safari is not supported (see
+[docs/safari.md](docs/safari.md)). The dashboard is a web page and runs in
 current desktop browsers. We make no claim of tested support for any
 particular screen reader.
 

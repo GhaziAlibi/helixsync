@@ -41,7 +41,7 @@ the Chromium API state plus applied operations on startup if inconsistent
 ### 1.2 Device identity
 
 A device is identified by a server-issued `deviceId` (UUID), created during
-device registration (§7). The device's cryptographic key material (§ see
+device registration (§7). The device's cryptographic key material (see
 `docs/encryption.md`) is bound to this `deviceId`.
 
 ### 1.3 Object types
@@ -178,21 +178,16 @@ optimistically.
   sequence/business rules or performing any state mutation.
 - `sync_operations` is append-only. No `UPDATE` on payload/type/object fields
   is permitted after insert. Corrections are new operations (§2).
-- This `operationId`-against-`sync_operations` check alone is only as
-  durable as `sync_operations` itself, which compaction prunes once an
-  operation is folded into a snapshot. For most object types that's fine —
-  a pruned operation's *object* still has a permanent `sync_objects` ledger
-  row (§8), so a later non-origination op on it still passes the ownership
-  check even though the original operation's own idempotency row is gone,
-  and a resent *origination* simply re-derives the same well-known ID and
-  is rejected/accepted the same way any duplicate create is. `historyVisit`
-  `bulkImport` needed its own explicit exception to this (§8.3.1): a bulk
-  chunk's `objectId` is additionally checked against `sync_objects`
-  directly (which `bulkImport`, uniquely among origination-only op types,
-  is given a permanent ledger row in specifically so this lookup has
-  something to find), so a retry after compaction — even one that reserves
-  a fresh `deviceSequence` — still reads as `duplicate` rather than
-  double-counting the `history_visit_hours` buckets.
+- The `operationId` check only covers operations still in `sync_operations`,
+  which compaction prunes once an operation is folded into a snapshot. For
+  most object types this is enough: the object keeps a permanent
+  `sync_objects` ledger row (§8), so later operations on it still pass the
+  ownership check, and a resent origination is handled like any duplicate
+  create. `historyVisit` `bulkImport` is the exception (§8.3.1): it is the
+  only origination-only operation type that gets a permanent `sync_objects`
+  row, and a bulk chunk's `objectId` is checked against it. A retry after
+  compaction, even one with a fresh `deviceSequence`, therefore still reads
+  as `duplicate` and does not count the `history_visit_hours` buckets twice.
 
 ---
 
@@ -557,11 +552,10 @@ History visits are immutable events, not mutable objects.
 
 #### 8.3.1 Chunked history import (`bulkImport`)
 
-First login sends old history as one or more `bulkImport` ops — one per
-chunk, uploaded as it's ready rather than one unbounded op for the whole
-import, which risked OOMing the MV3 service worker on a real multi-million-
-visit profile. Live per-visit capture (`onVisited`) stays unchanged; steady
-state is cheap.
+First login sends old history as one or more `bulkImport` ops, one per
+chunk, each uploaded as soon as it is ready. Chunking keeps the service
+worker's memory bounded on profiles with millions of visits. Visits made
+after that are captured one by one (`onVisited`).
 
 - Enumeration is scoped to a **fixed window `[cutoffMs, endMs)`**, both
   ends chosen once per import and persisted (not recomputed on retry):
@@ -631,19 +625,16 @@ state is cheap.
   visit: the browser's own history is the store, so `remote_objects` holds no
   `historyVisit` rows.
 - Replay is a local side effect only and must never produce an operation.
-  An earlier design replayed without protection and caused runaway duplicate
-  growth: the async `onVisited` event for the replayed visit, arriving after
-  any synchronous suppression window had closed, was recaptured as a
-  brand-new local operation and ping-ponged between devices forever. Two
-  independent guards prevent that now:
+  The browser fires `onVisited` for a replayed visit asynchronously; if it
+  were captured as a new local visit it would be uploaded and replayed back
+  and forth between devices. Two independent guards prevent that:
   - The browser stamps an `addUrl` visit at the moment of the call and the
     event carries that time as `lastVisitTime`, so the capture listener
     recognises an echo by its visit time falling inside the window of the call
     that caused it (compared in canonical URL form, one event per window). It
     never goes by how soon the event arrives: under a large replay the
-    browser's events trail the calls by far more than a fixed timeout (an
-    earlier 30 s expiry let about a quarter of a 50,000-URL replay leak back
-    as uploads). A later visit by the user to the same URL has a different
+    browser's events can trail the calls by far more than any fixed timeout.
+    A later visit by the user to the same URL has a different
     time, so it is never mistaken for an echo. A failed `addUrl` removes its
     window, and windows whose event never came are dropped after 30 minutes.
     If the worker restarts mid-replay, the windows of the calls already made
@@ -667,11 +658,12 @@ state is cheap.
   visit, so it is skipped.
 - Idempotency is per-`operationId`, ordering per `deviceSequence` (§4.1,
   §5): one bulk op consumes one sequence number and retries atomically.
-- Client-side visit-time scoping at collect remains the enforcement (the
-  server sees one `created_at = now` for the whole op). The ~100MB row
-  rides snapshots within the existing 256MB inflate ceiling — one-time per
-  new device. A bulk op counts as 1 op against `/changes` page limits but
-  carries ~100MB in one response — one-time per peer.
+- Retention scoping by visit time is done by the client when it collects
+  visits (the server sees one `created_at = now` for the whole op).
+- Size: a bulk op can be up to 96 MB (§10.2). It is carried in snapshots,
+  whose decompressed size is capped at 256 MB, and counts as one op against
+  `/changes` page limits, so one response can carry up to 96 MB. Each peer
+  downloads it once.
 
 #### 8.3.2 Hourly visit-count buckets (`visitHours`)
 
@@ -890,9 +882,8 @@ the server, in order, per operation:
 5. Schema validation (object type/operation type/payload shape/size limits).
    Per-op payload cap is 256KB, with one exception:
    `historyVisit`/`bulkImport` allows up to 96MB
-   (`MAX_BULK_HISTORY_PAYLOAD_BYTES`, sized against a heavy-tailed
-   "unlimited" profile — measure one real lifetime profile before freezing
-   the number). `bulkImport` requires `1 <= visitCount <= 1,000,000`
+   (`MAX_BULK_HISTORY_PAYLOAD_BYTES`, sized for a large profile with
+   unlimited history retention). `bulkImport` requires `1 <= visitCount <= 1,000,000`
    (`MAX_VISIT_COUNT_PER_OP`; rejected as `bulk_import_missing_count` below
    1, `visit_count_too_large` above the ceiling); any non-bulk op carrying
    `visitCount` is rejected. One accepted bulk op advances the cursor by
@@ -1105,8 +1096,7 @@ Rules:
   by a client that doesn't understand them; the affected object enters a
   local `compatibility_pending` state, never a silent no-op. Old clients
   don't know `bulkImport` (§8.3.1): per this rule they store-but-don't-apply
-  it, silently missing new history until updated. Documented, not gated
-  (revisit only if peer-version data says otherwise).
+  it, and miss that history until they are updated.
 - Write endpoints require the `X-Protocol-Version` header; a request without
   a valid one is rejected like a too-old client.
 - A client whose `protocolVersion` is below the server's

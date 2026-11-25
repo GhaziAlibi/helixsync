@@ -273,8 +273,8 @@ ship one:
   `CHROME_CLIENT_ID`, `CHROME_CLIENT_SECRET`, `CHROME_REFRESH_TOKEN`,
   `CHROME_PUBLISHER_ID` and `CHROME_EXTENSION_ID` secrets there rather than at
   repo level, add yourself as a required reviewer, and restrict deployment
-  branches to `main` (Settings → Environments). Until the secrets are moved,
-  repo-level secrets of the same names are still read by the job.
+  branches to `main` (Settings → Environments). The job also reads repo-level
+  secrets of the same names, so delete those once the environment has them.
 - The publish call uses `STAGED_PUBLISH`: after the store approves an upload,
   it is staged and must be released with the Publish button in the Web Store
   developer dashboard.

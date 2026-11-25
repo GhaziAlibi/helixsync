@@ -19,7 +19,7 @@ All notable changes to HelixSync are documented here. The format follows
   device joins; existing accounts and devices get it from the migration, so nothing
   changes until you add rules. Rulesets are end to end encrypted with the account key
   (new AAD, `docs/encryption.md` §6.5); the server stores ciphertext and which devices
-  are assigned. This is the first time the dashboard encrypts anything. History
+  are assigned. History
   filtering covers live capture, the first import (with a resume guard that restarts
   the scope when the rules changed) and replay of other devices' visits; bookmark
   filtering covers capture, the first import, remote apply, moves in and out of an

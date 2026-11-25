@@ -34,11 +34,10 @@
   there, and, since the Vault page decrypts your bookmarks, history and tabs in
   the browser, read them too. The extension is installed separately and isn't
   affected. See [`security.md`](security.md).
-- **The Vault can miss items changed before the server was updated.** The
-  snapshot now carries the earlier operations a bookmark or tab needs, so a
-  moved or renamed bookmark shows in full. Objects that were compacted into a
-  stored snapshot by an older server lost those earlier operations; the Vault
-  leaves such an item out and says how many.
+- **The Vault can miss some older items.** To show a moved or renamed
+  bookmark or tab in full, the Vault needs its earlier changes. A server older
+  than 1.1.0 dropped those when it compacted objects into a stored snapshot, so
+  the Vault leaves such items out and says how many.
 - **Tab groups need a permission in each browser.** Turning on Tab Groups in a
   browser's popup asks for it; when the setting was turned on elsewhere, open
   the popup's settings and press Save. Tab, tab group and restore behavior is

@@ -74,7 +74,6 @@ Good to know:
 
 ## Web dashboard
 
-
 | Page | What you can do |
 |------|-----------------|
 | Dashboard | Connection and sync health, last sync, device count, how many bookmarks, history items and tabs are synced, storage used against your limit, and recent devices |
@@ -84,17 +83,19 @@ Good to know:
 | Synchronization | The same sync settings as the popup, kept in one place |
 | Restore points | See, pin and delete your bookmark restore points, switch automatic ones off, and see the space they use. Restoring is done in the extension |
 | Security | Check encryption status, review and revoke web sessions, change your password, get a new recovery code, delete your account |
+| Backups | Read-only: whether the server's backups are on, their schedule, the backup files and recent runs. Every account on the server sees it; see [`deployment.md`](deployment.md#backups) |
 
 ## Changing your password
 
-re-wraps your account key under the new password.
-Nothing already synced becomes unreadable; each browser simply signs in again
-with the new password.
+On the dashboard's **Security** page, enter your current and your new
+password. The dashboard re-wraps your account key under the new password and
+signs out your other web sessions. Nothing already synced becomes unreadable;
+each browser simply signs in again with the new password.
 
 ## Forgot your password?
 
-On the sign-in page, enter your email, your
-recovery code and a new password. Your data stays readable, every web session
+Choose **Forgot your password?** on the sign-in page, then enter your email,
+your recovery code and a new password. Your data stays readable, every web session
 is signed out, and you get a new recovery code (each one works once). To just
 get into the dashboard, **Log in with a device** lets a connected browser
 approve you. If you lost the recovery code as well, the server's operator can
@@ -104,6 +105,6 @@ you reconnect them. See [`encryption.md`](encryption.md) §9.
 
 ## Deleting your account
 
-(Security → Danger zone) permanently removes the
-account and everything stored under it, and connected browsers stop syncing.
+**Security → Danger zone** in the dashboard permanently removes the account and
+everything stored under it, and connected browsers stop syncing.
 It asks for your password and for you to type `DELETE`.

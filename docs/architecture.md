@@ -61,6 +61,11 @@ Rust + Axum + Tokio + SQLx + PostgreSQL. Modules:
   snapshots, tombstone/compaction policy, statistics and per-account settings.
 - `restore_points/` — storage, listing, pinning and eviction of encrypted
   bookmark restore points (opaque blobs; the server never reads them).
+- `rulesets/` — storage of encrypted selective-sync rulesets and their device
+  assignments ([`protocol.md`](protocol.md) §17; the server never reads them).
+- `backup/` — scheduled, encrypted database backups, the `backup-now`,
+  `list-backups` and `restore-backup` commands, and the read-only backup status
+  for the dashboard ([`deployment.md`](deployment.md#backups)).
 - `websocket/` — change-available broadcast, plus per-device push of
   send-tab frames (nothing stored).
 - `crypto/` — server-side primitives only (Argon2id hashing, HMAC/token
@@ -74,7 +79,8 @@ Rust + Axum + Tokio + SQLx + PostgreSQL. Modules:
 - `config.rs` — environment-driven configuration (validated at startup).
 
 Background tasks run inside the server process: operation/tombstone
-compaction (hourly by default) and housekeeping (daily by default). CORS,
+compaction (hourly by default), housekeeping (daily by default) and, when
+enabled, backups (daily by default). CORS,
 request timeouts and response compression are layered in `lib.rs`.
 
 ### Extension (`extension/`)
@@ -84,7 +90,8 @@ TypeScript + Manifest V3 + Vite. Modules mirror the protocol's domains:
 `sync/` (queue, cursor, conflict application), `bookmarks/`, `history/`,
 `tabs/` (tabs, windows and tab groups), `send-tab/` (sending a tab to another
 device and opening one received), `restore-points/` (building,
-encrypting, planning and applying bookmark restore points), `storage/`
+encrypting, planning and applying bookmark restore points), `rulesets/`
+(fetching, decrypting and enforcing selective-sync rules), `storage/`
 (IndexedDB access layer),
 `crypto/` (key derivation and XChaCha20-Poly1305 E2E encryption), `api/` (typed
 REST and WebSocket client), `popup/` (the extension's whole UI, including
@@ -92,8 +99,9 @@ settings) and `util/`.
 
 ### Web (`web/`)
 
-React + TypeScript + Vite + Tailwind. Pages: login, dashboard, devices,
-sync settings, restore points, security. Talks to the same `/api/v1` REST surface as the
+React + TypeScript + Vite + Tailwind. Pages: login, password recovery,
+dashboard, Vault (read-only view of the decrypted data), devices, sync
+settings, rulesets, restore points, backups (read-only) and security. Talks to the same `/api/v1` REST surface as the
 extension, using cookie-based web sessions instead of device credentials. Key
 derivation happens in the browser (`web/src/crypto/`), so the password never
 reaches the server.
@@ -114,6 +122,8 @@ One PostgreSQL database; the schema is `server/migrations/`.
 | `tombstones` | Records of deleted objects |
 | `sync_stats`, `history_visit_hours` | Per-account counts, restore point bytes, and hourly visit-count buckets for the dashboard |
 | `bookmark_restore_points` | Encrypted, opaque snapshots of an account's bookmark tree, with kind, size, count and pinned flag ([`protocol.md`](protocol.md) §16); their byte total lives in `sync_stats.restore_point_bytes` |
+| `sync_rulesets`, `sync_ruleset_assignments` | Encrypted selective-sync rulesets and which devices each one applies to ([`protocol.md`](protocol.md) §17) |
+| `auth_requests`, `auth_request_approvals` | Pending login-with-device and two-device password reset requests, and the devices that approved them ([`encryption.md`](encryption.md) §9.2, §9.4) |
 | `audit_logs` | Security-relevant events |
 
 Deleting a `users` row cascades to everything except `audit_logs`, whose rows

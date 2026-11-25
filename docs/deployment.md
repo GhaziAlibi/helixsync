@@ -409,8 +409,7 @@ The outcome of each run is logged and recorded in the audit log
 Resource use: the database streams straight to disk, so memory stays flat
 however large it is; the only peak is about 128 MiB for a moment at the start
 of each backup and restore, while the passphrase is turned into an encryption
-key. As a guide, a 3.8 GB database took about 25 seconds to back up (1.9 GiB
-file) and under two minutes to restore, safety backup included.
+key.
 
 ### Seeing them in the dashboard
 
