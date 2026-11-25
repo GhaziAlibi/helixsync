@@ -1,6 +1,6 @@
 [package]
 name = "helixsync-server"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 description = "Self-hosted, end-to-end encrypted browser sync server"
 license = "MIT"
