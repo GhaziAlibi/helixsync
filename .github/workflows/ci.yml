@@ -6,6 +6,16 @@ name: CI
 on:
   pull_request:
   workflow_call:
+    # Read by release.yml to decide what this push releases.
+    outputs:
+      server:
+        value: ${{ jobs.changes.outputs.server }}
+      web:
+        value: ${{ jobs.changes.outputs.web }}
+      extension:
+        value: ${{ jobs.changes.outputs.extension }}
+      force:
+        value: ${{ jobs.changes.outputs.force }}
 
 permissions:
   contents: read
@@ -23,7 +33,9 @@ env:
 jobs:
   # Decides which of the jobs below run: an area's checks run only when its
   # code changed. Plain git, no third-party action. An event with no usable
-  # base runs everything.
+  # base runs everything. A manual run, or a push that changed VERSION (a
+  # release by hand), sets `force`: every area runs and, in release.yml,
+  # everything is released.
   changes:
     name: Detect changes
     # Dependabot pull requests skip CI: every other job needs this one, so
@@ -35,6 +47,7 @@ jobs:
       server: ${{ steps.changes.outputs.server }}
       web: ${{ steps.changes.outputs.web }}
       extension: ${{ steps.changes.outputs.extension }}
+      force: ${{ steps.changes.outputs.force }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -58,8 +71,14 @@ jobs:
             files="$(git diff --name-only "$base" HEAD)"
           fi
           touched() { echo "$files" | grep -qE "$1"; }
+          force=false
+          if [ "$EVENT_NAME" = workflow_dispatch ] \
+            || { [ "$EVENT_NAME" = push ] && touched '^VERSION$'; }; then
+            force=true
+          fi
+          echo "force=$force" >> "$GITHUB_OUTPUT"
           for area in server web extension; do
-            if touched "^$area/"; then
+            if [ "$force" = true ] || touched "^$area/"; then
               echo "$area=true" >> "$GITHUB_OUTPUT"
             else
               echo "$area=false" >> "$GITHUB_OUTPUT"
