@@ -905,6 +905,54 @@ async fn password_change_attempts_are_rate_limited(pool: PgPool) {
     assert_eq!(*statuses.last().unwrap(), StatusCode::TOO_MANY_REQUESTS);
 }
 
+// --- A request racing the deletion of its account ---
+//
+// `DELETE /auth/account` purges the auth caches only after its commit, so a
+// request can pass auth and then find the account gone. Deleting the rows
+// directly (no purge) holds that window open: the answer must be 401, not 500.
+
+#[sqlx::test(migrations = "./migrations")]
+async fn session_request_whose_account_vanished_mid_request_gets_401(pool: PgPool) {
+    let state = state_for(pool.clone(), test_config());
+    let server = browser(&state);
+    register(&server, "racer@example.com").await;
+    // Caches the session as valid.
+    server.get("/api/v1/auth/me").await.assert_status_ok();
+
+    delete_user_by_email(&pool, "racer@example.com")
+        .await
+        .unwrap()
+        .expect("the account existed");
+
+    server
+        .get("/api/v1/auth/me")
+        .await
+        .assert_status_unauthorized();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn device_request_whose_account_vanished_mid_request_gets_401(pool: PgPool) {
+    let state = state_for(pool.clone(), test_config());
+    let server = browser(&state);
+    register(&server, "racer-device@example.com").await;
+    let device = register_device(&server, "racer-device@example.com", "Laptop").await;
+    // Caches the device as active.
+    upload_one_op(&server, &device.access_token).await;
+
+    delete_user_by_email(&pool, "racer-device@example.com")
+        .await
+        .unwrap()
+        .expect("the account existed");
+
+    server
+        .post("/api/v1/sync/operations")
+        .add_header("x-protocol-version", "1")
+        .authorization_bearer(&device.access_token)
+        .json(&json!({ "operations": [bookmark_op(2)] }))
+        .await
+        .assert_status_unauthorized();
+}
+
 // --- Operator delete (`helixsync-server delete-account <email>`) ---
 
 #[sqlx::test(migrations = "./migrations")]

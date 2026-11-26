@@ -6,6 +6,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
+use crate::middleware::deleted_account::{is_missing_row_error, MissingRowError};
+
 /// Snapshot URL returned on `cursor_too_old` / `cursor_invalid`
 /// (docs/protocol.md §10.1, §10.3). Update this if the snapshot route moves.
 const CURSOR_TOO_OLD_SNAPSHOT_URL: &str = "/api/v1/sync/snapshot";
@@ -69,6 +71,13 @@ impl IntoResponse for AppError {
                 self.to_string(),
             ),
             AppError::Busy => (StatusCode::SERVICE_UNAVAILABLE, "busy", self.to_string()),
+            // Logged by `deleted_account_guard` instead, which first checks
+            // whether the request's account was deleted mid-request.
+            AppError::Database(e) if is_missing_row_error(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "internal error".to_string(),
+            ),
             AppError::Database(e) => {
                 tracing::error!(error = %e, "database error");
                 (
@@ -98,6 +107,14 @@ impl IntoResponse for AppError {
         } else {
             (status, Json(json!({ "error": code, "message": message }))).into_response()
         };
+
+        if let AppError::Database(e) = &self {
+            if is_missing_row_error(e) {
+                response
+                    .extensions_mut()
+                    .insert(MissingRowError(e.to_string()));
+            }
+        }
 
         // Retry-After is in whole seconds; round up so clients don't retry early.
         if let AppError::RateLimited(retry_after) = &self {

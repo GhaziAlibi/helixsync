@@ -91,6 +91,11 @@ pub fn app(state: AppState) -> Router {
         .nest("/api/v1", api_v1)
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
+        // Inside the trace layer so the logged status is the final one.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::deleted_account::deleted_account_guard,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .layer(timeout_layer)
