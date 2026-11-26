@@ -10,6 +10,7 @@ pub use crate::auth::model::{AuthenticatedDevice, AuthenticatedUser};
 use crate::background::run_pass;
 use crate::crypto::hash_token;
 use crate::error::AppError;
+use crate::middleware::deleted_account::record_request_user;
 use crate::state::{AppState, DeviceRevocationCache, WebSessionCache};
 
 pub const SESSION_COOKIE_NAME: &str = "helixsync_session";
@@ -107,10 +108,13 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
         if let Some(entry) = state.web_session_cache.get(&session_hash) {
             if entry.0.elapsed() < WEB_SESSION_CACHE_TTL {
                 return match &entry.1 {
-                    Some((user_id, email)) => Ok(AuthenticatedUser {
-                        user_id: *user_id,
-                        email: email.clone(),
-                    }),
+                    Some((user_id, email)) => {
+                        record_request_user(parts, *user_id);
+                        Ok(AuthenticatedUser {
+                            user_id: *user_id,
+                            email: email.clone(),
+                        })
+                    }
                     // Tombstone: session was revoked or logged out.
                     None => Err(AppError::Unauthorized),
                 };
@@ -154,6 +158,7 @@ impl FromRequestParts<AppState> for AuthenticatedUser {
             Some((row.user_id, row.email.clone())),
         );
 
+        record_request_user(parts, row.user_id);
         Ok(AuthenticatedUser {
             user_id: row.user_id,
             email: row.email,
@@ -245,6 +250,7 @@ impl FromRequestParts<AppState> for AuthenticatedDevice {
             return Err(AppError::Unauthorized);
         }
 
+        record_request_user(parts, claims.user_id);
         Ok(AuthenticatedDevice {
             device_id: claims.sub,
             user_id: claims.user_id,
