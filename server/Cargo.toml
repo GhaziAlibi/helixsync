@@ -43,7 +43,7 @@ dashmap = "6"
 futures = "0.3"
 flate2 = "1.1.10"
 age = "0.12"
-croner = "4"
+croner = "5"
 zstd = "0.14"
 
 [dev-dependencies]
