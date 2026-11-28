@@ -13,11 +13,11 @@
   "dependencies": {
     "@noble/ciphers": "^2.4.0",
     "@noble/hashes": "^2.4.0",
-    "i18next": "^27.1.2",
+    "i18next": "^27.2.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
-    "react-i18next": "^18.0.1",
-    "react-router-dom": "^7.18.4"
+    "react-i18next": "^18.0.3",
+    "react-router-dom": "^7.18.6"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.5",
@@ -27,6 +27,6 @@
     "tailwindcss": "^4.3.3",
     "typescript": "^5.6.3",
     "vite": "^8.3.8",
-    "vitest": "^5.1.0"
+    "vitest": "^5.1.1"
   }
 }
